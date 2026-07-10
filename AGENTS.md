@@ -1,145 +1,83 @@
 # AIRTS Repository Instructions
 
-## Project purpose
+## Project
 
 AIRTS is an open-source research prototype for human-in-the-loop,
 language-driven RTS automation.
 
-Before planning or implementing any nontrivial feature, read
-`docs/design.md`. Treat it as the authoritative source for:
+Before substantial work, read `docs/design.md`. It is the authoritative
+source for project behavior, architecture, scope, phases, and non-goals.
 
-- project behavior;
-- research goals;
-- architecture;
-- scope;
-- development phases;
-- explicit non-goals.
+Follow the phase or milestone specified in the current task. Do not add
+later-phase features unless explicitly requested.
 
-The current implementation target is Phase 1 unless the user explicitly
-requests another phase.
+## Environment
 
-Do not copy the entire design specification into this file.
-
-## Repository structure
-
-Important paths:
-
-- `docs/design.md`: product and architecture specification
-- `src/airts/`: application source code
-- `tests/`: automated tests
-- `examples/`: example maps and scenarios
-- `scripts/`: development and experiment scripts
-- `pyproject.toml`: dependencies and Python tool configuration
-
-## Development environment
-
-- Develop and validate AIRTS in WSL2 Ubuntu.
-- Use Python 3.13.
+- Develop and validate AIRTS in WSL2 Ubuntu with Python 3.13.
 - Use the repository-local `.venv`.
-- `pyproject.toml` is the authoritative dependency declaration.
-- Install the project with `.venv/bin/python -m pip install -e ".[dev]"`.
-- Prefer explicit `.venv/bin/...` commands in automated scripts.
-- Do not depend on shell activation inside scripts.
-- Do not use global Python packages.
-- Do not use global Conda environments.
-- Do not run `sudo`, `apt`, or global `pip` unless the user explicitly
-  approves it.
-- Do not install undeclared or speculative packages.
-- Before adding a dependency, explain why the standard library and
-  existing dependencies are insufficient.
-- Never install both `pygame` and `pygame-ce`. AIRTS uses `pygame-ce`.
+- Treat `pyproject.toml` as the source of truth for dependencies.
+- Install the project with:
 
-## Architectural invariants
+  `.venv/bin/python -m pip install -e ".[dev]"`
 
-- The simulation core must not depend on Pygame.
-- The simulation core must not depend on the graphical UI.
-- The simulation core must not depend on LM Studio, MCP, or any language
-  model provider.
-- UI and integration layers may depend on the simulation core, but the
-  simulation core must not depend on them.
-- All human, scripted, UI, and future AI inputs must use shared command
-  and automation interfaces.
+- Do not use global Python, Conda, `sudo`, `apt`, or global `pip` without
+  explicit approval.
+- Do not install undeclared or speculative dependencies.
+- Explain why a new dependency is necessary before adding it.
+- AIRTS uses `pygame-ce`, not `pygame`. Never install both.
+
+## Architecture
+
+- Keep the simulation core independent of Pygame, the UI, LM Studio, MCP,
+  and language-model providers.
+- All control sources must use shared command and automation interfaces.
 - Language-model output must never mutate world state directly.
-- Exact spatial geometry must come from player input or deterministic
-  game logic.
-- The simulation is authoritative for entity existence, movement,
-  pathfinding, resources, visibility, combat, and state transitions.
-- Persistent automations must be serializable and inspectable.
-- Domain logic must be runnable and testable without opening a graphical
+- The simulation is authoritative for geometry, entities, paths,
+  resources, visibility, combat, and state transitions.
+- Core domain logic must run and be testable without opening a graphical
   window.
+- Persistent automations must be serializable and inspectable.
 - Preserve deterministic behavior for the same initial state and random
   seed.
-- Do not introduce later-phase features into the current milestone
-  without explicit approval.
 
-## Engineering principles
+## Working Style
 
-- Fail fast.
-- Do not silently swallow exceptions.
-- Do not add fallback behavior that conceals a real failure.
-- Fix root causes rather than adding narrow symptom-level patches.
-- When available evidence is insufficient, add logging, assertions,
-  tests, or a reproducible case.
-- Do not claim a problem is fixed without verification.
-- Important command, automation, and state transitions must be
-  observable.
-- Avoid broad `except Exception` handlers unless meaningful context is
-  added and the exception is re-raised.
-- Prefer explicit types, dataclasses, enums, and focused modules.
-- Use classes for domain concepts with identity or state.
-- Use functions for stateless transformations and calculations.
-- Avoid factories, registries, inheritance hierarchies, and speculative
-  abstractions unless current complexity clearly requires them.
-- Prefer low coupling and clear dependency direction.
-- Do not fabricate benchmark results, experiment outcomes, test results,
-  or validation evidence.
+Codex may choose module boundaries, classes, functions, data structures,
+and test organization within the requested milestone.
 
-## Codex autonomy
+For substantial tasks:
 
-Codex may choose internal implementation details within the requested
-milestone, including:
+1. Read the relevant documentation and inspect the current code.
+2. Check `git status`.
+3. Present a concise plan before editing.
+4. Identify important assumptions or conflicts with the design.
+5. Implement the approved scope autonomously.
+6. Add or update relevant tests.
+7. Run the required validation.
 
-- module boundaries;
-- classes and functions;
-- internal data structures;
-- helper utilities;
-- test organization.
+Keep changes focused. Do not modify unrelated files or introduce
+speculative abstractions.
 
-Before implementing a substantial milestone, Codex must explain its
-proposed architecture and identify important assumptions.
+Fail fast and fix root causes. Do not silently swallow errors or add
+fallback behavior that conceals failures. Add useful diagnostics when a
+problem cannot be understood from existing evidence.
 
-Do not ask the user to decide every class or helper method when the
-decision can be made safely from `docs/design.md` and existing code.
+Prefer clear types, small focused modules, low coupling, and simple
+solutions over unnecessary factories, registries, or inheritance
+hierarchies.
 
-## Working procedure
+## Git and Generated Files
 
-Before editing:
-
-1. Read `AGENTS.md`.
-2. Read relevant sections of `docs/design.md`.
-3. Inspect the current repository and tests.
-4. Run `git status`.
-5. For a nontrivial task, present a concise implementation plan.
-6. Report assumptions or conflicts with the design before coding.
-
-During implementation:
-
-- Keep changes within the requested milestone.
-- Do not modify unrelated files.
-- Preserve existing public behavior unless the task intentionally changes
-  it.
-- Add or update tests alongside domain behavior.
-- Add structured diagnostics for important failure paths.
-- Keep generated files, caches, logs, model weights, experiment outputs,
-  and `.venv` out of Git.
+- Keep `.venv`, caches, logs, model weights, experiment outputs, and
+  generated runtime files out of Git.
+- Do not use destructive Git commands.
 - Do not create, switch, delete, or rewrite branches or worktrees unless
-  explicitly requested.
-- Do not commit, push, or open a pull request unless explicitly requested.
-- Do not use destructive Git commands without explicit approval.
+  requested.
+- Do not commit, push, or open a pull request unless requested.
 
-## Required validation
+## Validation
 
-Run the relevant checks before declaring a coding task complete:
+Before declaring a coding task complete, run:
 
 - `.venv/bin/ruff check .`
 - `.venv/bin/ruff format --check .`
@@ -147,50 +85,25 @@ Run the relevant checks before declaring a coding task complete:
 - `.venv/bin/python -m pytest`
 - `.venv/bin/python -m pip check`
 
-When application behavior is affected, also run the smallest relevant
-manual or integration test.
+When behavior changes, also run the smallest relevant manual or integration
+test.
 
-Do not claim that validation passed unless the commands were actually
-executed.
+Do not claim that validation passed unless it was actually run. If a check
+cannot run, report the exact failure and what remains unverified.
 
-If validation cannot run, report:
+## Documentation
 
-- the exact command;
-- the complete failure;
-- whether the failure is caused by the environment or implementation;
-- what remains unverified.
+Update relevant documentation when setup, dependencies, architecture,
+user-visible behavior, scope, or commands change.
 
-## Documentation discipline
+Keep `docs/design.md`, `README.md`, `AGENTS.md`, and `pyproject.toml`
+consistent without duplicating the full design specification.
 
-Update documentation in the same change when any of these change:
+## Completion Report
 
-- setup;
-- commands;
-- dependencies;
-- architecture;
-- user-visible behavior;
-- assumptions;
-- project scope;
-- development phase.
+At the end of a task, briefly report:
 
-Keep these files mutually consistent:
-
-- `docs/design.md`
-- `AGENTS.md`
-- `README.md`
-- `pyproject.toml`
-
-When Codex repeatedly makes the same mistake, propose a concise update to
-the nearest relevant `AGENTS.md`.
-
-## Completion report
-
-At the end of each task, report:
-
-1. what changed;
-2. why it changed;
-3. which files changed;
-4. which validation commands were run;
-5. the actual results;
-6. remaining uncertainty;
-7. deliberately deferred work.
+- what changed;
+- important design decisions;
+- validation performed and its results;
+- remaining limitations or uncertainty.

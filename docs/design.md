@@ -2127,23 +2127,6 @@ The initial AIRTS prototype is successful when:
 
 ---
 
-# 37. Immediate Next Step
-
-The next development sequence is:
-
-```text
-1. Save this document as docs/design.md
-2. Create the AIRTS repository in WSL2 Ubuntu 24.04
-3. Create the Python virtual environment
-4. Create a concise repo-level AGENTS.md
-5. Create the initial README.md
-6. Open the repository in Codex
-7. Ask Codex to inspect the design and plan Phase 1
-8. Review the proposed architecture
-9. Allow Codex to implement the bounded vertical slice
-10. Test the result and revise this document using implementation evidence
-```
-
 This document should guide development without prescribing every internal class or method.
 
 Codex should retain meaningful engineering freedom while preserving the architectural principles and research goals defined here.
