@@ -14,9 +14,13 @@ class EventType(StrEnum):
     MOVEMENT_STARTED = "movement_started"
     MOVEMENT_COMPLETED = "movement_completed"
     MOVEMENT_FAILED = "movement_failed"
+    MOVEMENT_BLOCKED = "movement_blocked"
+    PATH_COMPUTED = "path_computed"
+    PATHFINDING_FAILED = "pathfinding_failed"
     AUTOMATION_CREATED = "automation_created"
     AUTOMATION_STATE_CHANGED = "automation_state_changed"
     MANUAL_OVERRIDE = "manual_override"
+    VISIBILITY_CHANGED = "visibility_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +64,9 @@ class EventLog:
         with Path(path).open("w", encoding="utf-8") as stream:
             for event in self._events:
                 stream.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
+
+    def restore(self, events: list[Event]) -> None:
+        expected = list(range(1, len(events) + 1))
+        if [event.sequence for event in events] != expected:
+            raise ValueError("event sequences must be contiguous and start at one")
+        self._events = list(events)

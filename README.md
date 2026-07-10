@@ -1,8 +1,9 @@
 # AIRTS
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
-automation. Phase 1 is a playable, deterministic vertical slice: it has conventional
-spatial controls and one persistent patrol automation, but no language model yet.
+automation. Phase 2 provides a playable deterministic simulation foundation with
+conventional spatial controls and one persistent patrol automation, but no language
+model yet.
 
 The authoritative project scope and architecture are defined in
 [`docs/design.md`](docs/design.md).
@@ -23,12 +24,27 @@ The project uses `pygame-ce`; do not install the separate `pygame` package.
 .venv/bin/python -m airts
 ```
 
-The bundled scenario is a validated 64 × 64 map with six units, roads, a river, and a
-bridge. A custom map using the same JSON format can be supplied with `--map PATH`.
+The bundled scenario is a validated 64 × 64 map with six units, four inert buildings,
+roads, forest, a river, and a bridge. A custom map using the same JSON format can be
+supplied with `--map PATH`.
 Structured events can be written when the application exits:
 
 ```bash
 .venv/bin/python -m airts --event-log events.jsonl
+```
+
+Complete versioned simulation state can be saved and continued:
+
+```bash
+.venv/bin/python -m airts --save-state state.json
+.venv/bin/python -m airts --load-state state.json
+```
+
+Tick-stamped commands can also be captured and deterministically verified:
+
+```bash
+.venv/bin/python -m airts --write-replay replay.json
+.venv/bin/python -m airts --replay replay.json
 ```
 
 ### Controls
@@ -51,12 +67,18 @@ cancel controls. Recent structured events are shown beneath it.
 ## Architecture
 
 The core simulation modules are authoritative and do not import Pygame. Map, geometry,
-entity, command, patrol, and event modules are independently testable. The
-Pygame app converts user input into the same commands used by tests and future control
-sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
+entity, occupancy, pathfinding, visibility, command, patrol, persistence, replay, and
+event modules are independently testable. The Pygame app converts user input into the
+same commands used by tests and future control sources. Simulation advances at a fixed
+10 ticks per second independently of rendering.
 
-Phase 1 movement is straight-line and deterministic. A move stops with an explicit event
-if it reaches impassable terrain; routing around obstacles belongs to Phase 2.
+Movement uses deterministic four-direction A* with terrain costs. Terrain and building
+footprints are hard obstacles, while unit-cell conflicts are resolved deterministically
+during movement. The UI displays the calculated path rather than deriving one itself.
+
+Visibility is stored separately for each owner as visible, explored, or unexplored cells.
+This phase exposes the authoritative information state but deliberately does not hide map
+or entity rendering.
 
 ## Test and validate
 
@@ -74,8 +96,14 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
-## Phase 1 exclusions
+## Phase 2 limitations and exclusions
 
-Combat, economy, fog of war, LM Studio or other AI providers, voice, MCP, scouting
-reports, multiple automation templates, multiplayer, Unity, and a map editor are not
-implemented in this phase.
+Buildings are validated, occupy space, provide vision, and can be inspected, but do not
+yet produce units, generate resources, repair, or fight. Visibility does not yet include
+line-of-sight occlusion, last-known enemy observations, or a fog overlay. Save and replay
+schemas are versioned foundations and do not promise compatibility with future schema
+versions.
+
+Combat, economy, full fog of war, additional automation templates, the Phase 3 lifecycle
+and conflict runtime, LM Studio or other AI providers, voice, MCP, scouting reports,
+multiplayer, Unity, and a map editor are not implemented in this phase.

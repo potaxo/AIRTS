@@ -41,7 +41,7 @@ def test_same_initial_state_and_commands_are_deterministic(
     ]
 
 
-def test_direct_movement_stops_and_logs_when_it_reaches_an_obstacle() -> None:
+def test_unreachable_move_is_rejected_without_partial_movement() -> None:
     game_map = load_map_data(
         {
             "id": "obstacle",
@@ -55,11 +55,12 @@ def test_direct_movement_stops_and_logs_when_it_reaches_an_obstacle() -> None:
     simulation = Simulation(game_map)
 
     result = simulation.execute(MoveCommand(("unit",), Point(5.5, 2.5)))
-    simulation.advance(20)
-
-    assert result.accepted
-    assert simulation.entities["unit"].position.x < 3
-    assert any(event.event_type is EventType.MOVEMENT_FAILED for event in simulation.events.events)
+    assert not result.accepted
+    assert result.reason == "NO_PATH"
+    assert simulation.entities["unit"].position == Point(1.5, 2.5)
+    assert any(
+        event.event_type is EventType.PATHFINDING_FAILED for event in simulation.events.events
+    )
 
 
 def test_invalid_command_does_not_mutate_world_state(
@@ -74,3 +75,22 @@ def test_invalid_command_does_not_mutate_world_state(
     assert result.reason == "UNKNOWN_ENTITY:missing"
     assert simulation.snapshot() == before
     assert simulation.events.events[-1].event_type is EventType.COMMAND_REJECTED
+
+
+def test_building_cannot_receive_a_movement_command() -> None:
+    game_map = load_map_data(
+        {
+            "id": "building",
+            "name": "Building",
+            "width": 10,
+            "height": 10,
+            "terrain": {"default": "grass", "rectangles": []},
+            "entities": [{"id": "factory", "kind": "factory", "position": [2, 2]}],
+        }
+    )
+    simulation = Simulation(game_map)
+
+    result = simulation.execute(MoveCommand(("factory",), Point(8, 8)))
+
+    assert not result.accepted
+    assert result.reason == "ENTITY_NOT_MOVABLE:factory"

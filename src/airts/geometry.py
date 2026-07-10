@@ -136,6 +136,28 @@ def target_to_dict(target: SpatialTarget) -> dict[str, object]:
     return {"type": "polygon", "points": [[point.x, point.y] for point in target.points]}
 
 
+def target_from_dict(raw_data: object) -> SpatialTarget:
+    if not isinstance(raw_data, dict) or not all(isinstance(key, str) for key in raw_data):
+        raise ValueError("spatial target must be an object")
+    target_type = raw_data.get("type")
+    if target_type == "point":
+        point = _point_from_data(raw_data.get("point"), "point")
+        radius = _number_from_data(raw_data.get("radius", 2.0), "radius")
+        return PointTarget(point, radius)
+    if target_type not in {"polyline", "polygon"}:
+        raise ValueError(f"unsupported spatial target type: {target_type}")
+    raw_points = raw_data.get("points")
+    if not isinstance(raw_points, list):
+        raise ValueError("spatial target points must be a list")
+    points = tuple(
+        _point_from_data(raw_point, f"points[{index}]")
+        for index, raw_point in enumerate(raw_points)
+    )
+    if target_type == "polyline":
+        return PolylineTarget(points)
+    return PolygonRegion(points)
+
+
 def _point_on_segment(point: Point, start: Point, end: Point) -> bool:
     cross = (point.y - start.y) * (end.x - start.x) - (point.x - start.x) * (end.y - start.y)
     if abs(cross) > 1e-9:
@@ -216,3 +238,18 @@ def _distance_to_segment(point: Point, start: Point, end: Point) -> float:
     fraction = max(0.0, min(1.0, fraction))
     projection = Point(start.x + fraction * dx, start.y + fraction * dy)
     return point.distance_to(projection)
+
+
+def _point_from_data(raw_data: object, field: str) -> Point:
+    if not isinstance(raw_data, list) or len(raw_data) != 2:
+        raise ValueError(f"{field} must contain two numbers")
+    return Point(
+        _number_from_data(raw_data[0], f"{field}.x"),
+        _number_from_data(raw_data[1], f"{field}.y"),
+    )
+
+
+def _number_from_data(raw_data: object, field: str) -> float:
+    if isinstance(raw_data, bool) or not isinstance(raw_data, int | float):
+        raise ValueError(f"{field} must be a number")
+    return float(raw_data)

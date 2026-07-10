@@ -1,4 +1,4 @@
-"""Pygame debugging and interaction interface for Phase 1."""
+"""Pygame debugging and interaction interface for Phase 2."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from airts.geometry import (
     rectangle_region,
     simplify_freehand,
 )
-from airts.map_model import EntityKind, Terrain
+from airts.map_model import EntityCategory, EntityKind, Terrain
 from airts.simulation import Simulation
 
 
@@ -64,7 +64,7 @@ class AirtsApp:
         pygame.init()
         try:
             screen = pygame.display.set_mode(self.WINDOW_SIZE)
-            pygame.display.set_caption("AIRTS — Phase 1")
+            pygame.display.set_caption("AIRTS — Phase 2")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
@@ -197,9 +197,9 @@ class AirtsApp:
         if start.distance_to(end) < 0.3:
             candidates = sorted(
                 (
-                    (unit.position.distance_to(end), entity_id)
-                    for entity_id, unit in self.simulation.entities.items()
-                    if unit.position.distance_to(end) <= 0.8
+                    (entity.selection_position.distance_to(end), entity_id)
+                    for entity_id, entity in self.simulation.entities.items()
+                    if entity.selection_position.distance_to(end) <= 1.5
                 )
             )
             self.selected_entities = {candidates[0][1]} if candidates else set()
@@ -208,8 +208,9 @@ class AirtsApp:
             top, bottom = sorted((start.y, end.y))
             self.selected_entities = {
                 entity_id
-                for entity_id, unit in self.simulation.entities.items()
-                if left <= unit.position.x <= right and top <= unit.position.y <= bottom
+                for entity_id, entity in self.simulation.entities.items()
+                if left <= entity.selection_position.x <= right
+                and top <= entity.selection_position.y <= bottom
             }
         self.notice = f"Selected {len(self.selected_entities)} unit(s)."
 
@@ -249,6 +250,7 @@ class AirtsApp:
         terrain_colors = {
             Terrain.GRASS: (64, 102, 60),
             Terrain.ROAD: (119, 106, 77),
+            Terrain.FOREST: (43, 78, 48),
             Terrain.WATER: (42, 91, 132),
             Terrain.ROCK: (66, 69, 72),
             Terrain.BRIDGE: (148, 126, 82),
@@ -270,17 +272,36 @@ class AirtsApp:
             EntityKind.SCOUT: (82, 211, 237),
             EntityKind.LIGHT_TANK: (235, 221, 93),
             EntityKind.HEAVY_TANK: (230, 139, 75),
+            EntityKind.FACTORY: (112, 142, 181),
+            EntityKind.REPAIR_HUB: (110, 178, 151),
+            EntityKind.COMMAND_CENTER: (155, 129, 190),
+            EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
         }
-        for entity_id, unit in self.simulation.entities.items():
-            center = self._screen_point(unit.position)
-            radius = max(5, round(self.tile_size * 0.42))
-            pygame.draw.circle(screen, colors[unit.kind], center, radius)
-            if entity_id in self.selected_entities:
-                pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
-            if unit.move_target is not None:
-                pygame.draw.line(
-                    screen, (225, 225, 225), center, self._screen_point(unit.move_target), 1
+        for entity in self.simulation.entities.values():
+            if entity.path:
+                points = [self._screen_point(entity.position)] + [
+                    self._screen_point(point) for point in entity.path
+                ]
+                pygame.draw.lines(screen, (225, 225, 225), False, points, 1)
+        for entity_id, entity in self.simulation.entities.items():
+            center = self._screen_point(entity.selection_position)
+            if entity.category is EntityCategory.BUILDING:
+                width, height = entity.kind.profile.footprint
+                rectangle = pygame.Rect(
+                    round(entity.position.x * self.tile_size),
+                    round(entity.position.y * self.tile_size),
+                    round(width * self.tile_size),
+                    round(height * self.tile_size),
                 )
+                pygame.draw.rect(screen, colors[entity.kind], rectangle, border_radius=3)
+                pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
+                if entity_id in self.selected_entities:
+                    pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
+            else:
+                radius = max(5, round(self.tile_size * 0.42))
+                pygame.draw.circle(screen, colors[entity.kind], center, radius)
+                if entity_id in self.selected_entities:
+                    pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
 
     def _draw_spatial_input(self, screen: pygame.Surface) -> None:
         target = self.active_target
@@ -314,7 +335,7 @@ class AirtsApp:
         pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
         x = self.MAP_PIXELS + 16
         y = 14
-        self._text(screen, "AIRTS — Phase 1", (x, y), (245, 245, 245))
+        self._text(screen, "AIRTS — Phase 2", (x, y), (245, 245, 245))
         y += 28
         self._small_text(
             screen,

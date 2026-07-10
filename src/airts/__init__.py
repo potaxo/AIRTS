@@ -1,4 +1,4 @@
-"""AIRTS first playable vertical slice."""
+"""AIRTS deterministic RTS simulation foundation."""
 
 from airts.map_model import load_example_map
 from airts.simulation import Simulation

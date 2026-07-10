@@ -55,6 +55,8 @@ class PatrolAutomation:
             "status": self.status.value,
             "reason_code": self.reason_code,
             "created_tick": self.created_tick,
+            "waypoints": [[point.x, point.y] for point in self.waypoints],
+            "waypoint_indices": dict(sorted(self.waypoint_indices.items())),
         }
 
 
@@ -83,8 +85,6 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
     passable = tuple(point for point in candidates if game_map.is_passable(point))
     if not passable:
         raise ValueError("patrol target contains no passable waypoints")
-    if not _route_is_passable(passable, game_map):
-        raise ValueError("patrol route crosses impassable terrain")
     return passable
 
 
@@ -109,20 +109,3 @@ def _area_waypoints(region: PolygonRegion, maximum: int = 24) -> tuple[Point, ..
         return tuple(rows)
     step = (len(rows) - 1) / (maximum - 1)
     return tuple(rows[round(index * step)] for index in range(maximum))
-
-
-def _route_is_passable(waypoints: tuple[Point, ...], game_map: GameMap) -> bool:
-    if len(waypoints) == 1:
-        return game_map.is_passable(waypoints[0])
-    for start, end in zip(waypoints, waypoints[1:] + waypoints[:1], strict=True):
-        distance = start.distance_to(end)
-        sample_count = max(1, ceil(distance * 4))
-        for sample in range(sample_count + 1):
-            fraction = sample / sample_count
-            point = Point(
-                start.x + (end.x - start.x) * fraction,
-                start.y + (end.y - start.y) * fraction,
-            )
-            if not game_map.is_passable(point):
-                return False
-    return True

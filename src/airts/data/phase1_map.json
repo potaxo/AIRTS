@@ -1,6 +1,7 @@
 {
   "id": "phase1_crossing",
-  "name": "Phase 1 River Crossing",
+  "version": 2,
+  "name": "Phase 2 River Crossing",
   "width": 64,
   "height": 64,
   "terrain": {
@@ -14,15 +15,20 @@
       [2, 30, 60, 4, "road"],
       [30, 30, 4, 4, "bridge"],
       [8, 10, 2, 15, "road"],
-      [48, 38, 2, 16, "road"]
+      [48, 38, 2, 16, "road"],
+      [38, 10, 10, 8, "forest"]
     ]
   },
   "entities": [
-    {"id": "scout_01", "kind": "scout", "position": [8.5, 28.5]},
-    {"id": "tank_01", "kind": "light_tank", "position": [11.5, 29.5]},
-    {"id": "tank_02", "kind": "light_tank", "position": [11.5, 34.5]},
-    {"id": "tank_03", "kind": "heavy_tank", "position": [8.5, 35.5]},
-    {"id": "scout_02", "kind": "scout", "position": [42.5, 31.5]},
-    {"id": "tank_04", "kind": "heavy_tank", "position": [48.5, 40.5]}
+    {"id": "scout_01", "kind": "scout", "owner": "player", "position": [8.5, 28.5]},
+    {"id": "tank_01", "kind": "light_tank", "owner": "player", "position": [11.5, 29.5]},
+    {"id": "tank_02", "kind": "light_tank", "owner": "player", "position": [11.5, 34.5]},
+    {"id": "tank_03", "kind": "heavy_tank", "owner": "player", "position": [8.5, 35.5]},
+    {"id": "scout_02", "kind": "scout", "owner": "player", "position": [42.5, 31.5]},
+    {"id": "tank_04", "kind": "heavy_tank", "owner": "player", "position": [48.5, 40.5]},
+    {"id": "command_01", "kind": "command_center", "owner": "player", "position": [3, 42]},
+    {"id": "factory_01", "kind": "factory", "owner": "player", "position": [11, 43]},
+    {"id": "repair_01", "kind": "repair_hub", "owner": "player", "position": [19, 42]},
+    {"id": "generator_01", "kind": "resource_generator", "owner": "player", "position": [20, 49]}
   ]
 }
