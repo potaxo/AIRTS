@@ -26,6 +26,10 @@ dev = [
 where = ["src"]
 
 
+[tool.setuptools.package-data]
+airts = ["data/*.json"]
+
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = [

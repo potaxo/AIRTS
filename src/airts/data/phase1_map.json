@@ -1,0 +1,28 @@
+{
+  "id": "phase1_crossing",
+  "name": "Phase 1 River Crossing",
+  "width": 64,
+  "height": 64,
+  "terrain": {
+    "default": "grass",
+    "rectangles": [
+      [0, 0, 64, 2, "rock"],
+      [0, 62, 64, 2, "rock"],
+      [0, 0, 2, 64, "rock"],
+      [62, 0, 2, 64, "rock"],
+      [30, 2, 4, 60, "water"],
+      [2, 30, 60, 4, "road"],
+      [30, 30, 4, 4, "bridge"],
+      [8, 10, 2, 15, "road"],
+      [48, 38, 2, 16, "road"]
+    ]
+  },
+  "entities": [
+    {"id": "scout_01", "kind": "scout", "position": [8.5, 28.5]},
+    {"id": "tank_01", "kind": "light_tank", "position": [11.5, 29.5]},
+    {"id": "tank_02", "kind": "light_tank", "position": [11.5, 34.5]},
+    {"id": "tank_03", "kind": "heavy_tank", "position": [8.5, 35.5]},
+    {"id": "scout_02", "kind": "scout", "position": [42.5, 31.5]},
+    {"id": "tank_04", "kind": "heavy_tank", "position": [48.5, 40.5]}
+  ]
+}
