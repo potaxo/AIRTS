@@ -5,9 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from airts.commands import CreatePatrolCommand, MoveCommand
+from airts.commands import (
+    CreateDefendCommand,
+    CreatePatrolCommand,
+    CreateProductionCommand,
+    MoveCommand,
+)
 from airts.geometry import Point, PointTarget
-from airts.map_model import GameMap
+from airts.map_model import EntityKind, GameMap, load_example_map
 from airts.replay import ReplayData, ReplayError, load_replay, run_replay, save_replay
 from airts.simulation import Simulation
 
@@ -47,3 +52,31 @@ def test_replay_verification_detects_state_divergence(
 
     with pytest.raises(ReplayError, match="final state"):
         run_replay(replay)
+
+
+def test_replay_reproduces_phase3_controller_commands(tmp_path: Path) -> None:
+    simulation = Simulation(load_example_map(), random_seed=23)
+    simulation.execute(CreateDefendCommand(("tank_01",), PointTarget(Point(20, 30), radius=3)))
+    simulation.execute(
+        CreateProductionCommand("factory_01", EntityKind.LIGHT_TANK, 1, Point(20, 35))
+    )
+    simulation.advance(25)
+    destination = tmp_path / "phase3-replay.json"
+
+    save_replay(simulation, destination)
+    replayed = run_replay(load_replay(destination))
+
+    assert replayed.snapshot() == simulation.snapshot()
+
+
+def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
+    simulation = Simulation(load_example_map(), random_seed=29)
+    production = simulation.execute(CreateProductionCommand("factory_01", EntityKind.SCOUT, 2))
+    simulation.remove_entity("factory_01", "DESTROYED")
+    destination = tmp_path / "removal-replay.json"
+
+    save_replay(simulation, destination)
+    replayed = run_replay(load_replay(destination))
+
+    assert replayed.snapshot() == simulation.snapshot()
+    assert replayed.automations[production.automation_id or ""].status.value == "failed"

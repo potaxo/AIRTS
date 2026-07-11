@@ -11,6 +11,7 @@ from pathlib import Path
 class EventType(StrEnum):
     COMMAND_ACCEPTED = "command_accepted"
     COMMAND_REJECTED = "command_rejected"
+    VALIDATION_FAILED = "validation_failed"
     MOVEMENT_STARTED = "movement_started"
     MOVEMENT_COMPLETED = "movement_completed"
     MOVEMENT_FAILED = "movement_failed"
@@ -19,7 +20,13 @@ class EventType(StrEnum):
     PATHFINDING_FAILED = "pathfinding_failed"
     AUTOMATION_CREATED = "automation_created"
     AUTOMATION_STATE_CHANGED = "automation_state_changed"
+    ASSIGNMENT_CHANGED = "assignment_changed"
+    ENTITY_REMOVED = "entity_removed"
     MANUAL_OVERRIDE = "manual_override"
+    PRODUCTION_STARTED = "production_started"
+    PRODUCTION_COMPLETED = "production_completed"
+    REPAIR_STARTED = "repair_started"
+    REPAIR_COMPLETED = "repair_completed"
     VISIBILITY_CHANGED = "visibility_changed"
 
 

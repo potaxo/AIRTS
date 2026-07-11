@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from airts.commands import CreatePatrolCommand
-from airts.geometry import Point, PolylineTarget
-from airts.map_model import GameMap
+from airts.commands import (
+    CreatePatrolCommand,
+    CreateProductionCommand,
+    CreateRepairAndReturnCommand,
+)
+from airts.geometry import Point, PointTarget, PolylineTarget
+from airts.map_model import EntityKind, GameMap, load_example_map
 from airts.persistence import PersistenceError, load_simulation, save_simulation
 from airts.simulation import Simulation
 
@@ -49,3 +53,30 @@ def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:
 
     with pytest.raises(PersistenceError, match="unsupported save schema"):
         load_simulation(destination)
+
+
+def test_phase3_controller_progress_and_suspended_assignments_round_trip(
+    tmp_path: Path,
+) -> None:
+    simulation = Simulation(load_example_map(), random_seed=9)
+    patrol = simulation.execute(CreatePatrolCommand(("scout_01",), PointTarget(Point(20, 28))))
+    simulation.entities["scout_01"].health = 10
+    simulation.execute(
+        CreateRepairAndReturnCommand(("scout_01",), health_threshold=0.5, repair_rate=10)
+    )
+    simulation.execute(CreateProductionCommand("factory_01", EntityKind.SCOUT, 2))
+    simulation.advance(4)
+    destination = tmp_path / "phase3-state.json"
+
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+
+    assert restored.snapshot() == simulation.snapshot()
+    assert restored.suspended_assignments["scout_01"] == patrol.automation_id
+
+    simulation.advance(40)
+    restored.advance(40)
+    assert restored.snapshot() == simulation.snapshot()
+    assert [event.to_dict() for event in restored.events.events] == [
+        event.to_dict() for event in simulation.events.events
+    ]

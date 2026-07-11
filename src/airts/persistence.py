@@ -5,7 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from airts.automations import AutomationStatus, PatrolAutomation
+from airts.automations import (
+    Automation,
+    AutomationKind,
+    AutomationStatus,
+    AutomationTransition,
+    DefendParameters,
+    PatrolParameters,
+    ProductionParameters,
+    ReinforcementParameters,
+    RepairParameters,
+    RepairPhase,
+    transition_is_allowed,
+)
 from airts.commands import command_from_dict, command_to_dict
 from airts.entities import Entity, UnitState
 from airts.events import Event, EventLog, EventType
@@ -21,7 +33,7 @@ from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.simulation import Simulation
 from airts.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v1"
+SAVE_SCHEMA = "airts-save-v2"
 
 
 class PersistenceError(ValueError):
@@ -64,6 +76,9 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation.occupancy = _build_occupancy(simulation)
     simulation.automations = _load_automations(state.get("automations"), simulation)
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
+    simulation.suspended_assignments = _load_suspended_assignments(
+        state.get("suspended_assignments", {}), simulation
+    )
     _validate_assignment_completeness(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
     event_log = EventLog()
@@ -77,12 +92,16 @@ def load_simulation_data(raw_data: object) -> Simulation:
         state.get("next_automation_number"), "state.next_automation_number", minimum=1
     )
     generated_numbers = [
-        int(automation_id.removeprefix("patrol_"))
+        int(automation_id.removeprefix("automation_"))
         for automation_id in simulation.automations
-        if automation_id.startswith("patrol_") and automation_id.removeprefix("patrol_").isdigit()
+        if automation_id.startswith("automation_")
+        and automation_id.removeprefix("automation_").isdigit()
     ]
     if generated_numbers and simulation._next_automation_number <= max(generated_numbers):
         raise PersistenceError("next_automation_number would overwrite an existing automation")
+    simulation._next_entity_number = _integer(
+        state.get("next_entity_number"), "state.next_entity_number", minimum=1
+    )
     simulation._movement_blocked = _string_set(
         state.get("movement_blocked", []), "state.movement_blocked"
     )
@@ -114,7 +133,7 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
         path = [_point(item, "entity.path item") for item in _list(entity.get("path"), "path")]
         path_cost = _number(entity.get("path_cost"), "entity.path_cost", minimum=0.0)
         if kind.profile.category is EntityCategory.BUILDING and (
-            path or move_target is not None or state is not UnitState.IDLE
+            path or move_target is not None or state not in {UnitState.IDLE, UnitState.PRODUCING}
         ):
             raise PersistenceError(f"building {entity_id} cannot have movement state")
         if kind.profile.category is EntityCategory.BUILDING and (
@@ -156,55 +175,251 @@ def _build_occupancy(simulation: Simulation) -> OccupancyGrid:
     return occupancy
 
 
-def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, PatrolAutomation]:
+def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Automation]:
     automations_data = _mapping(raw_data, "state.automations")
-    automations: dict[str, PatrolAutomation] = {}
+    automations: dict[str, Automation] = {}
     for automation_id, raw_automation in automations_data.items():
         data = _mapping(raw_automation, f"automation {automation_id}")
-        if data.get("id") != automation_id or data.get("template") != "patrol":
-            raise PersistenceError(f"invalid patrol automation identity: {automation_id}")
+        if data.get("id") != automation_id:
+            raise PersistenceError(f"invalid automation identity: {automation_id}")
         try:
+            kind = AutomationKind(_string(data.get("template"), "automation.template"))
             status = AutomationStatus(_string(data.get("status"), "automation.status"))
-            target = target_from_dict(data.get("target"))
         except ValueError as error:
             raise PersistenceError(f"invalid automation {automation_id}: {error}") from error
         entity_ids = _string_list(data.get("entity_ids"), "automation.entity_ids")
-        if any(
-            entity_id not in simulation.entities or not simulation.entities[entity_id].is_movable
-            for entity_id in entity_ids
-        ):
+        if any(entity_id not in simulation.entities for entity_id in entity_ids):
             raise PersistenceError(f"automation {automation_id} references an invalid entity")
-        waypoints = tuple(
-            _point(item, "automation.waypoint")
-            for item in _list(data.get("waypoints"), "automation.waypoints")
+        created_tick = _past_tick(
+            data.get("created_tick"), "automation.created_tick", simulation.tick
         )
-        if not waypoints:
-            raise PersistenceError(f"automation {automation_id} has no waypoints")
-        raw_indices = _mapping(data.get("waypoint_indices"), "automation.waypoint_indices")
-        if set(raw_indices) != set(entity_ids):
-            raise PersistenceError(
-                f"automation {automation_id} waypoint indices do not match its entities"
-            )
-        indices = {
-            entity_id: _integer(raw_indices.get(entity_id), "waypoint index", minimum=0)
-            for entity_id in entity_ids
-        }
-        if any(index >= len(waypoints) for index in indices.values()):
-            raise PersistenceError(f"automation {automation_id} has an invalid waypoint index")
-        automations[automation_id] = PatrolAutomation(
+        modified_tick = _past_tick(
+            data.get("modified_tick"), "automation.modified_tick", simulation.tick
+        )
+        if modified_tick < created_tick:
+            raise PersistenceError("automation modified_tick cannot precede created_tick")
+        parameters = _load_automation_parameters(
+            kind, data.get("parameters"), entity_ids, simulation
+        )
+        history = _load_transition_history(data.get("transition_history"), status, simulation.tick)
+        automations[automation_id] = Automation(
             automation_id=automation_id,
             title=_string(data.get("title"), "automation.title"),
-            target=target,
+            kind=kind,
+            owner_id=_string(data.get("owner_id"), "automation.owner_id"),
+            priority=_integer(data.get("priority"), "automation.priority", minimum=-100),
+            created_tick=created_tick,
+            modified_tick=modified_tick,
+            original_instruction=_optional_string(
+                data.get("original_instruction"), "automation.original_instruction"
+            ),
             entity_ids=entity_ids,
-            waypoints=waypoints,
-            created_tick=_past_tick(
-                data.get("created_tick"), "automation.created_tick", simulation.tick
+            parameters=parameters,
+            creation_source=_string(data.get("creation_source"), "automation.creation_source"),
+            model_provider=_nullable_string(
+                data.get("model_provider"), "automation.model_provider"
             ),
             status=status,
             reason_code=_string(data.get("reason_code"), "automation.reason_code"),
-            waypoint_indices=indices,
+            transition_history=history,
         )
+        if automations[automation_id].priority > 100:
+            raise PersistenceError("automation priority cannot exceed 100")
+    _validate_automation_links(automations, simulation)
     return automations
+
+
+def _validate_automation_links(automations: dict[str, Automation], simulation: Simulation) -> None:
+    for automation in automations.values():
+        if automation.transition_history[-1].reason_code != automation.reason_code:
+            raise PersistenceError("automation reason does not match transition history")
+        if automation.transition_history[-1].tick != automation.modified_tick:
+            raise PersistenceError("automation modified tick does not match transition history")
+        if automation.transition_history[0].tick != automation.created_tick:
+            raise PersistenceError("automation created tick does not match transition history")
+        if any(
+            simulation.entities[entity_id].owner_id != automation.owner_id
+            for entity_id in automation.entity_ids
+        ):
+            raise PersistenceError("automation references an entity owned by another player")
+        if isinstance(automation.parameters, ReinforcementParameters):
+            target = automations.get(automation.parameters.target_automation_id)
+            if target is None or target.owner_id != automation.owner_id:
+                raise PersistenceError("reinforcement references an invalid target automation")
+        elif isinstance(automation.parameters, RepairParameters):
+            for building_id in automation.parameters.destinations.values():
+                building = simulation.entities.get(building_id)
+                if building is None or building.kind not in {
+                    EntityKind.REPAIR_HUB,
+                    EntityKind.FACTORY,
+                    EntityKind.COMMAND_CENTER,
+                }:
+                    raise PersistenceError("repair references an invalid destination")
+            for resume_id in automation.parameters.resume_automation_ids.values():
+                if resume_id is not None and resume_id not in automations:
+                    raise PersistenceError("repair references an invalid resume automation")
+
+
+def _load_automation_parameters(
+    kind: AutomationKind,
+    raw_data: object,
+    entity_ids: list[str],
+    simulation: Simulation,
+) -> (
+    PatrolParameters
+    | DefendParameters
+    | ProductionParameters
+    | ReinforcementParameters
+    | RepairParameters
+):
+    data = _mapping(raw_data, "automation.parameters")
+    if kind is AutomationKind.PATROL:
+        try:
+            target = target_from_dict(data.get("target"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid patrol target: {error}") from error
+        waypoints = _points(data.get("waypoints"), "patrol.waypoints")
+        if not waypoints:
+            raise PersistenceError("patrol requires waypoints")
+        indices_data = _mapping(data.get("waypoint_indices"), "patrol.waypoint_indices")
+        if set(indices_data) != set(entity_ids):
+            raise PersistenceError("patrol waypoint indices must match its entities")
+        indices = {
+            entity_id: _integer(indices_data[entity_id], "waypoint index", minimum=0)
+            for entity_id in entity_ids
+        }
+        if any(index >= len(waypoints) for index in indices.values()):
+            raise PersistenceError("patrol has an invalid waypoint index")
+        return PatrolParameters(target, waypoints, indices)
+    if kind is AutomationKind.DEFEND:
+        try:
+            target = target_from_dict(data.get("target"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid defend target: {error}") from error
+        stations_data = _mapping(data.get("stations"), "defend.stations")
+        if set(stations_data) != set(entity_ids):
+            raise PersistenceError("defend stations must match its entities")
+        return DefendParameters(
+            target,
+            {
+                entity_id: _point(stations_data[entity_id], "defend station")
+                for entity_id in entity_ids
+            },
+        )
+    if kind is AutomationKind.PRODUCTION:
+        try:
+            unit_kind = EntityKind(_string(data.get("unit_kind"), "production.unit_kind"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid production kind: {error}") from error
+        if unit_kind.profile.category is not EntityCategory.UNIT:
+            raise PersistenceError("production unit_kind must be a unit")
+        factory_id = _string(data.get("factory_id"), "production.factory_id")
+        if (
+            factory_id not in simulation.entities
+            or simulation.entities[factory_id].kind is not EntityKind.FACTORY
+        ):
+            raise PersistenceError("production references an invalid factory")
+        rally_data = data.get("rally_point")
+        target_count = _integer(data.get("target_count"), "production.target_count", minimum=1)
+        produced_count = _integer(
+            data.get("produced_count"), "production.produced_count", minimum=0
+        )
+        if produced_count > target_count:
+            raise PersistenceError("production count exceeds target")
+        return ProductionParameters(
+            factory_id=factory_id,
+            unit_kind=unit_kind,
+            target_count=target_count,
+            build_ticks=_integer(data.get("build_ticks"), "production.build_ticks", minimum=1),
+            rally_point=None if rally_data is None else _point(rally_data, "rally_point"),
+            produced_count=produced_count,
+            progress_ticks=_integer(
+                data.get("progress_ticks"), "production.progress_ticks", minimum=0
+            ),
+            produced_entity_ids=_string_list(
+                data.get("produced_entity_ids"), "production.produced_entity_ids"
+            ),
+        )
+    if kind is AutomationKind.REINFORCEMENT:
+        return ReinforcementParameters(
+            target_automation_id=_string(
+                data.get("target_automation_id"), "reinforcement.target_automation_id"
+            ),
+            candidate_entity_ids=_string_list(
+                data.get("candidate_entity_ids"), "reinforcement.candidate_entity_ids"
+            ),
+            minimum_units=_integer(
+                data.get("minimum_units"), "reinforcement.minimum_units", minimum=1
+            ),
+            transferred_entity_ids=_string_list(
+                data.get("transferred_entity_ids"), "reinforcement.transferred_entity_ids"
+            ),
+        )
+    destinations = _string_mapping(data.get("destinations"), "repair.destinations")
+    resume_ids = _nullable_string_mapping(
+        data.get("resume_automation_ids"), "repair.resume_automation_ids"
+    )
+    phase_data = _mapping(data.get("phases"), "repair.phases")
+    if (
+        set(destinations) != set(entity_ids)
+        or set(resume_ids) != set(entity_ids)
+        or set(phase_data) != set(entity_ids)
+    ):
+        raise PersistenceError("repair parameter entities do not match automation entities")
+    try:
+        phases = {
+            entity_id: RepairPhase(_string(phase_data[entity_id], "repair phase"))
+            for entity_id in entity_ids
+        }
+    except ValueError as error:
+        raise PersistenceError(f"invalid repair phase: {error}") from error
+    health_threshold = _number(data.get("health_threshold"), "repair.health_threshold", minimum=0.0)
+    if not 0 < health_threshold <= 1:
+        raise PersistenceError("repair health_threshold must be greater than zero and at most one")
+    return RepairParameters(
+        health_threshold=health_threshold,
+        repair_rate=_integer(data.get("repair_rate"), "repair.repair_rate", minimum=1),
+        destinations=destinations,
+        resume_automation_ids=resume_ids,
+        phases=phases,
+    )
+
+
+def _load_transition_history(
+    raw_data: object, status: AutomationStatus, current_tick: int
+) -> list[AutomationTransition]:
+    history: list[AutomationTransition] = []
+    previous_tick = 0
+    for index, raw_transition in enumerate(_list(raw_data, "transition_history")):
+        data = _mapping(raw_transition, "transition")
+        tick = _past_tick(data.get("tick"), "transition.tick", current_tick)
+        if tick < previous_tick:
+            raise PersistenceError("transition ticks must be ordered")
+        previous_tick = tick
+        previous_data = data.get("previous")
+        try:
+            previous = (
+                None
+                if previous_data is None
+                else AutomationStatus(_string(previous_data, "transition.previous"))
+            )
+            current = AutomationStatus(_string(data.get("current"), "transition.current"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid transition status: {error}") from error
+        if index == 0 and previous is not None:
+            raise PersistenceError("initial transition must not have a previous status")
+        if history and previous is not history[-1].current:
+            raise PersistenceError("transition history is discontinuous")
+        if previous is not None and not transition_is_allowed(previous, current):
+            raise PersistenceError("transition history contains an illegal transition")
+        history.append(
+            AutomationTransition(
+                tick, previous, current, _string(data.get("reason_code"), "reason_code")
+            )
+        )
+    if not history or history[-1].current is not status:
+        raise PersistenceError("transition history does not match automation status")
+    return history
 
 
 def _load_assignments(raw_data: object, simulation: Simulation) -> dict[str, str]:
@@ -218,10 +433,29 @@ def _load_assignments(raw_data: object, simulation: Simulation) -> dict[str, str
             entity_id not in simulation.entities
             or automation is None
             or entity_id not in automation.entity_ids
+            or automation.status.terminal
         ):
             raise PersistenceError(f"invalid assignment: {entity_id} -> {automation_id}")
         assignments[entity_id] = automation_id
     return assignments
+
+
+def _load_suspended_assignments(raw_data: object, simulation: Simulation) -> dict[str, str]:
+    data = _string_mapping(raw_data, "state.suspended_assignments")
+    for entity_id, automation_id in data.items():
+        current_id = simulation.assignments.get(entity_id)
+        current = simulation.automations.get(current_id or "")
+        suspended = simulation.automations.get(automation_id)
+        if (
+            entity_id not in simulation.entities
+            or current is None
+            or current.kind is not AutomationKind.REPAIR_AND_RETURN
+            or suspended is None
+            or suspended.status.terminal
+            or entity_id not in suspended.entity_ids
+        ):
+            raise PersistenceError(f"invalid suspended assignment for {entity_id}")
+    return data
 
 
 def _validate_assignment_completeness(simulation: Simulation) -> None:
@@ -231,10 +465,21 @@ def _validate_assignment_completeness(simulation: Simulation) -> None:
             for entity_id, automation_id in simulation.assignments.items()
             if automation_id == automation.automation_id
         }
-        expected = set(automation.entity_ids)
-        if automation.status is AutomationStatus.CANCELED:
+        suspended = {
+            entity_id
+            for entity_id, automation_id in simulation.suspended_assignments.items()
+            if automation_id == automation.automation_id
+        }
+        expected = set(automation.entity_ids).difference(suspended)
+        if automation.status.terminal:
             if assigned:
-                raise PersistenceError("canceled automations cannot retain assignments")
+                raise PersistenceError("terminal automations cannot retain assignments")
+        elif automation.kind is AutomationKind.REINFORCEMENT:
+            if assigned:
+                raise PersistenceError("reinforcement automations do not own entities")
+        elif automation.status is AutomationStatus.PAUSED:
+            if not assigned.issubset(expected):
+                raise PersistenceError("paused automation assignments are invalid")
         elif assigned != expected:
             raise PersistenceError(
                 f"automation {automation.automation_id} assignments are incomplete"
@@ -355,6 +600,18 @@ def _string(value: object, field: str) -> str:
     return value
 
 
+def _optional_string(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise PersistenceError(f"{field} must be a string")
+    return value
+
+
+def _nullable_string(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _string(value, field)
+
+
 def _string_set(value: object, field: str) -> set[str]:
     return set(_string_list(value, field))
 
@@ -369,6 +626,19 @@ def _string_list(value: object, field: str) -> list[str]:
             raise PersistenceError(f"{field} cannot contain duplicates")
         result.append(item)
     return result
+
+
+def _string_mapping(value: object, field: str) -> dict[str, str]:
+    data = _mapping(value, field)
+    result: dict[str, str] = {}
+    for key, item in data.items():
+        result[key] = _string(item, f"{field}.{key}")
+    return result
+
+
+def _nullable_string_mapping(value: object, field: str) -> dict[str, str | None]:
+    data = _mapping(value, field)
+    return {key: _nullable_string(item, f"{field}.{key}") for key, item in data.items()}
 
 
 def _integer(value: object, field: str, minimum: int | None = None) -> int:
@@ -400,3 +670,7 @@ def _point(value: object, field: str) -> Point:
     if len(items) != 2:
         raise PersistenceError(f"{field} must contain x and y")
     return Point(_number(items[0], f"{field}.x"), _number(items[1], f"{field}.y"))
+
+
+def _points(value: object, field: str) -> tuple[Point, ...]:
+    return tuple(_point(item, field) for item in _list(value, field))

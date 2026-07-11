@@ -1,4 +1,4 @@
-"""AIRTS deterministic RTS simulation foundation."""
+"""AIRTS deterministic RTS command and automation runtime."""
 
 from airts.map_model import load_example_map
 from airts.simulation import Simulation

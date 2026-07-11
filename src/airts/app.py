@@ -1,4 +1,4 @@
-"""Pygame debugging and interaction interface for Phase 2."""
+"""Pygame debugging and interaction interface for Phase 3."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import pygame
 from airts.automations import AutomationStatus
 from airts.commands import (
     CancelAutomationCommand,
+    CreateDefendCommand,
     CreatePatrolCommand,
+    CreateProductionCommand,
+    CreateRepairAndReturnCommand,
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
@@ -64,7 +67,7 @@ class AirtsApp:
         pygame.init()
         try:
             screen = pygame.display.set_mode(self.WINDOW_SIZE)
-            pygame.display.set_caption("AIRTS — Phase 2")
+            pygame.display.set_caption("AIRTS — Phase 3")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
@@ -120,6 +123,12 @@ class AirtsApp:
             self.notice = "Line target ready. Press A to create a patrol."
         elif key == pygame.K_a:
             self._create_patrol()
+        elif key == pygame.K_d:
+            self._create_defend()
+        elif key == pygame.K_p:
+            self._create_production()
+        elif key == pygame.K_r:
+            self._create_repair()
         elif key == pygame.K_SPACE:
             self.paused = not self.paused
             self.notice = "Simulation paused." if self.paused else "Simulation resumed."
@@ -225,6 +234,41 @@ class AirtsApp:
             self.notice = f"Created {result.automation_id}."
         else:
             self.notice = result.reason
+
+    def _create_defend(self) -> None:
+        if self.active_target is None:
+            self.notice = "Draw a spatial target before creating a defense automation."
+            return
+        result = self.simulation.execute(
+            CreateDefendCommand(tuple(sorted(self.selected_entities)), self.active_target)
+        )
+        self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
+
+    def _create_production(self) -> None:
+        factories = [
+            entity_id
+            for entity_id in sorted(self.selected_entities)
+            if self.simulation.entities[entity_id].kind is EntityKind.FACTORY
+        ]
+        if len(factories) != 1:
+            self.notice = "Select exactly one factory for production."
+            return
+        rally_point = (
+            self.active_target.point if isinstance(self.active_target, PointTarget) else None
+        )
+        result = self.simulation.execute(
+            CreateProductionCommand(factories[0], EntityKind.LIGHT_TANK, 3, rally_point)
+        )
+        self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
+
+    def _create_repair(self) -> None:
+        units = tuple(
+            entity_id
+            for entity_id in sorted(self.selected_entities)
+            if self.simulation.entities[entity_id].is_movable
+        )
+        result = self.simulation.execute(CreateRepairAndReturnCommand(units))
+        self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
 
     def _handle_panel_click(self, position: tuple[int, int]) -> None:
         for rectangle, action, automation_id in self._automation_buttons:
@@ -335,7 +379,7 @@ class AirtsApp:
         pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
         x = self.MAP_PIXELS + 16
         y = 14
-        self._text(screen, "AIRTS — Phase 2", (x, y), (245, 245, 245))
+        self._text(screen, "AIRTS — Phase 3", (x, y), (245, 245, 245))
         y += 28
         self._small_text(
             screen,
@@ -352,7 +396,9 @@ class AirtsApp:
         y += 18
         self._small_text(screen, "4 Rectangle  5 Freehand", (x, y), (205, 210, 218))
         y += 18
-        self._small_text(screen, "A Patrol  Right-click Move  Space Pause", (x, y), (205, 210, 218))
+        self._small_text(screen, "A Patrol  D Defend  P Produce  R Repair", (x, y), (205, 210, 218))
+        y += 18
+        self._small_text(screen, "Right-click Move  Space Pause", (x, y), (205, 210, 218))
         y += 28
         self._text(screen, "Automations", (x, y), (245, 245, 245))
         y += 25
@@ -360,10 +406,18 @@ class AirtsApp:
         for automation in self.simulation.automations.values():
             self._small_text(screen, automation.title, (x, y), (232, 232, 232))
             y += 17
-            summary = f"{automation.automation_id} | {automation.status.value} | {len(automation.entity_ids)} units"
+            summary = (
+                f"{automation.automation_id} | {automation.kind.value} | "
+                f"{automation.status.value} | {len(automation.entity_ids)} entities"
+            )
             self._small_text(screen, summary, (x, y), (153, 178, 198))
             y += 21
-            if automation.status is not AutomationStatus.CANCELED:
+            if automation.status in {
+                AutomationStatus.ACTIVE,
+                AutomationStatus.WAITING,
+                AutomationStatus.BLOCKED,
+                AutomationStatus.PAUSED,
+            }:
                 action = "resume" if automation.status is AutomationStatus.PAUSED else "pause"
                 toggle = pygame.Rect(x, y, 75, 24)
                 cancel = pygame.Rect(x + 84, y, 75, 24)

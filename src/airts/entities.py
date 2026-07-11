@@ -12,7 +12,13 @@ from airts.map_model import Cell, EntityCategory, EntityKind
 class UnitState(StrEnum):
     IDLE = "idle"
     MOVING = "moving"
+    HOLDING = "holding"
     PATROLLING = "patrolling"
+    DEFENDING = "defending"
+    WAITING = "waiting"
+    RETURNING = "returning"
+    REPAIRING = "repairing"
+    PRODUCING = "producing"
 
 
 @dataclass(slots=True)

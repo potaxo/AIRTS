@@ -1,9 +1,9 @@
 # AIRTS
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
-automation. Phase 2 provides a playable deterministic simulation foundation with
-conventional spatial controls and one persistent patrol automation, but no language
-model yet.
+automation. Phase 3 adds a deterministic command and automation runtime with validated
+ownership, lifecycle, priorities, conflicts, production, reinforcement, and
+repair-and-return behavior, but no language model yet.
 
 The authoritative project scope and architecture are defined in
 [`docs/design.md`](docs/design.md).
@@ -24,7 +24,7 @@ The project uses `pygame-ce`; do not install the separate `pygame` package.
 .venv/bin/python -m airts
 ```
 
-The bundled scenario is a validated 64 × 64 map with six units, four inert buildings,
+The bundled scenario is a validated 64 × 64 map with six units, four buildings,
 roads, forest, a river, and a bridge. A custom map using the same JSON format can be
 supplied with `--map PATH`.
 Structured events can be written when the application exits:
@@ -57,20 +57,36 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `4` | Drag a rectangular patrol area |
 | `5` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
+| `D` | Create a defend automation from selected units and current target |
+| `P` | Produce three light tanks from exactly one selected factory |
+| `R` | Repair selected units and return them to suspended assignments |
 | Right-click | Manually move selected units and detach them from automation |
 | `Space` | Pause or resume simulation time |
 | `Esc` | Clear the current spatial target or draft |
 
-The automation panel shows status and assigned-unit counts and provides pause/resume and
-cancel controls. Recent structured events are shown beneath it.
+The automation panel shows the tagged template, lifecycle status, and assigned-entity
+count and provides pause/resume and cancel controls. Recent structured events are shown
+beneath it. Reinforcement and fully parameterized schemas are available through the
+shared Python command interface; richer editing controls belong to Phase 4.
 
 ## Architecture
 
 The core simulation modules are authoritative and do not import Pygame. Map, geometry,
-entity, occupancy, pathfinding, visibility, command, patrol, persistence, replay, and
-event modules are independently testable. The Pygame app converts user input into the
-same commands used by tests and future control sources. Simulation advances at a fixed
-10 ticks per second independently of rendering.
+entity, occupancy, pathfinding, visibility, command, automation, validation, control,
+persistence, replay, and event modules are independently testable. The Pygame app
+converts user input into the same tagged commands used by tests and future control
+sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
+
+Every automation follows an explicit lifecycle from proposal and validation through
+active, waiting, paused, blocked, and terminal states. Control precedence is direct
+human input, emergency repair, explicit priority, and then the newer equal-priority
+instruction. Units have one current assignment and may retain one suspended assignment
+while repairing.
+
+Factories produce units after fixed build times without resource costs. Defend behavior
+maintains grounded positions without combat, reinforcement transfers eligible units to
+another automation, and repair selects destinations by repair-hub/factory/command-center
+order and valid path cost before restoring the original assignment.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
 footprints are hard obstacles, while unit-cell conflicts are resolved deterministically
@@ -96,14 +112,14 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
-## Phase 2 limitations and exclusions
+## Phase 3 limitations and exclusions
 
-Buildings are validated, occupy space, provide vision, and can be inspected, but do not
-yet produce units, generate resources, repair, or fight. Visibility does not yet include
-line-of-sight occlusion, last-known enemy observations, or a fog overlay. Save and replay
-schemas are versioned foundations and do not promise compatibility with future schema
-versions.
+Production is intentionally cost-free and repair uses fixed-rate healing. Resources,
+production costs, combat damage, attacks, targeting, and economic behavior belong to
+Phase 5. Defend controls positioning only. Visibility does not yet include line-of-sight
+occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are
+versioned and reject older incompatible schemas.
 
-Combat, economy, full fog of war, additional automation templates, the Phase 3 lifecycle
-and conflict runtime, LM Studio or other AI providers, voice, MCP, scouting reports,
-multiplayer, Unity, and a map editor are not implemented in this phase.
+Combat, economy, full fog of war, Phase 4 editing features, LM Studio or other AI
+providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
+implemented in this phase.
