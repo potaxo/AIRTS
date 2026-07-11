@@ -32,6 +32,7 @@ from airts.commands import (
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
+    DeleteRegionCommand,
     EditSpatialReferenceCommand,
     HoldPositionCommand,
     ModifyAutomationCommand,
@@ -96,6 +97,7 @@ class Simulation:
         self._next_entity_number = 1
         self._command_history: list[dict[str, object]] = []
         self._movement_blocked: set[str] = set()
+        self._blocked_ticks: dict[str, int] = {}
         self._update_visibility()
 
     @property
@@ -108,6 +110,8 @@ class Simulation:
             return self._create_spatial_reference(command)
         if isinstance(command, EditSpatialReferenceCommand):
             return self._edit_spatial_reference(command)
+        if isinstance(command, DeleteRegionCommand):
+            return self._delete_region(command)
         if isinstance(command, RenameRegionCommand):
             return self._rename_region(command)
         if isinstance(command, SetSelectionCommand):
@@ -147,6 +151,7 @@ class Simulation:
             raise ValueError("tick count cannot be negative")
         for _ in range(ticks):
             self.tick += 1
+            self._generate_income()
             self._drive_automations()
             self._move_entities()
             self._drive_retreats()
@@ -241,6 +246,7 @@ class Simulation:
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
             "movement_blocked": sorted(self._movement_blocked),
+            "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
         }
 
     def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
@@ -302,6 +308,49 @@ class Simulation:
             name=reference.name,
         )
         return self._accept("rename_region", reference_id=reference.reference_id)
+
+    def _delete_region(self, command: DeleteRegionCommand) -> CommandResult:
+        reference = self.spatial.references.get(command.reference_id)
+        if reference is None:
+            return self._reject_validation(
+                "delete_region",
+                ValidationFailure(
+                    ValidationPhase.REFERENCE, "UNKNOWN_SPATIAL_REFERENCE", "reference_id"
+                ),
+            )
+        if reference.kind is not SpatialKind.REGION:
+            return self._reject_validation(
+                "delete_region",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "ONLY_REGIONS_CAN_BE_DELETED", "reference_id"
+                ),
+            )
+        affected = [
+            automation
+            for automation in self.automations.values()
+            if not automation.status.terminal
+            and isinstance(automation.parameters, PatrolParameters | DefendParameters)
+            and automation.parameters.target == reference.geometry
+        ]
+        for automation in affected:
+            self._cancel(automation.automation_id, command.owner_id)
+        self.spatial.delete_region(command.reference_id)
+        self.selection = GroundingSelection(
+            self.selection.entity_ids,
+            self.selection.point_ids,
+            self.selection.route_ids,
+            tuple(item for item in self.selection.region_ids if item != command.reference_id),
+        )
+        self.events.record(
+            self.tick,
+            EventType.SPATIAL_REFERENCE_DELETED,
+            command.reference_id,
+            affected_automation_ids=[item.automation_id for item in affected],
+        )
+        reason = "REGION_DELETED"
+        if affected:
+            reason += ":CANCELED:" + ",".join(item.automation_id for item in affected)
+        return CommandResult(True, reason, reference_id=command.reference_id)
 
     def _set_selection(self, command: SetSelectionCommand) -> CommandResult:
         if len(set(command.entity_ids)) != len(command.entity_ids):
@@ -848,7 +897,11 @@ class Simulation:
             command.priority,
             command.original_instruction,
             list(command.generator_ids),
-            EconomyParameters(list(command.generator_ids), command.target_resources),
+            EconomyParameters(
+                list(command.generator_ids),
+                command.target_resources,
+                starting_resources=self.resources.get(command.owner_id, 0),
+            ),
         )
         failure = self._validate_claims(automation, command.generator_ids)
         if failure is not None:
@@ -1051,6 +1104,10 @@ class Simulation:
 
     def _drive_economy(self, automation: Automation) -> None:
         parameters = _economy_parameters(automation)
+        parameters.collected = max(
+            parameters.collected,
+            self.resources.get(automation.owner_id, 0) - parameters.starting_resources,
+        )
         if self.resources.get(automation.owner_id, 0) >= parameters.target_resources:
             self._transition(automation, AutomationStatus.COMPLETED, "RESOURCE_TARGET_REACHED")
             self._release_automation(automation)
@@ -1064,20 +1121,25 @@ class Simulation:
         if not active:
             self._transition(automation, AutomationStatus.FAILED, "NO_RESOURCE_GENERATORS")
             return
-        if self.tick % parameters.income_cycle_ticks:
+
+    def _generate_income(self) -> None:
+        if self.tick % 10:
             return
-        amount = parameters.income_per_cycle * len(active)
-        self.resources[automation.owner_id] = self.resources.get(automation.owner_id, 0) + amount
-        parameters.collected += amount
-        self.events.record(
-            self.tick,
-            EventType.RESOURCE_CHANGED,
-            automation.owner_id,
-            amount=amount,
-            balance=self.resources[automation.owner_id],
-            reason="GENERATOR_INCOME",
-            automation_id=automation.automation_id,
-        )
+        generators: dict[str, int] = {}
+        for entity in self.entities.values():
+            if entity.kind is EntityKind.RESOURCE_GENERATOR:
+                generators[entity.owner_id] = generators.get(entity.owner_id, 0) + 1
+        for owner_id, count in sorted(generators.items()):
+            amount = 10 * count
+            self.resources[owner_id] = self.resources.get(owner_id, 0) + amount
+            self.events.record(
+                self.tick,
+                EventType.RESOURCE_CHANGED,
+                owner_id,
+                amount=amount,
+                balance=self.resources[owner_id],
+                reason="GENERATOR_INCOME",
+            )
 
     def _drive_reinforcement(self, automation: Automation) -> None:
         parameters = _reinforcement_parameters(automation)
@@ -1305,6 +1367,7 @@ class Simulation:
             try:
                 self.occupancy.move(entity_id, self._cells_at(entity, next_position))
             except OccupancyError as error:
+                self._blocked_ticks[entity_id] = self._blocked_ticks.get(entity_id, 0) + 1
                 if entity_id not in self._movement_blocked:
                     self.events.record(
                         self.tick,
@@ -1314,8 +1377,11 @@ class Simulation:
                         evidence=str(error),
                     )
                     self._movement_blocked.add(entity_id)
+                if self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND:
+                    self._recover_blocked_entity(entity)
                 continue
             self._movement_blocked.discard(entity_id)
+            self._blocked_ticks.pop(entity_id, None)
             entity.position = next_position
             if arrived:
                 entity.path.pop(0)
@@ -1329,6 +1395,48 @@ class Simulation:
                         position=[entity.position.x, entity.position.y],
                         assignment=self.assignments.get(entity_id),
                     )
+
+    def _recover_blocked_entity(self, entity: Entity) -> None:
+        """Choose a deterministic free sidestep, then replan to the original target."""
+
+        destination = entity.move_target
+        if destination is None:
+            return
+        origin_x, origin_y = int(entity.position.x), int(entity.position.y)
+        candidates: list[Point] = []
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)):
+            point = Point(origin_x + dx + 0.5, origin_y + dy + 0.5)
+            if not self.game_map.is_passable(point):
+                continue
+            cells = self._cells_at(entity, point)
+            if any(self.occupancy.occupants(cell) - {entity.entity_id} for cell in cells):
+                continue
+            candidates.append(point)
+        if not candidates:
+            return
+        clockwise = sum(ord(character) for character in entity.entity_id) % 2
+        candidates.sort(
+            key=lambda point: (
+                point.distance_to(destination),
+                point.y if clockwise else -point.y,
+                point.x if clockwise else -point.x,
+            )
+        )
+        sidestep = candidates[0]
+        try:
+            path = find_path(self.game_map, sidestep, destination, self._building_cells())
+        except PathfindingError:
+            return
+        entity.path = [sidestep, *path.waypoints]
+        entity.path_cost = entity.position.distance_to(sidestep) + path.cost
+        self._blocked_ticks[entity.entity_id] = 0
+        self.events.record(
+            self.tick,
+            EventType.PATH_COMPUTED,
+            entity.entity_id,
+            reason="STUCK_REPLAN",
+            target=[destination.x, destination.y],
+        )
 
     def _activate(
         self,

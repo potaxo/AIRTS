@@ -146,6 +146,12 @@ class RenameRegionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteRegionCommand:
+    reference_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class SetSelectionCommand:
     entity_ids: tuple[str, ...] = ()
     point_ids: tuple[str, ...] = ()
@@ -183,6 +189,7 @@ Command = (
     | CreateSpatialReferenceCommand
     | EditSpatialReferenceCommand
     | RenameRegionCommand
+    | DeleteRegionCommand
     | SetSelectionCommand
     | ModifyAutomationCommand
 )
@@ -216,6 +223,12 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "type": "rename_region",
             "reference_id": command.reference_id,
             "name": command.name,
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, DeleteRegionCommand):
+        return {
+            "type": "delete_region",
+            "reference_id": command.reference_id,
             "owner_id": command.owner_id,
         }
     if isinstance(command, SetSelectionCommand):
@@ -358,6 +371,8 @@ def command_from_dict(raw_data: object) -> Command:
             _string(data.get("name"), "name"),
             owner_id,
         )
+    if command_type == "delete_region":
+        return DeleteRegionCommand(_string(data.get("reference_id"), "reference_id"), owner_id)
     if command_type == "set_selection":
         return SetSelectionCommand(
             _string_ids(data.get("entity_ids"), "entity_ids"),

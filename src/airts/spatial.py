@@ -82,6 +82,13 @@ class SpatialStore:
         reference.modified_tick = tick
         return reference
 
+    def delete_region(self, reference_id: str) -> SpatialReference:
+        reference = self.get(reference_id)
+        if reference.kind is not SpatialKind.REGION:
+            raise ValueError("ONLY_REGIONS_CAN_BE_DELETED")
+        del self.references[reference_id]
+        return reference
+
     def get(self, reference_id: str) -> SpatialReference:
         try:
             return self.references[reference_id]

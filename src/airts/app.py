@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from math import hypot
+from pathlib import Path
 
 import pygame
 
@@ -17,13 +18,16 @@ from airts.commands import (
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
+    DeleteRegionCommand,
     EditSpatialReferenceCommand,
+    HoldPositionCommand,
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
     RenameRegionCommand,
     ResumeAutomationCommand,
     SetSelectionCommand,
+    StopCommand,
 )
 from airts.geometry import (
     Point,
@@ -35,6 +39,7 @@ from airts.geometry import (
     simplify_freehand,
 )
 from airts.map_model import EntityCategory, EntityKind, Terrain
+from airts.persistence import PersistenceError, load_simulation, save_simulation
 from airts.simulation import Simulation
 from airts.spatial import SpatialKind
 
@@ -50,7 +55,8 @@ class InputMode(StrEnum):
 class AirtsApp:
     MAP_PIXELS = 768
     PANEL_WIDTH = 400
-    WINDOW_SIZE = (MAP_PIXELS + PANEL_WIDTH, MAP_PIXELS)
+    COMMAND_BAR_HEIGHT = 104
+    WINDOW_SIZE = (MAP_PIXELS + PANEL_WIDTH, MAP_PIXELS + COMMAND_BAR_HEIGHT)
     BACKGROUND = (18, 22, 28)
     PANEL_BACKGROUND = (27, 32, 40)
 
@@ -65,6 +71,7 @@ class AirtsApp:
         self.active_reference_id: str | None = None
         self.editing_reference_id: str | None = None
         self.selected_automation_id: str | None = None
+        self.inspected_entity_id: str | None = None
         self.naming_reference_id: str | None = None
         self.naming_buffer = ""
         self.line_points: list[Point] = []
@@ -73,6 +80,10 @@ class AirtsApp:
         self.paused = False
         self.notice = "Select units, draw a target, then press A to patrol."
         self._automation_buttons: list[tuple[pygame.Rect, str, str]] = []
+        self._command_buttons: list[tuple[pygame.Rect, str]] = []
+        self._initial_map = simulation.game_map
+        self._initial_seed = simulation.random_seed
+        self.quick_save_path = Path("airts-quicksave.json")
         self._font: pygame.font.Font | None = None
         self._small_font: pygame.font.Font | None = None
 
@@ -83,7 +94,7 @@ class AirtsApp:
     def run(self, max_frames: int | None = None) -> None:
         pygame.init()
         try:
-            screen = pygame.display.set_mode(self.WINDOW_SIZE)
+            screen = pygame.display.set_mode(self.WINDOW_SIZE, pygame.RESIZABLE)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
@@ -150,6 +161,18 @@ class AirtsApp:
             self._create_repair()
         elif key == pygame.K_g:
             self._create_economy()
+        elif key == pygame.K_s:
+            self._stop_selected()
+        elif key == pygame.K_h:
+            self._hold_selected()
+        elif key == pygame.K_DELETE:
+            self._delete_selected_region()
+        elif key == pygame.K_F5:
+            self._save_game()
+        elif key == pygame.K_F9:
+            self._load_game()
+        elif key == pygame.K_F2:
+            self._new_game()
         elif key == pygame.K_n:
             self._name_selected_region()
         elif key == pygame.K_e and self.active_reference_id is not None:
@@ -171,6 +194,10 @@ class AirtsApp:
         if position[0] >= self.MAP_PIXELS:
             if button == 1:
                 self._handle_panel_click(position)
+            return
+        if position[1] >= self.MAP_PIXELS:
+            if button == 1:
+                self._handle_command_click(position)
             return
         point = self._map_point(position)
         if button == 3:
@@ -244,11 +271,18 @@ class AirtsApp:
                 (
                     (entity.selection_position.distance_to(end), entity_id)
                     for entity_id, entity in self.simulation.entities.items()
-                    if entity.owner_id == "player"
                     if entity.selection_position.distance_to(end) <= 1.5
                 )
             )
-            found = {candidates[0][1]} if candidates else set()
+            clicked = candidates[0][1] if candidates else None
+            if clicked is not None and self.simulation.entities[clicked].owner_id != "player":
+                self.inspected_entity_id = clicked
+                if not additive:
+                    self.selected_entities.clear()
+                self._commit_selection()
+                self.notice = f"Inspecting enemy {clicked}; commands disabled."
+                return
+            found = {clicked} if clicked is not None else set()
             if not found:
                 found_points = {
                     reference.reference_id
@@ -277,7 +311,11 @@ class AirtsApp:
                     self.selected_points = found_points
                     self.selected_routes = found_routes
                     self.selected_regions = found_regions
-                    self.selected_entities.clear()
+                if found_points or found_routes or found_regions:
+                    reference_id = next(iter(found_points | found_routes | found_regions))
+                    reference = self.simulation.spatial.references[reference_id]
+                    self.active_reference_id = reference_id
+                    self.active_target = reference.geometry
                 self._commit_selection()
                 return
         else:
@@ -287,6 +325,7 @@ class AirtsApp:
                 entity_id
                 for entity_id, entity in self.simulation.entities.items()
                 if entity.owner_id == "player"
+                if entity.category is EntityCategory.UNIT
                 if left <= entity.selection_position.x <= right
                 and top <= entity.selection_position.y <= bottom
             }
@@ -294,9 +333,7 @@ class AirtsApp:
             self.selected_entities.symmetric_difference_update(found)
         else:
             self.selected_entities = found
-            self.selected_points.clear()
-            self.selected_routes.clear()
-            self.selected_regions.clear()
+        self.inspected_entity_id = next(iter(found)) if len(found) == 1 else None
         self._commit_selection()
         self.notice = f"Selected {len(self.selected_entities)} unit(s)."
 
@@ -315,6 +352,8 @@ class AirtsApp:
             self.notice = f"Spatial object {result.reference_id} ready."
         else:
             self.notice = result.reason
+        self.mode = InputMode.SELECT
+        self._clear_draft()
 
     def _select_reference(self, reference_id: str | None) -> None:
         if reference_id is None:
@@ -323,6 +362,8 @@ class AirtsApp:
         self.selected_points = {reference_id} if reference.kind is SpatialKind.POINT else set()
         self.selected_routes = {reference_id} if reference.kind is SpatialKind.ROUTE else set()
         self.selected_regions = {reference_id} if reference.kind is SpatialKind.REGION else set()
+        self.active_reference_id = reference_id
+        self.active_target = reference.geometry
         self._commit_selection()
 
     def _commit_selection(self) -> None:
@@ -452,6 +493,77 @@ class AirtsApp:
         if result.accepted:
             self.selected_automation_id = result.automation_id
 
+    def _stop_selected(self) -> None:
+        result = self.simulation.execute(StopCommand(tuple(sorted(self.selected_entities))))
+        self.notice = "Units stopped." if result.accepted else result.reason
+
+    def _hold_selected(self) -> None:
+        result = self.simulation.execute(HoldPositionCommand(tuple(sorted(self.selected_entities))))
+        self.notice = "Units holding position." if result.accepted else result.reason
+
+    def _delete_selected_region(self) -> None:
+        if len(self.selected_regions) != 1:
+            self.notice = "Select exactly one user region to delete."
+            return
+        reference_id = next(iter(self.selected_regions))
+        result = self.simulation.execute(DeleteRegionCommand(reference_id))
+        if result.accepted:
+            self.selected_regions.clear()
+            self.active_reference_id = None
+            self.active_target = None
+            self.notice = result.reason
+        else:
+            self.notice = result.reason
+
+    def _save_game(self) -> None:
+        try:
+            save_simulation(self.simulation, self.quick_save_path)
+        except OSError as error:
+            self.notice = f"Save failed: {error}"
+        else:
+            self.notice = f"Saved {self.quick_save_path}."
+
+    def _load_game(self) -> None:
+        try:
+            simulation = load_simulation(self.quick_save_path)
+        except (OSError, PersistenceError) as error:
+            self.notice = f"Load failed: {error}"
+            return
+        self.simulation = simulation
+        self._clear_selection_state()
+        self.notice = f"Loaded {self.quick_save_path}."
+
+    def _new_game(self) -> None:
+        self.simulation = Simulation(self._initial_map, self._initial_seed)
+        self._clear_selection_state()
+        self.notice = "New game started."
+
+    def _clear_selection_state(self) -> None:
+        self.selected_entities.clear()
+        self.selected_points.clear()
+        self.selected_routes.clear()
+        self.selected_regions.clear()
+        self.inspected_entity_id = None
+        self.active_reference_id = None
+        self.active_target = None
+        self.selected_automation_id = None
+
+    def _handle_command_click(self, position: tuple[int, int]) -> None:
+        for rectangle, action in self._command_buttons:
+            if not rectangle.collidepoint(position):
+                continue
+            {
+                "stop": self._stop_selected,
+                "hold": self._hold_selected,
+                "patrol": self._create_patrol,
+                "defend": self._create_defend,
+                "delete": self._delete_selected_region,
+                "save": self._save_game,
+                "load": self._load_game,
+                "new": self._new_game,
+            }[action]()
+            return
+
     def _handle_panel_click(self, position: tuple[int, int]) -> None:
         for rectangle, action, automation_id in self._automation_buttons:
             if not rectangle.collidepoint(position):
@@ -474,6 +586,7 @@ class AirtsApp:
         self._draw_map(screen)
         self._draw_spatial_input(screen)
         self._draw_entities(screen)
+        self._draw_command_bar(screen)
         self._draw_panel(screen)
 
     def _draw_map(self, screen: pygame.Surface) -> None:
@@ -533,11 +646,29 @@ class AirtsApp:
                 pygame.draw.circle(screen, color, center, radius)
                 if entity_id in self.selected_entities:
                     pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
+                if (
+                    entity_id == self.inspected_entity_id
+                    and entity_id not in self.selected_entities
+                ):
+                    pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
             bar_width = max(12, round(self.tile_size * 1.4))
             bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
             pygame.draw.rect(screen, (70, 35, 35), bar)
             health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
             pygame.draw.rect(screen, (74, 218, 111), pygame.Rect(bar.x, bar.y, health_width, 3))
+        inspected = self.simulation.entities.get(self.inspected_entity_id or "")
+        if (
+            inspected is not None
+            and inspected.kind.profile.attack_range > 0
+            and len(self.selected_entities) <= 1
+        ):
+            pygame.draw.circle(
+                screen,
+                (255, 218, 100),
+                self._screen_point(inspected.selection_position),
+                round(inspected.kind.profile.attack_range * self.tile_size),
+                1,
+            )
 
     def _draw_spatial_input(self, screen: pygame.Surface) -> None:
         for reference in self.simulation.spatial.references.values():
@@ -558,6 +689,28 @@ class AirtsApp:
                 pygame.draw.lines(screen, (255, 170, 210), False, pixels, 2)
             for pixel in pixels:
                 pygame.draw.circle(screen, (255, 170, 210), pixel, 3)
+        if self.mode is InputMode.SELECT and self.drag_start is not None:
+            mouse = pygame.mouse.get_pos()
+            if mouse[0] < self.MAP_PIXELS and mouse[1] < self.MAP_PIXELS:
+                start = self._screen_point(self.drag_start)
+                rectangle = pygame.Rect(start, (mouse[0] - start[0], mouse[1] - start[1]))
+                rectangle.normalize()
+                pygame.draw.rect(screen, (245, 245, 245), rectangle, 1)
+        if self._small_font is not None:
+            for reference in self.simulation.spatial.references.values():
+                if reference.kind is not SpatialKind.REGION or not reference.name:
+                    continue
+                assert isinstance(reference.geometry, PolygonRegion)
+                center = Point(
+                    sum(point.x for point in reference.geometry.points)
+                    / len(reference.geometry.points),
+                    sum(point.y for point in reference.geometry.points)
+                    / len(reference.geometry.points),
+                )
+                label = self._small_font.render(reference.name, True, (240, 244, 250))
+                label.set_alpha(220)
+                label_rect = label.get_rect(center=self._screen_point(center))
+                screen.blit(label, label_rect)
 
     def _draw_target(
         self,
@@ -581,6 +734,38 @@ class AirtsApp:
             pygame.draw.polygon(surface, (*color, 55), points)
             pygame.draw.polygon(surface, (*color, 230), points, width)
             screen.blit(surface, (0, 0))
+
+    def _draw_command_bar(self, screen: pygame.Surface) -> None:
+        if self._small_font is None:
+            return
+        bar = pygame.Rect(0, self.MAP_PIXELS, self.MAP_PIXELS, self.COMMAND_BAR_HEIGHT)
+        pygame.draw.rect(screen, (24, 29, 36), bar)
+        self._small_text(
+            screen,
+            "Commands — unavailable actions are omitted",
+            (14, self.MAP_PIXELS + 9),
+            (190, 205, 220),
+        )
+        actions: list[tuple[str, str]] = []
+        selected = [self.simulation.entities[item] for item in sorted(self.selected_entities)]
+        if selected and all(
+            entity.owner_id == "player" and entity.is_movable for entity in selected
+        ):
+            actions.extend([("stop", "Stop"), ("hold", "Hold")])
+            if self.active_target is not None:
+                actions.extend([("patrol", "Patrol"), ("defend", "Defend")])
+        if len(self.selected_regions) == 1:
+            actions.append(("delete", "Delete region"))
+        actions.extend([("save", "Save"), ("load", "Load"), ("new", "New game")])
+        self._command_buttons.clear()
+        x = 14
+        y = self.MAP_PIXELS + 38
+        for action, label in actions:
+            width = max(78, len(label) * 9 + 18)
+            rectangle = pygame.Rect(x, y, width, 30)
+            self._button(screen, rectangle, label)
+            self._command_buttons.append((rectangle, action))
+            x += width + 9
 
     def _draw_panel(self, screen: pygame.Surface) -> None:
         if self._font is None or self._small_font is None:
@@ -623,6 +808,38 @@ class AirtsApp:
             (111, 221, 151),
         )
         y += 20
+        self._text(screen, "Selection", (x, y), (245, 245, 245))
+        y += 24
+        inspected = self.simulation.entities.get(self.inspected_entity_id or "")
+        if inspected is not None:
+            profile = inspected.kind.profile
+            owner = "friendly" if inspected.owner_id == "player" else "enemy / inspect only"
+            lines = [
+                f"{inspected.entity_id} | {inspected.kind.value} | {owner}",
+                f"HP {inspected.health}/{profile.max_health} | state {inspected.state.value}",
+                f"damage {profile.attack_damage} | range {profile.attack_range}",
+                f"speed {profile.movement_speed or 0} | target {inspected.attack_target_id or '-'}",
+            ]
+        elif self.selected_entities:
+            kinds: dict[str, int] = {}
+            health = 0
+            maximum = 0
+            for entity_id in self.selected_entities:
+                entity = self.simulation.entities[entity_id]
+                kinds[entity.kind.value] = kinds.get(entity.kind.value, 0) + 1
+                health += entity.health
+                maximum += entity.kind.profile.max_health
+            distribution = ", ".join(f"{kind} {count}" for kind, count in sorted(kinds.items()))
+            lines = [
+                f"{len(self.selected_entities)} selected | HP {health}/{maximum}",
+                distribution,
+            ]
+        else:
+            lines = ["Nothing selected"]
+        for line in lines:
+            self._small_text(screen, line[:48], (x, y), (180, 198, 214))
+            y += 17
+        y += 5
         self._text(screen, "Automations", (x, y), (245, 245, 245))
         y += 25
         self._automation_buttons.clear()
@@ -664,7 +881,7 @@ class AirtsApp:
                 y += 32
             else:
                 y += 7
-            if y > 485:
+            if y > 600:
                 break
         selected = self.simulation.automations.get(self.selected_automation_id or "")
         if selected is not None:
@@ -689,7 +906,7 @@ class AirtsApp:
                 (x, y),
                 (158, 178, 194),
             )
-        y = max(y + 8, 570)
+        y = max(y + 8, 690)
         self._text(screen, "Recent events", (x, y), (245, 245, 245))
         y += 24
         for event in self.simulation.events.query(limit=7):

@@ -171,6 +171,7 @@ class EconomyParameters:
     income_per_cycle: int = 10
     income_cycle_ticks: int = 10
     collected: int = 0
+    starting_resources: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -179,6 +180,7 @@ class EconomyParameters:
             "income_per_cycle": self.income_per_cycle,
             "income_cycle_ticks": self.income_cycle_ticks,
             "collected": self.collected,
+            "starting_resources": self.starting_resources,
         }
 
 
@@ -216,8 +218,10 @@ class Automation:
                 AutomationTransition(self.created_tick, None, self.status, self.reason_code)
             )
         if isinstance(self.parameters, PatrolParameters):
-            for entity_id in self.entity_ids:
-                self.parameters.waypoint_indices.setdefault(entity_id, 0)
+            for index, entity_id in enumerate(self.entity_ids):
+                self.parameters.waypoint_indices.setdefault(
+                    entity_id, index % len(self.parameters.waypoints)
+                )
 
     @property
     def template(self) -> str:

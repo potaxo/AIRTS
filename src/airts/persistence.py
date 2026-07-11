@@ -118,6 +118,13 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     if not simulation._movement_blocked.issubset(simulation.entities):
         raise PersistenceError("movement_blocked references an unknown entity")
+    blocked_ticks = _mapping(state.get("blocked_ticks", {}), "state.blocked_ticks")
+    simulation._blocked_ticks = {
+        entity_id: _integer(value, f"blocked_ticks.{entity_id}", minimum=0)
+        for entity_id, value in blocked_ticks.items()
+    }
+    if not set(simulation._blocked_ticks).issubset(simulation.entities):
+        raise PersistenceError("blocked_ticks references an unknown entity")
     return simulation
 
 
@@ -464,6 +471,7 @@ def _load_automation_parameters(
             _integer(data.get("income_per_cycle"), "economy.income_per_cycle", minimum=1),
             _integer(data.get("income_cycle_ticks"), "economy.income_cycle_ticks", minimum=1),
             _integer(data.get("collected"), "economy.collected", minimum=0),
+            _integer(data.get("starting_resources", 0), "economy.starting_resources", minimum=0),
         )
     destinations = _string_mapping(data.get("destinations"), "repair.destinations")
     resume_ids = _nullable_string_mapping(

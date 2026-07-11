@@ -31,6 +31,7 @@ class EventType(StrEnum):
     SPATIAL_REFERENCE_CREATED = "spatial_reference_created"
     SPATIAL_REFERENCE_EDITED = "spatial_reference_edited"
     SPATIAL_REFERENCE_NAMED = "spatial_reference_named"
+    SPATIAL_REFERENCE_DELETED = "spatial_reference_deleted"
     SELECTION_CHANGED = "selection_changed"
     AUTOMATION_MODIFIED = "automation_modified"
     RESOURCE_CHANGED = "resource_changed"

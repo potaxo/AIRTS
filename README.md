@@ -56,7 +56,7 @@ Tick-stamped commands can also be captured and deterministically verified:
 
 | Input | Action |
 | --- | --- |
-| `1` | Selection mode; click or drag, and hold `Shift` to toggle additional objects |
+| `1` | Selection mode; click entities or regions, or drag friendly units; `Shift` toggles additions |
 | `2` | Place a point patrol target |
 | `3` | Add line vertices; press `Enter` to finish the route |
 | `4` | Drag a rectangular patrol area |
@@ -66,15 +66,20 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `P` | Produce three light tanks from exactly one selected factory |
 | `R` | Repair selected units and return them to suspended assignments |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
+| `S` / `H` | Stop selected units or hold their current position |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
+| `Delete` | Delete one selected user region and explicitly cancel automations using it |
+| `F5` / `F9` | Save or load `airts-quicksave.json` |
+| `F2` | Reset the bundled/current starting scenario |
 | `U` | Replace the inspected patrol/defend target with the active spatial target |
 | `[` / `]` | Decrease or increase the inspected automation priority |
 | Right-click | Move, or attack an enemy under the cursor |
 | `Space` | Pause or resume simulation time |
 | `Esc` | Clear the current spatial target or draft |
 
-Drawing creates stable point, route, and region IDs. Named regions are persistent and
+Point, line, rectangle, and freehand tools return to selection mode after one completed
+operation. Drawing creates stable point, route, and region IDs. Named regions are persistent and
 must have unique names; overlapping regions are allowed. Click an automation card to
 inspect its provenance, owner, priority, reason, timestamps, and entities. The panel
 also provides pause/resume and cancel controls, and the event view includes validation
@@ -96,15 +101,17 @@ instruction. Units have one current assignment and may retain one suspended assi
 while repairing.
 
 Factories reserve unit costs before building and wait visibly when funds are insufficient.
-Resource generators produce deterministic income through economy automations. Defend
+Resource generators produce deterministic passive income every second; an economy automation
+monitors progress toward a target and exposes it through the normal lifecycle. Defend
 behavior maintains grounded positions and engages nearby enemies, reinforcement transfers
 eligible units to another automation, and repair selects destinations by
 repair-hub/factory/command-center order and valid path cost before restoring the original
 assignment.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
-footprints are hard obstacles, while unit-cell conflicts are resolved deterministically
-during movement. The UI displays the calculated path rather than deriving one itself.
+footprints are hard obstacles. Group destinations and patrol starts are distributed, and a
+unit blocked for one second chooses a deterministic free sidestep before replanning. The UI
+displays the calculated path rather than deriving one itself.
 
 Visibility is stored separately for each owner as visible, explored, or unexplored cells.
 This phase exposes the authoritative information state but deliberately does not hide map
