@@ -19,6 +19,8 @@ class UnitState(StrEnum):
     RETURNING = "returning"
     REPAIRING = "repairing"
     PRODUCING = "producing"
+    ATTACKING = "attacking"
+    RETREATING = "retreating"
 
 
 @dataclass(slots=True)
@@ -32,6 +34,8 @@ class Entity:
     move_target: Point | None = None
     path: list[Point] = field(default_factory=list)
     path_cost: float = 0.0
+    attack_target_id: str | None = None
+    attack_cooldown: int = 0
 
     @property
     def category(self) -> EntityCategory:
@@ -80,6 +84,8 @@ class Entity:
             ),
             "path": [[point.x, point.y] for point in self.path],
             "path_cost": self.path_cost,
+            "attack_target_id": self.attack_target_id,
+            "attack_cooldown": self.attack_cooldown,
         }
 
 

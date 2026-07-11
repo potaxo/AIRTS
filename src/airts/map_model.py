@@ -54,6 +54,9 @@ class EntityProfile:
     vision_range: float
     footprint: tuple[int, int]
     movement_speed: float | None = None
+    attack_damage: int = 0
+    attack_range: float = 0.0
+    production_cost: int = 0
 
     @property
     def movable(self) -> bool:
@@ -82,9 +85,9 @@ class EntityKind(StrEnum):
 
 
 _ENTITY_PROFILES = {
-    EntityKind.SCOUT: EntityProfile(EntityCategory.UNIT, 60, 7.0, (1, 1), 5.0),
-    EntityKind.LIGHT_TANK: EntityProfile(EntityCategory.UNIT, 100, 5.0, (1, 1), 3.5),
-    EntityKind.HEAVY_TANK: EntityProfile(EntityCategory.UNIT, 160, 4.0, (1, 1), 2.5),
+    EntityKind.SCOUT: EntityProfile(EntityCategory.UNIT, 60, 7.0, (1, 1), 5.0, 5, 2.5, 50),
+    EntityKind.LIGHT_TANK: EntityProfile(EntityCategory.UNIT, 100, 5.0, (1, 1), 3.5, 12, 3.0, 100),
+    EntityKind.HEAVY_TANK: EntityProfile(EntityCategory.UNIT, 160, 4.0, (1, 1), 2.5, 20, 3.5, 175),
     EntityKind.FACTORY: EntityProfile(EntityCategory.BUILDING, 500, 5.0, (4, 4)),
     EntityKind.REPAIR_HUB: EntityProfile(EntityCategory.BUILDING, 350, 4.0, (3, 3)),
     EntityKind.COMMAND_CENTER: EntityProfile(EntityCategory.BUILDING, 700, 7.0, (5, 5)),

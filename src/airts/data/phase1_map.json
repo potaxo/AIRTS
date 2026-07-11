@@ -1,7 +1,7 @@
 {
   "id": "phase1_crossing",
-  "version": 2,
-  "name": "Phase 2 River Crossing",
+  "version": 3,
+  "name": "Phase 5 River Crossing",
   "width": 64,
   "height": 64,
   "terrain": {
@@ -29,6 +29,9 @@
     {"id": "command_01", "kind": "command_center", "owner": "player", "position": [3, 42]},
     {"id": "factory_01", "kind": "factory", "owner": "player", "position": [11, 43]},
     {"id": "repair_01", "kind": "repair_hub", "owner": "player", "position": [19, 42]},
-    {"id": "generator_01", "kind": "resource_generator", "owner": "player", "position": [20, 49]}
+    {"id": "generator_01", "kind": "resource_generator", "owner": "player", "position": [20, 49]},
+    {"id": "enemy_tank_01", "kind": "light_tank", "owner": "enemy", "position": [48.5, 29.5]},
+    {"id": "enemy_tank_02", "kind": "heavy_tank", "owner": "enemy", "position": [45.5, 35.5]},
+    {"id": "enemy_command_01", "kind": "command_center", "owner": "enemy", "position": [52, 8]}
   ]
 }

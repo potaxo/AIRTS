@@ -44,6 +44,7 @@ class AutomationKind(StrEnum):
     PRODUCTION = "production"
     REINFORCEMENT = "reinforcement"
     REPAIR_AND_RETURN = "repair_and_return"
+    ECONOMY = "economy"
 
 
 class RepairPhase(StrEnum):
@@ -111,6 +112,7 @@ class ProductionParameters:
     produced_count: int = 0
     progress_ticks: int = 0
     produced_entity_ids: list[str] = field(default_factory=list)
+    cost_paid: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -124,6 +126,7 @@ class ProductionParameters:
             "produced_count": self.produced_count,
             "progress_ticks": self.progress_ticks,
             "produced_entity_ids": list(self.produced_entity_ids),
+            "cost_paid": self.cost_paid,
         }
 
 
@@ -161,12 +164,31 @@ class RepairParameters:
         }
 
 
+@dataclass(slots=True)
+class EconomyParameters:
+    generator_ids: list[str]
+    target_resources: int
+    income_per_cycle: int = 10
+    income_cycle_ticks: int = 10
+    collected: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "generator_ids": list(self.generator_ids),
+            "target_resources": self.target_resources,
+            "income_per_cycle": self.income_per_cycle,
+            "income_cycle_ticks": self.income_cycle_ticks,
+            "collected": self.collected,
+        }
+
+
 AutomationParameters = (
     PatrolParameters
     | DefendParameters
     | ProductionParameters
     | ReinforcementParameters
     | RepairParameters
+    | EconomyParameters
 )
 
 
@@ -239,6 +261,11 @@ class Automation:
             self.parameters.destinations.pop(entity_id, None)
             self.parameters.resume_automation_ids.pop(entity_id, None)
             self.parameters.phases.pop(entity_id, None)
+        elif (
+            isinstance(self.parameters, EconomyParameters)
+            and entity_id in self.parameters.generator_ids
+        ):
+            self.parameters.generator_ids.remove(entity_id)
 
     def to_dict(self) -> dict[str, object]:
         return {

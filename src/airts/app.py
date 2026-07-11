@@ -9,8 +9,10 @@ import pygame
 
 from airts.automations import AutomationStatus
 from airts.commands import (
+    AttackCommand,
     CancelAutomationCommand,
     CreateDefendCommand,
+    CreateEconomyCommand,
     CreatePatrolCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
@@ -82,7 +84,7 @@ class AirtsApp:
         pygame.init()
         try:
             screen = pygame.display.set_mode(self.WINDOW_SIZE)
-            pygame.display.set_caption("AIRTS — Phase 4")
+            pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
@@ -146,6 +148,8 @@ class AirtsApp:
             self._create_production()
         elif key == pygame.K_r:
             self._create_repair()
+        elif key == pygame.K_g:
+            self._create_economy()
         elif key == pygame.K_n:
             self._name_selected_region()
         elif key == pygame.K_e and self.active_reference_id is not None:
@@ -170,10 +174,19 @@ class AirtsApp:
             return
         point = self._map_point(position)
         if button == 3:
-            result = self.simulation.execute(
-                MoveCommand(tuple(sorted(self.selected_entities)), point)
+            enemies = sorted(
+                (entity.selection_position.distance_to(point), entity.entity_id)
+                for entity in self.simulation.entities.values()
+                if entity.owner_id != "player"
+                and entity.selection_position.distance_to(point) <= 1.5
             )
-            self.notice = "Manual move issued." if result.accepted else result.reason
+            command = (
+                AttackCommand(tuple(sorted(self.selected_entities)), enemies[0][1])
+                if enemies
+                else MoveCommand(tuple(sorted(self.selected_entities)), point)
+            )
+            result = self.simulation.execute(command)
+            self.notice = "Command issued." if result.accepted else result.reason
             return
         if button != 1:
             return
@@ -231,6 +244,7 @@ class AirtsApp:
                 (
                     (entity.selection_position.distance_to(end), entity_id)
                     for entity_id, entity in self.simulation.entities.items()
+                    if entity.owner_id == "player"
                     if entity.selection_position.distance_to(end) <= 1.5
                 )
             )
@@ -272,6 +286,7 @@ class AirtsApp:
             found = {
                 entity_id
                 for entity_id, entity in self.simulation.entities.items()
+                if entity.owner_id == "player"
                 if left <= entity.selection_position.x <= right
                 and top <= entity.selection_position.y <= bottom
             }
@@ -424,6 +439,19 @@ class AirtsApp:
         if result.accepted:
             self.selected_automation_id = result.automation_id
 
+    def _create_economy(self) -> None:
+        generators = tuple(
+            entity_id
+            for entity_id in sorted(self.selected_entities)
+            if self.simulation.entities[entity_id].kind is EntityKind.RESOURCE_GENERATOR
+        )
+        result = self.simulation.execute(
+            CreateEconomyCommand(generators, self.simulation.resources.get("player", 0) + 100)
+        )
+        self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
+        if result.accepted:
+            self.selected_automation_id = result.automation_id
+
     def _handle_panel_click(self, position: tuple[int, int]) -> None:
         for rectangle, action, automation_id in self._automation_buttons:
             if not rectangle.collidepoint(position):
@@ -501,9 +529,15 @@ class AirtsApp:
                     pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
             else:
                 radius = max(5, round(self.tile_size * 0.42))
-                pygame.draw.circle(screen, colors[entity.kind], center, radius)
+                color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
+                pygame.draw.circle(screen, color, center, radius)
                 if entity_id in self.selected_entities:
                     pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
+            bar_width = max(12, round(self.tile_size * 1.4))
+            bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
+            pygame.draw.rect(screen, (70, 35, 35), bar)
+            health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
+            pygame.draw.rect(screen, (74, 218, 111), pygame.Rect(bar.x, bar.y, health_width, 3))
 
     def _draw_spatial_input(self, screen: pygame.Surface) -> None:
         for reference in self.simulation.spatial.references.values():
@@ -555,7 +589,7 @@ class AirtsApp:
         pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
         x = self.MAP_PIXELS + 16
         y = 14
-        self._text(screen, "AIRTS — Phase 4", (x, y), (245, 245, 245))
+        self._text(screen, "AIRTS — Phase 5", (x, y), (245, 245, 245))
         y += 28
         self._small_text(
             screen,
@@ -572,14 +606,23 @@ class AirtsApp:
         y += 18
         self._small_text(screen, "4 Rectangle  5 Freehand", (x, y), (205, 210, 218))
         y += 18
-        self._small_text(screen, "A Patrol  D Defend  P Produce  R Repair", (x, y), (205, 210, 218))
+        self._small_text(
+            screen, "A Patrol D Defend P Produce R Repair G Economy", (x, y), (205, 210, 218)
+        )
         y += 18
-        self._small_text(screen, "Right-click Move  Space Pause", (x, y), (205, 210, 218))
+        self._small_text(screen, "Right-click Move/Attack  Space Pause", (x, y), (205, 210, 218))
         y += 28
         self._small_text(screen, "Shift multi-select  N Name  E Edit", (x, y), (205, 210, 218))
         y += 18
         self._small_text(screen, "U Retarget  [ ] Priority", (x, y), (205, 210, 218))
         y += 22
+        self._small_text(
+            screen,
+            f"Resources: {self.simulation.resources.get('player', 0)}",
+            (x, y),
+            (111, 221, 151),
+        )
+        y += 20
         self._text(screen, "Automations", (x, y), (245, 245, 245))
         y += 25
         self._automation_buttons.clear()

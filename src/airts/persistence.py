@@ -11,6 +11,7 @@ from airts.automations import (
     AutomationStatus,
     AutomationTransition,
     DefendParameters,
+    EconomyParameters,
     PatrolParameters,
     ProductionParameters,
     ReinforcementParameters,
@@ -40,7 +41,7 @@ from airts.spatial import (
 )
 from airts.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v3"
+SAVE_SCHEMA = "airts-save-v4"
 
 
 class PersistenceError(ValueError):
@@ -88,6 +89,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     _validate_assignment_completeness(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
+    simulation.resources = _load_resources(state.get("resources"), simulation)
     simulation.spatial = _load_spatial(state.get("spatial"), simulation, tick)
     simulation.selection = _load_selection(state.get("selection"), simulation)
     event_log = EventLog()
@@ -236,7 +238,19 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
             move_target=move_target,
             path=path,
             path_cost=path_cost,
+            attack_target_id=_nullable_string(
+                entity.get("attack_target_id"), "entity.attack_target_id"
+            ),
+            attack_cooldown=_integer(
+                entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
+            ),
         )
+    for loaded_entity in entities.values():
+        if (
+            loaded_entity.attack_target_id is not None
+            and loaded_entity.attack_target_id not in entities
+        ):
+            raise PersistenceError(f"entity {loaded_entity.entity_id} has an unknown attack target")
     if not entities:
         raise PersistenceError("saved state must contain at least one entity")
     return entities
@@ -351,6 +365,7 @@ def _load_automation_parameters(
     | ProductionParameters
     | ReinforcementParameters
     | RepairParameters
+    | EconomyParameters
 ):
     data = _mapping(raw_data, "automation.parameters")
     if kind is AutomationKind.PATROL:
@@ -419,6 +434,7 @@ def _load_automation_parameters(
             produced_entity_ids=_string_list(
                 data.get("produced_entity_ids"), "production.produced_entity_ids"
             ),
+            cost_paid=_boolean(data.get("cost_paid"), "production.cost_paid"),
         )
     if kind is AutomationKind.REINFORCEMENT:
         return ReinforcementParameters(
@@ -434,6 +450,20 @@ def _load_automation_parameters(
             transferred_entity_ids=_string_list(
                 data.get("transferred_entity_ids"), "reinforcement.transferred_entity_ids"
             ),
+        )
+    if kind is AutomationKind.ECONOMY:
+        generator_ids = _string_list(data.get("generator_ids"), "economy.generator_ids")
+        if generator_ids != entity_ids or any(
+            simulation.entities[item].kind is not EntityKind.RESOURCE_GENERATOR
+            for item in generator_ids
+        ):
+            raise PersistenceError("economy generators must match resource-generator entities")
+        return EconomyParameters(
+            generator_ids,
+            _integer(data.get("target_resources"), "economy.target_resources", minimum=1),
+            _integer(data.get("income_per_cycle"), "economy.income_per_cycle", minimum=1),
+            _integer(data.get("income_cycle_ticks"), "economy.income_cycle_ticks", minimum=1),
+            _integer(data.get("collected"), "economy.collected", minimum=0),
         )
     destinations = _string_mapping(data.get("destinations"), "repair.destinations")
     resume_ids = _nullable_string_mapping(
@@ -629,6 +659,17 @@ def _load_events(raw_data: object, current_tick: int) -> list[Event]:
     return events
 
 
+def _load_resources(raw_data: object, simulation: Simulation) -> dict[str, int]:
+    data = _mapping(raw_data, "state.resources")
+    owners = {entity.owner_id for entity in simulation.entities.values()}
+    if not owners.issubset(data):
+        raise PersistenceError("resources are missing an entity owner")
+    return {
+        owner_id: _integer(value, f"resources.{owner_id}", minimum=0)
+        for owner_id, value in data.items()
+    }
+
+
 def _load_command_history(raw_data: object, current_tick: int) -> list[dict[str, object]]:
     history: list[dict[str, object]] = []
     previous_tick = 0
@@ -726,6 +767,12 @@ def _integer(value: object, field: str, minimum: int | None = None) -> int:
         raise PersistenceError(f"{field} must be an integer")
     if minimum is not None and value < minimum:
         raise PersistenceError(f"{field} must be at least {minimum}")
+    return value
+
+
+def _boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise PersistenceError(f"{field} must be a boolean")
     return value
 
 

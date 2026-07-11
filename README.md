@@ -1,9 +1,9 @@
 # AIRTS
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
-automation. Phase 4 adds traditional RTS selection, persistent player-defined spatial
-references, geometry editing, and visible automation inspection and parameter editing
-on top of the deterministic Phase 3 runtime. It does not add a language model yet.
+automation. Phase 5 adds deterministic resources, paid production, generator-driven
+economic automation, simple combat, and emergency retreat-and-repair behavior. It does
+not add a language model yet.
 
 The authoritative project scope and architecture are defined in
 [`docs/design.md`](docs/design.md).
@@ -24,8 +24,8 @@ The project uses `pygame-ce`; do not install the separate `pygame` package.
 .venv/bin/python -m airts
 ```
 
-The bundled scenario is a validated 64 × 64 map with six units, four buildings,
-roads, forest, a river, and a bridge. A custom map using the same JSON format can be
+The bundled scenario is a validated 64 × 64 map with opposing forces, support and
+economic buildings, roads, forest, a river, and a bridge. A custom map can be
 supplied with `--map PATH`.
 Structured events can be written when the application exits:
 
@@ -60,11 +60,12 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `D` | Create a defend automation from selected units and current target |
 | `P` | Produce three light tanks from exactly one selected factory |
 | `R` | Repair selected units and return them to suspended assignments |
+| `G` | Develop the economy with selected resource generators until 100 more resources |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
 | `U` | Replace the inspected patrol/defend target with the active spatial target |
 | `[` / `]` | Decrease or increase the inspected automation priority |
-| Right-click | Manually move selected units and detach them from automation |
+| Right-click | Move, or attack an enemy under the cursor |
 | `Space` | Pause or resume simulation time |
 | `Esc` | Clear the current spatial target or draft |
 
@@ -89,10 +90,12 @@ human input, emergency repair, explicit priority, and then the newer equal-prior
 instruction. Units have one current assignment and may retain one suspended assignment
 while repairing.
 
-Factories produce units after fixed build times without resource costs. Defend behavior
-maintains grounded positions without combat, reinforcement transfers eligible units to
-another automation, and repair selects destinations by repair-hub/factory/command-center
-order and valid path cost before restoring the original assignment.
+Factories reserve unit costs before building and wait visibly when funds are insufficient.
+Resource generators produce deterministic income through economy automations. Defend
+behavior maintains grounded positions and engages nearby enemies, reinforcement transfers
+eligible units to another automation, and repair selects destinations by
+repair-hub/factory/command-center order and valid path cost before restoring the original
+assignment.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
 footprints are hard obstacles, while unit-cell conflicts are resolved deterministically
@@ -118,16 +121,16 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
-## Phase 4 limitations and exclusions
+## Phase 5 limitations and exclusions
 
-Production is intentionally cost-free and repair uses fixed-rate healing. Resources,
-production costs, combat damage, attacks, targeting, and economic behavior belong to
-Phase 5. Defend controls positioning only. Visibility does not yet include line-of-sight
-occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are
+Resources are a single integer balance per owner; there is no gathering unit, construction,
+technology tree, projectile simulation, armor, cover modifier, or tactical enemy AI.
+Combat uses deterministic range, damage, and cooldown profiles. Visibility does not include
+line-of-sight occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are
 versioned and reject older incompatible schemas.
 
 Geometry editing replaces a complete point, route, or region rather than offering
 per-vertex handles. Multi-region selections are grounded and inspectable but are not yet
-interpreted by language. Combat, economy, full fog of war, LM Studio or other AI
+interpreted by language. Full fog of war, LM Studio or other AI
 providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
 implemented in this phase.

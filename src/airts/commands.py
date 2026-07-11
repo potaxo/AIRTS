@@ -28,6 +28,13 @@ class HoldPositionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class AttackCommand:
+    entity_ids: tuple[str, ...]
+    target_entity_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class RemoveEntityCommand:
     """Authoritative system input for deterministic entity removal and replay."""
 
@@ -85,6 +92,16 @@ class CreateRepairAndReturnCommand:
     repair_rate: int = 5
     title: str = "Repair And Return"
     priority: int = 100
+    owner_id: str = "player"
+    original_instruction: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CreateEconomyCommand:
+    generator_ids: tuple[str, ...]
+    target_resources: int
+    title: str = "Develop Economy"
+    priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
 
@@ -152,12 +169,14 @@ Command = (
     MoveCommand
     | StopCommand
     | HoldPositionCommand
+    | AttackCommand
     | RemoveEntityCommand
     | CreatePatrolCommand
     | CreateDefendCommand
     | CreateProductionCommand
     | CreateReinforcementCommand
     | CreateRepairAndReturnCommand
+    | CreateEconomyCommand
     | PauseAutomationCommand
     | ResumeAutomationCommand
     | CancelAutomationCommand
@@ -226,6 +245,13 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "target": [command.target.x, command.target.y],
             "owner_id": command.owner_id,
         }
+    if isinstance(command, AttackCommand):
+        return {
+            "type": "attack",
+            "entity_ids": list(command.entity_ids),
+            "target_entity_id": command.target_entity_id,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, StopCommand | HoldPositionCommand):
         return {
             "type": "stop" if isinstance(command, StopCommand) else "hold_position",
@@ -288,6 +314,16 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "owner_id": command.owner_id,
             "original_instruction": command.original_instruction,
         }
+    if isinstance(command, CreateEconomyCommand):
+        return {
+            "type": "create_economy",
+            "generator_ids": list(command.generator_ids),
+            "target_resources": command.target_resources,
+            "title": command.title,
+            "priority": command.priority,
+            "owner_id": command.owner_id,
+            "original_instruction": command.original_instruction,
+        }
     if isinstance(command, PauseAutomationCommand):
         command_type = "pause_automation"
     elif isinstance(command, ResumeAutomationCommand):
@@ -345,6 +381,12 @@ def command_from_dict(raw_data: object) -> Command:
         return MoveCommand(
             _entity_ids(data.get("entity_ids")), _point(data.get("target"), "target"), owner_id
         )
+    if command_type == "attack":
+        return AttackCommand(
+            _entity_ids(data.get("entity_ids")),
+            _string(data.get("target_entity_id"), "target_entity_id"),
+            owner_id,
+        )
     if command_type in {"stop", "hold_position"}:
         entity_ids = _entity_ids(data.get("entity_ids"))
         return (
@@ -398,6 +440,15 @@ def command_from_dict(raw_data: object) -> Command:
             repair_rate=_integer(data.get("repair_rate", 5), "repair_rate"),
             title=_string(data.get("title", "Repair And Return"), "title"),
             priority=_integer(data.get("priority", 100), "priority"),
+            owner_id=owner_id,
+            original_instruction=_optional_string(data.get("original_instruction", "")),
+        )
+    if command_type == "create_economy":
+        return CreateEconomyCommand(
+            generator_ids=_entity_ids(data.get("generator_ids")),
+            target_resources=_integer(data.get("target_resources"), "target_resources"),
+            title=_string(data.get("title", "Develop Economy"), "title"),
+            priority=_integer(data.get("priority", 0), "priority"),
             owner_id=owner_id,
             original_instruction=_optional_string(data.get("original_instruction", "")),
         )

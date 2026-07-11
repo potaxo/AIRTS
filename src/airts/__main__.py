@@ -13,7 +13,9 @@ from airts.simulation import Simulation
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the AIRTS Phase 4 interaction runtime.")
+    parser = argparse.ArgumentParser(
+        description="Run the AIRTS Phase 5 economy and combat runtime."
+    )
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--map", type=Path, help="Load a map JSON file instead of the example.")
     sources.add_argument("--load-state", type=Path, help="Continue a saved simulation state.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from airts.commands import (
+    AttackCommand,
     CancelAutomationCommand,
     Command,
     CreateDefendCommand,
@@ -38,6 +39,7 @@ from airts.map_model import EntityKind
         PauseAutomationCommand("automation_001"),
         ResumeAutomationCommand("automation_001"),
         CancelAutomationCommand("automation_001"),
+        AttackCommand(("unit",), "enemy"),
     ],
 )
 def test_command_schemas_round_trip(command: Command) -> None:
@@ -46,7 +48,7 @@ def test_command_schemas_round_trip(command: Command) -> None:
 
 def test_command_schema_rejects_unknown_and_malformed_data() -> None:
     with pytest.raises(ValueError, match="unsupported command type"):
-        command_from_dict({"type": "attack", "automation_id": "x"})
+        command_from_dict({"type": "unsupported", "automation_id": "x"})
     with pytest.raises(ValueError, match="target_count must be an integer"):
         command_from_dict(
             {

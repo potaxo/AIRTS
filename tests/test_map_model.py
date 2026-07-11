@@ -16,11 +16,11 @@ def test_bundled_map_is_a_valid_64_by_64_playable_map() -> None:
     game_map = load_example_map()
 
     assert (game_map.width, game_map.height) == (64, 64)
-    assert game_map.map_version == 2
-    assert len(game_map.entities) == 10
+    assert game_map.map_version == 3
+    assert len(game_map.entities) == 13
     assert (
         sum(spec.kind.profile.category is EntityCategory.BUILDING for spec in game_map.entities)
-        == 4
+        == 5
     )
     assert game_map.terrain_at(Point(31, 20)) is Terrain.WATER
     assert game_map.terrain_at(Point(31, 31)) is Terrain.BRIDGE

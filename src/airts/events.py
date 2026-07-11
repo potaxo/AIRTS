@@ -33,6 +33,10 @@ class EventType(StrEnum):
     SPATIAL_REFERENCE_NAMED = "spatial_reference_named"
     SELECTION_CHANGED = "selection_changed"
     AUTOMATION_MODIFIED = "automation_modified"
+    RESOURCE_CHANGED = "resource_changed"
+    COMBAT_ATTACK = "combat_attack"
+    ENTITY_DESTROYED = "entity_destroyed"
+    RETREAT_STARTED = "retreat_started"
 
 
 @dataclass(frozen=True, slots=True)

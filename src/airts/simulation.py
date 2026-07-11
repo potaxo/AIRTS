@@ -11,6 +11,7 @@ from airts.automations import (
     AutomationParameters,
     AutomationStatus,
     DefendParameters,
+    EconomyParameters,
     PatrolParameters,
     ProductionParameters,
     ReinforcementParameters,
@@ -21,9 +22,11 @@ from airts.automations import (
     target_contains,
 )
 from airts.commands import (
+    AttackCommand,
     Command,
     CommandResult,
     CreateDefendCommand,
+    CreateEconomyCommand,
     CreatePatrolCommand,
     CreateProductionCommand,
     CreateReinforcementCommand,
@@ -84,6 +87,9 @@ class Simulation:
         self.suspended_assignments: dict[str, str] = {}
         self.events = EventLog()
         self.visibility = VisibilitySystem(game_map)
+        self.resources = {
+            owner_id: 500 for owner_id in {entity.owner_id for entity in self.entities.values()}
+        }
         self.spatial = SpatialStore()
         self.selection = GroundingSelection()
         self._next_automation_number = 1
@@ -108,6 +114,8 @@ class Simulation:
             return self._set_selection(command)
         if isinstance(command, ModifyAutomationCommand):
             return self._modify_automation(command)
+        if isinstance(command, AttackCommand):
+            return self._attack(command)
         if isinstance(command, MoveCommand):
             return self._move(command)
         if isinstance(command, StopCommand):
@@ -126,6 +134,8 @@ class Simulation:
             return self._create_reinforcement(command)
         if isinstance(command, CreateRepairAndReturnCommand):
             return self._create_repair(command)
+        if isinstance(command, CreateEconomyCommand):
+            return self._create_economy(command)
         if isinstance(command, PauseAutomationCommand):
             return self._pause(command.automation_id, command.owner_id)
         if isinstance(command, ResumeAutomationCommand):
@@ -139,6 +149,8 @@ class Simulation:
             self.tick += 1
             self._drive_automations()
             self._move_entities()
+            self._drive_retreats()
+            self._drive_combat()
             self._update_visibility()
 
     def remove_entity(self, entity_id: str, reason: str = "ENTITY_REMOVED") -> CommandResult:
@@ -172,6 +184,9 @@ class Simulation:
             self._handle_automation_without_entities(suspended)
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
+        for entity in self.entities.values():
+            if entity.attack_target_id == entity_id:
+                entity.attack_target_id = None
         self._movement_blocked.discard(entity_id)
         self.events.record(
             self.tick,
@@ -199,6 +214,7 @@ class Simulation:
                 for automation_id, automation in sorted(self.automations.items())
             },
             "visibility": self.visibility.to_dict(),
+            "resources": dict(sorted(self.resources.items())),
             "spatial": self.spatial.to_dict(),
             "selection": self.selection.to_dict(),
         }
@@ -217,6 +233,7 @@ class Simulation:
                 for automation_id, automation in sorted(self.automations.items())
             },
             "visibility": self.visibility.to_dict(),
+            "resources": dict(sorted(self.resources.items())),
             "spatial": self.spatial.to_dict(),
             "selection": self.selection.to_dict(),
             "events": [event.to_dict() for event in self.events.events],
@@ -498,6 +515,41 @@ class Simulation:
             )
         return self._accept("move")
 
+    def _attack(self, command: AttackCommand) -> CommandResult:
+        failure = self._validate_entities(
+            command.entity_ids, command.owner_id, require_movable=True
+        )
+        if failure is not None:
+            return self._reject_validation("attack", failure)
+        target = self.entities.get(command.target_entity_id)
+        if target is None:
+            return self._reject_validation(
+                "attack",
+                ValidationFailure(ValidationPhase.REFERENCE, "UNKNOWN_TARGET", "target_entity_id"),
+            )
+        if target.owner_id == command.owner_id:
+            return self._reject_validation(
+                "attack",
+                ValidationFailure(
+                    ValidationPhase.OWNERSHIP, "TARGET_IS_FRIENDLY", "target_entity_id"
+                ),
+            )
+        for entity_id in command.entity_ids:
+            entity = self.entities[entity_id]
+            if entity.kind.profile.attack_damage <= 0:
+                return self._reject_validation(
+                    "attack",
+                    ValidationFailure(
+                        ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"
+                    ),
+                )
+        for entity_id in command.entity_ids:
+            self._manual_override(entity_id)
+            entity = self.entities[entity_id]
+            entity.attack_target_id = target.entity_id
+            entity.state = UnitState.ATTACKING
+        return self._accept("attack")
+
     def _stop(self, command: StopCommand | HoldPositionCommand, *, hold: bool) -> CommandResult:
         failure = self._validate_entities(command.entity_ids, command.owner_id)
         if failure is not None:
@@ -771,6 +823,39 @@ class Simulation:
         )
         return self._accept("create_repair_and_return", automation.automation_id)
 
+    def _create_economy(self, command: CreateEconomyCommand) -> CommandResult:
+        priority_failure = validate_priority(command.priority)
+        target_failure = validate_positive(command.target_resources, "target_resources")
+        if priority_failure or target_failure:
+            return self._reject_validation("create_economy", priority_failure or target_failure)  # type: ignore[arg-type]
+        failure = self._validate_entities(command.generator_ids, command.owner_id)
+        if failure is not None:
+            return self._reject_validation("create_economy", failure)
+        if any(
+            self.entities[entity_id].kind is not EntityKind.RESOURCE_GENERATOR
+            for entity_id in command.generator_ids
+        ):
+            return self._reject_validation(
+                "create_economy",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "ENTITY_NOT_RESOURCE_GENERATOR", "generator_ids"
+                ),
+            )
+        automation = self._new_automation(
+            AutomationKind.ECONOMY,
+            command.title,
+            command.owner_id,
+            command.priority,
+            command.original_instruction,
+            list(command.generator_ids),
+            EconomyParameters(list(command.generator_ids), command.target_resources),
+        )
+        failure = self._validate_claims(automation, command.generator_ids)
+        if failure is not None:
+            return self._reject_validation("create_economy", failure)
+        self._activate(automation, command.generator_ids)
+        return self._accept("create_economy", automation.automation_id)
+
     def _pause(self, automation_id: str, owner_id: str) -> CommandResult:
         automation, failure = self._owned_automation(automation_id, owner_id)
         if failure is not None:
@@ -861,6 +946,8 @@ class Simulation:
                 self._drive_production(automation)
             elif automation.kind is AutomationKind.REINFORCEMENT:
                 self._drive_reinforcement(automation)
+            elif automation.kind is AutomationKind.ECONOMY:
+                self._drive_economy(automation)
             else:
                 self._drive_repair(automation)
 
@@ -914,6 +1001,26 @@ class Simulation:
             if automation.status is not AutomationStatus.PAUSED:
                 self._transition(automation, AutomationStatus.PAUSED, "FACTORY_UNAVAILABLE")
             return
+        cost = parameters.unit_kind.profile.production_cost
+        if not parameters.cost_paid:
+            balance = self.resources.get(automation.owner_id, 0)
+            if balance < cost:
+                if automation.status is AutomationStatus.ACTIVE:
+                    self._transition(automation, AutomationStatus.WAITING, "INSUFFICIENT_RESOURCES")
+                return
+            self.resources[automation.owner_id] = balance - cost
+            parameters.cost_paid = True
+            if automation.status is AutomationStatus.WAITING:
+                self._transition(automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE")
+            self.events.record(
+                self.tick,
+                EventType.RESOURCE_CHANGED,
+                automation.owner_id,
+                amount=-cost,
+                balance=self.resources[automation.owner_id],
+                reason="PRODUCTION_COST",
+                automation_id=automation.automation_id,
+            )
         if automation.status is AutomationStatus.ACTIVE:
             parameters.progress_ticks += 1
             if parameters.progress_ticks < parameters.build_ticks:
@@ -926,6 +1033,7 @@ class Simulation:
         if automation.status is AutomationStatus.WAITING:
             self._transition(automation, AutomationStatus.ACTIVE, "SPAWN_AVAILABLE")
         parameters.progress_ticks = 0
+        parameters.cost_paid = False
         entity_id = self._spawn_unit(automation, parameters, spawn)
         parameters.produced_count += 1
         parameters.produced_entity_ids.append(entity_id)
@@ -940,6 +1048,36 @@ class Simulation:
         if parameters.produced_count >= parameters.target_count:
             self._transition(automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED")
             self._release_automation(automation)
+
+    def _drive_economy(self, automation: Automation) -> None:
+        parameters = _economy_parameters(automation)
+        if self.resources.get(automation.owner_id, 0) >= parameters.target_resources:
+            self._transition(automation, AutomationStatus.COMPLETED, "RESOURCE_TARGET_REACHED")
+            self._release_automation(automation)
+            return
+        active = [
+            generator_id
+            for generator_id in parameters.generator_ids
+            if self.assignments.get(generator_id) == automation.automation_id
+            and generator_id in self.entities
+        ]
+        if not active:
+            self._transition(automation, AutomationStatus.FAILED, "NO_RESOURCE_GENERATORS")
+            return
+        if self.tick % parameters.income_cycle_ticks:
+            return
+        amount = parameters.income_per_cycle * len(active)
+        self.resources[automation.owner_id] = self.resources.get(automation.owner_id, 0) + amount
+        parameters.collected += amount
+        self.events.record(
+            self.tick,
+            EventType.RESOURCE_CHANGED,
+            automation.owner_id,
+            amount=amount,
+            balance=self.resources[automation.owner_id],
+            reason="GENERATOR_INCOME",
+            automation_id=automation.automation_id,
+        )
 
     def _drive_reinforcement(self, automation: Automation) -> None:
         parameters = _reinforcement_parameters(automation)
@@ -1034,6 +1172,114 @@ class Simulation:
                 parameters.phases[entity_id] = RepairPhase.DONE
         if all(phase is RepairPhase.DONE for phase in parameters.phases.values()):
             self._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
+
+    def _drive_retreats(self) -> None:
+        for entity_id in sorted(tuple(self.entities)):
+            entity = self.entities.get(entity_id)
+            if entity is None or not entity.is_movable or entity.health <= 0:
+                continue
+            if entity.health / entity.kind.profile.max_health > 0.25:
+                continue
+            assigned_id = self.assignments.get(entity_id)
+            if (
+                assigned_id is not None
+                and self.automations[assigned_id].kind is AutomationKind.REPAIR_AND_RETURN
+            ):
+                continue
+            result = self._create_repair(
+                CreateRepairAndReturnCommand(
+                    (entity_id,),
+                    health_threshold=0.25,
+                    title="Emergency Retreat",
+                    owner_id=entity.owner_id,
+                )
+            )
+            if result.accepted:
+                entity.attack_target_id = None
+                entity.state = UnitState.RETREATING
+                self.events.record(
+                    self.tick,
+                    EventType.RETREAT_STARTED,
+                    entity_id,
+                    automation_id=result.automation_id,
+                    health=entity.health,
+                )
+
+    def _drive_combat(self) -> None:
+        for entity_id in sorted(tuple(self.entities)):
+            attacker = self.entities.get(entity_id)
+            if attacker is None or attacker.kind.profile.attack_damage <= 0:
+                continue
+            assigned_id = self.assignments.get(entity_id)
+            if (
+                assigned_id is not None
+                and self.automations[assigned_id].kind is AutomationKind.REPAIR_AND_RETURN
+            ):
+                continue
+            if attacker.attack_cooldown > 0:
+                attacker.attack_cooldown -= 1
+            target = self.entities.get(attacker.attack_target_id or "")
+            if target is None or target.owner_id == attacker.owner_id:
+                target = self._nearest_enemy_in_range(attacker)
+                attacker.attack_target_id = None if target is None else target.entity_id
+            if target is None:
+                continue
+            distance = attacker.selection_position.distance_to(target.selection_position)
+            if distance > attacker.kind.profile.attack_range:
+                if attacker.state is UnitState.ATTACKING and not attacker.path:
+                    self._chase_target(attacker, target)
+                continue
+            attacker.path.clear()
+            attacker.move_target = None
+            attacker.state = UnitState.ATTACKING
+            if attacker.attack_cooldown:
+                continue
+            damage = attacker.kind.profile.attack_damage
+            target.health = max(0, target.health - damage)
+            attacker.attack_cooldown = 10
+            self.events.record(
+                self.tick,
+                EventType.COMBAT_ATTACK,
+                attacker.entity_id,
+                target_id=target.entity_id,
+                damage=damage,
+                target_health=target.health,
+            )
+            if target.health == 0:
+                self.events.record(
+                    self.tick,
+                    EventType.ENTITY_DESTROYED,
+                    target.entity_id,
+                    attacker_id=attacker.entity_id,
+                )
+                self._remove_entity(RemoveEntityCommand(target.entity_id, "COMBAT_DESTROYED"))
+
+    def _nearest_enemy_in_range(self, attacker: Entity) -> Entity | None:
+        candidates = [
+            (
+                attacker.selection_position.distance_to(entity.selection_position),
+                entity.entity_id,
+                entity,
+            )
+            for entity in self.entities.values()
+            if entity.owner_id != attacker.owner_id
+            and attacker.selection_position.distance_to(entity.selection_position)
+            <= attacker.kind.profile.attack_range
+        ]
+        return min(candidates)[2] if candidates else None
+
+    def _chase_target(self, attacker: Entity, target: Entity) -> None:
+        paths: list[tuple[float, Point, PathResult]] = []
+        blocked = self._building_cells()
+        for point in self._interaction_points(target):
+            try:
+                path = find_path(self.game_map, attacker.position, point, blocked)
+                paths.append((path.cost, point, path))
+            except PathfindingError:
+                continue
+        if paths:
+            _, point, path = min(paths, key=lambda item: (item[0], item[1].y, item[1].x))
+            self._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
 
     def _move_entities(self) -> None:
         for entity_id in sorted(self.entities):
@@ -1268,6 +1514,8 @@ class Simulation:
             entity.state = UnitState.PRODUCING
         elif automation.kind is AutomationKind.REPAIR_AND_RETURN:
             entity.state = UnitState.RETURNING
+        elif automation.kind is AutomationKind.ECONOMY:
+            entity.state = UnitState.IDLE
 
     def _spawn_unit(
         self, automation: Automation, parameters: ProductionParameters, position: Point
@@ -1553,6 +1801,7 @@ class Simulation:
             AutomationKind.PRODUCTION: UnitState.PRODUCING,
             AutomationKind.REINFORCEMENT: UnitState.WAITING,
             AutomationKind.REPAIR_AND_RETURN: UnitState.REPAIRING,
+            AutomationKind.ECONOMY: UnitState.IDLE,
         }[automation.kind]
 
     def _fail_movement(self, entity: Entity, reason: str, position: Point) -> None:
@@ -1695,6 +1944,12 @@ def _production_parameters(automation: Automation) -> ProductionParameters:
 def _reinforcement_parameters(automation: Automation) -> ReinforcementParameters:
     if not isinstance(automation.parameters, ReinforcementParameters):
         raise TypeError("automation does not have reinforcement parameters")
+    return automation.parameters
+
+
+def _economy_parameters(automation: Automation) -> EconomyParameters:
+    if not isinstance(automation.parameters, EconomyParameters):
+        raise TypeError("automation does not have economy parameters")
     return automation.parameters
 
 
