@@ -78,12 +78,29 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     simulation = _phase5_simulation()
     assert simulation.execute(AttackCommand(("tank",), "enemy")).accepted
     simulation.advance()
+    assert simulation.entities["enemy"].health == 60
+    assert simulation.projectiles
+    assert simulation.events.query(event_types=frozenset({EventType.PROJECTILE_LAUNCHED}))
+    player_projectile = next(
+        projectile
+        for projectile in simulation.projectiles.values()
+        if projectile.source_entity_id == "tank"
+    )
+    launch_position = player_projectile.position
+
+    simulation.advance()
+    assert player_projectile.position != launch_position
+    assert len(player_projectile.trajectory) == 2
+
+    simulation.advance()
     assert simulation.entities["enemy"].health == 48
     assert simulation.events.query(event_types=frozenset({EventType.COMBAT_ATTACK}))
+    assert simulation.events.query(event_types=frozenset({EventType.PROJECTILE_IMPACT}))
+    assert simulation.projectile_traces
 
     simulation.entities["enemy"].health = 5
     simulation.entities["tank"].attack_cooldown = 0
-    simulation.advance()
+    simulation.advance(3)
     assert "enemy" not in simulation.entities
     assert simulation.events.query(event_types=frozenset({EventType.ENTITY_DESTROYED}))
 
@@ -101,6 +118,53 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     assert requested.accepted
     assert assigned.kind is AutomationKind.REPAIR_AND_RETURN
     assert assigned.title == "Repair And Return"
+
+
+def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities() -> None:
+    def combat_simulation(kind: EntityKind) -> Simulation:
+        return Simulation(
+            load_map_data(
+                {
+                    "id": f"{kind.value}_projectile",
+                    "name": "Projectile Damage",
+                    "width": 12,
+                    "height": 12,
+                    "terrain": {"default": "grass", "rectangles": []},
+                    "entities": [
+                        {
+                            "id": "attacker",
+                            "kind": kind.value,
+                            "owner": "player",
+                            "position": [2.5, 5.5],
+                        },
+                        {
+                            "id": "target",
+                            "kind": "heavy_tank",
+                            "owner": "enemy",
+                            "position": [5.5, 5.5],
+                        },
+                        {
+                            "id": "bystander",
+                            "kind": "heavy_tank",
+                            "owner": "enemy",
+                            "position": [5.5, 6.5],
+                        },
+                    ],
+                }
+            )
+        )
+
+    results: dict[EntityKind, int] = {}
+    for kind in (EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK):
+        simulation = combat_simulation(kind)
+        assert simulation.execute(AttackCommand(("attacker",), "target")).accepted
+        simulation.advance(8)
+        results[kind] = (
+            EntityKind.HEAVY_TANK.profile.max_health - simulation.entities["target"].health
+        )
+        assert simulation.entities["bystander"].health == EntityKind.HEAVY_TANK.profile.max_health
+
+    assert results == {EntityKind.LIGHT_TANK: 12, EntityKind.HEAVY_TANK: 20}
 
 
 def test_phase5_save_and_replay_preserve_resources_and_combat(

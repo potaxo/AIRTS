@@ -31,6 +31,7 @@ from airts.map_model import (
     load_map_data,
 )
 from airts.occupancy import OccupancyError, OccupancyGrid
+from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.simulation import Simulation
 from airts.spatial import (
     GroundingSelection,
@@ -82,6 +83,10 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation.tick = tick
     simulation.entities = _load_entities(state.get("entities"), game_map)
     simulation.occupancy = _build_occupancy(simulation)
+    simulation.projectiles = _load_projectiles(state.get("projectiles", {}), simulation)
+    simulation.projectile_traces = _load_projectile_traces(
+        state.get("projectile_traces", []), simulation
+    )
     simulation.automations = _load_automations(state.get("automations"), simulation)
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
     simulation.suspended_assignments = _load_suspended_assignments(
@@ -113,6 +118,19 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation._next_entity_number = _integer(
         state.get("next_entity_number"), "state.next_entity_number", minimum=1
     )
+    simulation._next_projectile_number = _integer(
+        state.get("next_projectile_number", 1),
+        "state.next_projectile_number",
+        minimum=1,
+    )
+    projectile_numbers = [
+        int(projectile_id.removeprefix("projectile_"))
+        for projectile_id in simulation.projectiles
+        if projectile_id.startswith("projectile_")
+        and projectile_id.removeprefix("projectile_").isdigit()
+    ]
+    if projectile_numbers and simulation._next_projectile_number <= max(projectile_numbers):
+        raise PersistenceError("next_projectile_number would overwrite an active projectile")
     simulation._movement_blocked = _string_set(
         state.get("movement_blocked", []), "state.movement_blocked"
     )
@@ -221,8 +239,46 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
         )
         path = [_point(item, "entity.path item") for item in _list(entity.get("path"), "path")]
         path_cost = _number(entity.get("path_cost"), "entity.path_cost", minimum=0.0)
+        progress_target_raw = entity.get("progress_target")
+        progress_target = (
+            None
+            if progress_target_raw is None
+            else _point(progress_target_raw, "entity.progress_target")
+        )
+        progress_distance_raw = entity.get("progress_distance")
+        progress_distance = (
+            None
+            if progress_distance_raw is None
+            else _number(progress_distance_raw, "entity.progress_distance", minimum=0.0)
+        )
+        no_progress_ticks = _integer(
+            entity.get("no_progress_ticks", 0), "entity.no_progress_ticks", minimum=0
+        )
+        congestion_stopped = _boolean(
+            entity.get("congestion_stopped", False), "entity.congestion_stopped"
+        )
+        if (progress_target is None) != (progress_distance is None):
+            raise PersistenceError(
+                f"entity {entity_id} movement progress fields must both be set or null"
+            )
+        if progress_target is not None and (not path or progress_target != path[0]):
+            raise PersistenceError(
+                f"entity {entity_id} movement progress target must match its next waypoint"
+            )
+        if no_progress_ticks and progress_target is None:
+            raise PersistenceError(
+                f"entity {entity_id} cannot have stalled ticks without movement progress"
+            )
+        if congestion_stopped and (
+            path or move_target is not None or state is not UnitState.HOLDING
+        ):
+            raise PersistenceError(f"entity {entity_id} has inconsistent congestion-stopped state")
         if kind.profile.category is EntityCategory.BUILDING and (
-            path or move_target is not None or state not in {UnitState.IDLE, UnitState.PRODUCING}
+            path
+            or move_target is not None
+            or progress_target is not None
+            or congestion_stopped
+            or state not in {UnitState.IDLE, UnitState.PRODUCING}
         ):
             raise PersistenceError(f"building {entity_id} cannot have movement state")
         if kind.profile.category is EntityCategory.BUILDING and (
@@ -251,6 +307,10 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
             attack_cooldown=_integer(
                 entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
             ),
+            progress_target=progress_target,
+            progress_distance=progress_distance,
+            no_progress_ticks=no_progress_ticks,
+            congestion_stopped=congestion_stopped,
         )
     for loaded_entity in entities.values():
         if (
@@ -274,6 +334,70 @@ def _build_occupancy(simulation: Simulation) -> OccupancyGrid:
         except OccupancyError as error:
             raise PersistenceError(f"invalid saved occupancy: {error}") from error
     return occupancy
+
+
+def _load_projectiles(raw_data: object, simulation: Simulation) -> dict[str, Projectile]:
+    data = _mapping(raw_data, "state.projectiles")
+    projectiles: dict[str, Projectile] = {}
+    for projectile_id, raw_projectile in data.items():
+        item = _mapping(raw_projectile, f"projectile {projectile_id}")
+        if item.get("id") != projectile_id:
+            raise PersistenceError("projectile key and ID differ")
+        try:
+            weapon_kind = EntityKind(_string(item.get("weapon_kind"), "projectile.weapon_kind"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid projectile weapon kind: {error}") from error
+        speed = _number(item.get("speed"), "projectile.speed", minimum=0.01)
+        damage = _integer(item.get("damage"), "projectile.damage", minimum=1)
+        if projectile_speed(weapon_kind) <= 0 or damage != weapon_kind.profile.attack_damage:
+            raise PersistenceError("projectile weapon profile is invalid")
+        position = _point(item.get("position"), "projectile.position")
+        trajectory = list(_points(item.get("trajectory"), "projectile.trajectory"))
+        if not trajectory or trajectory[-1] != position:
+            raise PersistenceError("projectile trajectory must end at its current position")
+        if any(not simulation.game_map.contains(point) for point in trajectory):
+            raise PersistenceError("projectile trajectory leaves the map")
+        projectiles[projectile_id] = Projectile(
+            projectile_id=projectile_id,
+            source_entity_id=_string(item.get("source_entity_id"), "projectile.source_entity_id"),
+            target_entity_id=_string(item.get("target_entity_id"), "projectile.target_entity_id"),
+            owner_id=_string(item.get("owner_id"), "projectile.owner_id"),
+            weapon_kind=weapon_kind,
+            position=position,
+            damage=damage,
+            speed=speed,
+            trajectory=trajectory,
+        )
+    return projectiles
+
+
+def _load_projectile_traces(raw_data: object, simulation: Simulation) -> list[ProjectileTrace]:
+    traces: list[ProjectileTrace] = []
+    for raw_trace in _list(raw_data, "state.projectile_traces"):
+        item = _mapping(raw_trace, "projectile trace")
+        try:
+            weapon_kind = EntityKind(
+                _string(item.get("weapon_kind"), "projectile trace weapon_kind")
+            )
+        except ValueError as error:
+            raise PersistenceError(f"invalid projectile trace weapon kind: {error}") from error
+        points = _points(item.get("points"), "projectile trace points")
+        if not points or any(not simulation.game_map.contains(point) for point in points):
+            raise PersistenceError("projectile trace has invalid points")
+        expires_tick = _integer(
+            item.get("expires_tick"), "projectile trace expires_tick", minimum=0
+        )
+        if expires_tick <= simulation.tick:
+            raise PersistenceError("saved projectile trace is already expired")
+        traces.append(
+            ProjectileTrace(
+                _string(item.get("projectile_id"), "projectile trace projectile_id"),
+                weapon_kind,
+                points,
+                expires_tick,
+            )
+        )
+    return traces
 
 
 def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Automation]:
@@ -595,6 +719,13 @@ def _validate_assignment_completeness(simulation: Simulation) -> None:
         elif automation.kind is AutomationKind.REINFORCEMENT:
             if assigned:
                 raise PersistenceError("reinforcement automations do not own entities")
+        elif (
+            automation.kind is AutomationKind.PRODUCTION
+            and automation.status is AutomationStatus.WAITING
+            and automation.reason_code == "FACTORY_QUEUED"
+        ):
+            if assigned:
+                raise PersistenceError("queued production cannot own its factory")
         elif automation.status is AutomationStatus.PAUSED:
             if not assigned.issubset(expected):
                 raise PersistenceError("paused automation assignments are invalid")

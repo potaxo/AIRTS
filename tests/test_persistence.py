@@ -80,3 +80,23 @@ def test_phase3_controller_progress_and_suspended_assignments_round_trip(
     assert [event.to_dict() for event in restored.events.events] == [
         event.to_dict() for event in simulation.events.events
     ]
+
+
+def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> None:
+    simulation = Simulation(load_example_map(), random_seed=11)
+    first = simulation.execute(CreateProductionCommand("factory_01", EntityKind.SCOUT, 1))
+    second = simulation.execute(CreateProductionCommand("factory_01", EntityKind.LIGHT_TANK, 1))
+    simulation.advance(4)
+    destination = tmp_path / "production-queue.json"
+
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+
+    assert restored.snapshot() == simulation.snapshot()
+    assert restored.automations[second.automation_id or ""].reason_code == "FACTORY_QUEUED"
+
+    simulation.advance(30)
+    restored.advance(30)
+    assert restored.snapshot() == simulation.snapshot()
+    assert simulation.automations[first.automation_id or ""].status.value == "completed"
+    assert simulation.automations[second.automation_id or ""].status.value == "completed"

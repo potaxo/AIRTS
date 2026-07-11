@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pygame
 
-from airts.automations import AutomationStatus
+from airts.automations import AutomationKind, AutomationStatus, ProductionParameters
 from airts.commands import (
     AttackCommand,
     CancelAutomationCommand,
@@ -46,7 +46,6 @@ from airts.spatial import SpatialKind
 
 class InputMode(StrEnum):
     SELECT = "select"
-    POINT = "point"
     LINE = "line"
     RECTANGLE = "rectangle"
     FREEHAND = "freehand"
@@ -136,21 +135,14 @@ class AirtsApp:
     def _handle_key(self, key: int) -> None:
         mode_keys = {
             pygame.K_1: InputMode.SELECT,
-            pygame.K_2: InputMode.POINT,
-            pygame.K_3: InputMode.LINE,
-            pygame.K_4: InputMode.RECTANGLE,
-            pygame.K_5: InputMode.FREEHAND,
+            pygame.K_2: InputMode.LINE,
+            pygame.K_3: InputMode.RECTANGLE,
+            pygame.K_4: InputMode.FREEHAND,
         }
         if key in mode_keys:
             self.mode = mode_keys[key]
             self._clear_draft()
             self.notice = f"Input mode: {self.mode.value}"
-        elif key in {pygame.K_RETURN, pygame.K_KP_ENTER} and self.mode is InputMode.LINE:
-            if len(self.line_points) < 2:
-                self.notice = "A line needs at least two points."
-                return
-            self._finish_target(PolylineTarget(tuple(self.line_points)))
-            self.line_points.clear()
         elif key == pygame.K_a:
             self._create_patrol()
         elif key == pygame.K_d:
@@ -201,6 +193,12 @@ class AirtsApp:
             return
         point = self._map_point(position)
         if button == 3:
+            if self.mode is InputMode.LINE:
+                if len(self.line_points) < 2:
+                    self.notice = "A line needs at least two points before finishing."
+                    return
+                self._finish_target(PolylineTarget(tuple(self.line_points)))
+                return
             enemies = sorted(
                 (entity.selection_position.distance_to(point), entity.entity_id)
                 for entity in self.simulation.entities.values()
@@ -217,11 +215,9 @@ class AirtsApp:
             return
         if button != 1:
             return
-        if self.mode is InputMode.POINT:
-            self._finish_target(PointTarget(point))
-        elif self.mode is InputMode.LINE:
+        if self.mode is InputMode.LINE:
             self.line_points.append(point)
-            self.notice = "Add another line point or press Enter to finish."
+            self.notice = "Left-click to add vertices; right-click to finish."
         elif self.mode is InputMode.FREEHAND:
             self.freehand_points = [point]
         else:
@@ -586,6 +582,7 @@ class AirtsApp:
         self._draw_map(screen)
         self._draw_spatial_input(screen)
         self._draw_entities(screen)
+        self._draw_projectiles(screen)
         self._draw_command_bar(screen)
         self._draw_panel(screen)
 
@@ -685,11 +682,19 @@ class AirtsApp:
         draft_points = self.line_points or self.freehand_points
         if draft_points:
             pixels = [self._screen_point(point) for point in draft_points]
+            mouse = pygame.mouse.get_pos()
+            if (
+                self.mode is InputMode.LINE
+                and self.line_points
+                and mouse[0] < self.MAP_PIXELS
+                and mouse[1] < self.MAP_PIXELS
+            ):
+                pixels.append(mouse)
             if len(pixels) > 1:
                 pygame.draw.lines(screen, (255, 170, 210), False, pixels, 2)
-            for pixel in pixels:
+            for pixel in pixels[: len(draft_points)]:
                 pygame.draw.circle(screen, (255, 170, 210), pixel, 3)
-        if self.mode is InputMode.SELECT and self.drag_start is not None:
+        if self.mode in {InputMode.SELECT, InputMode.RECTANGLE} and self.drag_start is not None:
             mouse = pygame.mouse.get_pos()
             if mouse[0] < self.MAP_PIXELS and mouse[1] < self.MAP_PIXELS:
                 start = self._screen_point(self.drag_start)
@@ -711,6 +716,39 @@ class AirtsApp:
                 label.set_alpha(220)
                 label_rect = label.get_rect(center=self._screen_point(center))
                 screen.blit(label, label_rect)
+
+    def _draw_projectiles(self, screen: pygame.Surface) -> None:
+        colors = {
+            EntityKind.SCOUT: (120, 225, 255),
+            EntityKind.LIGHT_TANK: (255, 232, 105),
+            EntityKind.HEAVY_TANK: (255, 135, 70),
+        }
+        radii = {
+            EntityKind.SCOUT: 3,
+            EntityKind.LIGHT_TANK: 4,
+            EntityKind.HEAVY_TANK: 5,
+        }
+        for trace in self.simulation.projectile_traces:
+            points = [self._screen_point(point) for point in trace.points]
+            if len(points) > 1:
+                pygame.draw.lines(screen, colors[trace.weapon_kind], False, points, 2)
+        for projectile in self.simulation.projectiles.values():
+            color = colors[projectile.weapon_kind]
+            points = [self._screen_point(point) for point in projectile.trajectory]
+            if len(points) > 1:
+                pygame.draw.lines(screen, color, False, points, 3)
+            target = self.simulation.entities.get(projectile.target_entity_id)
+            if target is not None:
+                pygame.draw.line(
+                    screen,
+                    tuple(channel // 2 for channel in color),
+                    self._screen_point(projectile.position),
+                    self._screen_point(target.selection_position),
+                    1,
+                )
+            center = self._screen_point(projectile.position)
+            pygame.draw.circle(screen, (255, 255, 255), center, radii[projectile.weapon_kind] + 2)
+            pygame.draw.circle(screen, color, center, radii[projectile.weapon_kind])
 
     def _draw_target(
         self,
@@ -787,9 +825,9 @@ class AirtsApp:
             self._small_text(screen, line, (x, y), (244, 216, 118))
             y += 18
         y += 7
-        self._small_text(screen, "1 Select  2 Point  3 Line", (x, y), (205, 210, 218))
+        self._small_text(screen, "1 Select  2 Line  3 Rectangle", (x, y), (205, 210, 218))
         y += 18
-        self._small_text(screen, "4 Rectangle  5 Freehand", (x, y), (205, 210, 218))
+        self._small_text(screen, "4 Freehand  Right-click finishes line", (x, y), (205, 210, 218))
         y += 18
         self._small_text(
             screen, "A Patrol D Defend P Produce R Repair G Economy", (x, y), (205, 210, 218)
@@ -863,6 +901,12 @@ class AirtsApp:
                 f"{automation.automation_id} | {automation.kind.value} | "
                 f"{automation.status.value} | {len(automation.entity_ids)} entities"
             )
+            if automation.kind is AutomationKind.PRODUCTION:
+                parameters = automation.parameters
+                assert isinstance(parameters, ProductionParameters)
+                queue = self.simulation.production_queue(parameters.factory_id)
+                queue_ids = [item.automation_id for item in queue]
+                summary += f" | queue {queue_ids.index(automation.automation_id) + 1}/{len(queue)}"
             self._small_text(screen, summary, (x, y), (153, 178, 198))
             y += 21
             if automation.status in {

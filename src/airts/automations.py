@@ -330,7 +330,12 @@ _ALLOWED_TRANSITIONS: dict[AutomationStatus, frozenset[AutomationStatus]] = {
         }
     ),
     AutomationStatus.PAUSED: frozenset(
-        {AutomationStatus.ACTIVE, AutomationStatus.CANCELED, AutomationStatus.FAILED}
+        {
+            AutomationStatus.ACTIVE,
+            AutomationStatus.WAITING,
+            AutomationStatus.CANCELED,
+            AutomationStatus.FAILED,
+        }
     ),
     AutomationStatus.BLOCKED: frozenset(
         {

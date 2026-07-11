@@ -58,10 +58,9 @@ Tick-stamped commands can also be captured and deterministically verified:
 | Input | Action |
 | --- | --- |
 | `1` | Selection mode; click entities or regions, or drag friendly units; `Shift` toggles additions |
-| `2` | Place a point patrol target |
-| `3` | Add line vertices; press `Enter` to finish the route |
-| `4` | Drag a rectangular patrol area |
-| `5` | Draw a freehand patrol area |
+| `2` | Add line vertices; right-click to finish the route |
+| `3` | Drag a rectangular patrol area |
+| `4` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
 | `D` | Create a defend automation from selected units and current target |
 | `P` | Produce three light tanks from exactly one selected factory |
@@ -79,8 +78,8 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `Space` | Pause or resume simulation time |
 | `Esc` | Clear the current spatial target or draft |
 
-Point, line, rectangle, and freehand tools return to selection mode after one completed
-operation. Drawing creates stable point, route, and region IDs. Named regions are persistent and
+Line, rectangle, and freehand tools return to selection mode after one completed
+operation. Drawing creates stable route and region IDs. Named regions are persistent and
 must have unique names; overlapping regions are allowed. Click an automation card to
 inspect its provenance, owner, priority, reason, timestamps, and entities. The panel
 also provides pause/resume and cancel controls, and the event view includes validation
@@ -103,7 +102,10 @@ human input, emergency repair, explicit priority, and then the newer equal-prior
 instruction. Units have one current assignment and may retain one suspended assignment
 while repairing.
 
-Factories reserve unit costs before building and wait visibly when funds are insufficient.
+Each factory owns a FIFO production queue: the first unfinished request runs, later requests
+wait visibly, and completion or cancellation starts the next job. Pausing preserves progress;
+resuming an active or queued job does not create a control conflict. Factories reserve unit
+costs before building and wait visibly when funds are insufficient.
 Resource generators produce deterministic passive income every second; an economy automation
 monitors progress toward a target and exposes it through the normal lifecycle. Defend
 behavior maintains grounded positions and engages nearby enemies, reinforcement transfers
@@ -114,9 +116,31 @@ assignment.
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
 footprints are hard obstacles. A deterministic local swarm controller ranks short steering
 velocities by route progress, unit separation, and a left-hand passing convention. Moving
-units look past contested intermediate waypoints; a unit still blocked for one second uses
-a free sidestep and replans as a final recovery. Group destinations and patrol starts remain
-distributed. The UI displays the global path rather than deriving one itself.
+units look past contested intermediate waypoints, and separate commands reserve distinct
+destination cells. Group moves fill forward formation slots first so early arrivals do not
+plug the approach. Intermediate A* cell centers use a small completion radius, while final
+destinations remain exact and reroute around settled units when necessary. A unit still
+blocked uses a free sidestep and reallocates a crowded destination as final recovery. Group
+destinations and patrol starts remain distributed. The UI displays the global path rather
+than deriving one itself.
+On the final waypoint a unit snaps to its validated destination and becomes idle (or resumes
+its assigned behavior), preventing local separation steering from making it oscillate there.
+Every unit has a physical collider and mass. Contact pressure is resolved continuously over
+simulation ticks rather than by bouncing or teleporting a blocker into another cell. Every unit
+can push moving or stationary units; displacement per tick is inversely proportional to the
+pushed unit's mass, so heavy tanks accelerate more slowly. Opposing forces combine
+deterministically, equal head-on pressure may stalemate, and touching chains propagate force.
+Swept contact clamping prevents deep overlap. Pushing preserves each unit's current order and is
+recorded as structured `unit_pushed` events. If an order makes no meaningful progress toward its
+current waypoint for three seconds, the unit enters a stable, still-pushable hold and records a
+`movement_stopped` event. A new manual order, automation assignment, or explicit automation resume
+clears that congestion stop.
+
+Combat uses authoritative direct-hit projectiles. Firing creates a visible bullet that moves
+on deterministic simulation ticks, records its map trajectory, and applies the firing unit's
+damage only when it reaches the selected target. Completed trajectories remain briefly visible;
+projectiles and traces are included in save/load and replay state. Scouts, light tanks, and heavy
+tanks retain distinct damage, range, and projectile-speed profiles.
 
 Visibility is stored separately for each owner as visible, explored, or unexplored cells.
 This phase exposes the authoritative information state but deliberately does not hide map
@@ -141,8 +165,9 @@ SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ## Phase 5 limitations and exclusions
 
 Resources are a single integer balance per owner; there is no gathering unit, construction,
-technology tree, projectile simulation, armor, cover modifier, or tactical enemy AI.
-Combat uses deterministic range, damage, and cooldown profiles. Visibility does not include
+technology tree, ballistic terrain collision, armor, cover modifier, or tactical enemy AI.
+Combat uses deterministic direct-hit projectile, range, damage, and cooldown profiles; it does
+not currently model splash damage or missed shots. Visibility does not include
 line-of-sight occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are
 versioned and reject older incompatible schemas.
 

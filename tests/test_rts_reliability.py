@@ -11,7 +11,7 @@ from airts.commands import (
     command_from_dict,
     command_to_dict,
 )
-from airts.geometry import Point, PointTarget, rectangle_region
+from airts.geometry import Point, PolylineTarget, rectangle_region
 from airts.map_model import load_map_data
 from airts.simulation import Simulation
 
@@ -59,18 +59,40 @@ def test_drag_selection_chooses_only_friendly_units_and_keeps_grounding() -> Non
     assert simulation.selection.region_ids == (region.reference_id,)
 
 
-def test_spatial_tools_are_one_shot_and_existing_region_preserves_units() -> None:
+def test_line_finishes_with_right_click_and_preserves_selected_units() -> None:
     simulation = _interaction_simulation()
     app = AirtsApp(simulation)
     app.selected_entities = {"unit"}
-    app.mode = InputMode.POINT
+    app.mode = InputMode.LINE
+    app._handle_mouse_down(1, (80, 80))
+    app._handle_mouse_down(1, (120, 120))
 
-    app._finish_target(PointTarget(Point(8, 8)))
+    app._handle_mouse_down(3, (140, 140))
 
     assert app.mode is InputMode.SELECT
     assert app.selected_entities == {"unit"}
     assert simulation.selection.entity_ids == ("unit",)
-    assert simulation.selection.point_ids == ("point_001",)
+    assert simulation.selection.route_ids == ("route_001",)
+    assert simulation.spatial.references["route_001"].geometry == PolylineTarget(
+        (app._map_point((80, 80)), app._map_point((120, 120)))
+    )
+
+
+def test_line_enter_does_not_finish_and_escape_cancels() -> None:
+    app = AirtsApp(_interaction_simulation())
+    app.mode = InputMode.LINE
+    app._handle_mouse_down(1, (80, 80))
+    app._handle_mouse_down(1, (120, 120))
+
+    app._handle_key(13)
+
+    assert app.mode is InputMode.LINE
+    assert len(app.line_points) == 2
+
+    app._handle_key(27)
+
+    assert app.mode is InputMode.LINE
+    assert not app.line_points
 
 
 def test_region_deletion_is_replayable_and_cancels_affected_automation() -> None:

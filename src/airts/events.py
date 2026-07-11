@@ -16,6 +16,8 @@ class EventType(StrEnum):
     MOVEMENT_COMPLETED = "movement_completed"
     MOVEMENT_FAILED = "movement_failed"
     MOVEMENT_BLOCKED = "movement_blocked"
+    MOVEMENT_STOPPED = "movement_stopped"
+    UNIT_PUSHED = "unit_pushed"
     PATH_COMPUTED = "path_computed"
     PATHFINDING_FAILED = "pathfinding_failed"
     AUTOMATION_CREATED = "automation_created"
@@ -36,6 +38,8 @@ class EventType(StrEnum):
     AUTOMATION_MODIFIED = "automation_modified"
     RESOURCE_CHANGED = "resource_changed"
     COMBAT_ATTACK = "combat_attack"
+    PROJECTILE_LAUNCHED = "projectile_launched"
+    PROJECTILE_IMPACT = "projectile_impact"
     ENTITY_DESTROYED = "entity_destroyed"
     RETREAT_STARTED = "retreat_started"
 

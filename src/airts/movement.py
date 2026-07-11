@@ -5,9 +5,26 @@ from __future__ import annotations
 from math import cos, hypot, radians, sin
 
 from airts.geometry import Point
+from airts.map_model import EntityKind
 
 NEIGHBOR_RADIUS = 2.25
 PREFERRED_SEPARATION = 1.15
+
+
+def unit_mass(kind: EntityKind) -> int:
+    return {
+        EntityKind.SCOUT: 1,
+        EntityKind.LIGHT_TANK: 2,
+        EntityKind.HEAVY_TANK: 3,
+    }.get(kind, 100)
+
+
+def collision_radius(kind: EntityKind) -> float:
+    return {
+        EntityKind.SCOUT: 0.30,
+        EntityKind.LIGHT_TANK: 0.38,
+        EntityKind.HEAVY_TANK: 0.45,
+    }.get(kind, 0.5)
 
 
 def steering_candidates(

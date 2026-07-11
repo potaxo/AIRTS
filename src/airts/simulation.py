@@ -50,9 +50,10 @@ from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PointTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
-from airts.movement import steering_candidates
+from airts.movement import collision_radius, steering_candidates, unit_mass
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.pathfinding import PathfindingError, PathResult, find_path
+from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
 from airts.validation import (
     ValidationFailure,
@@ -66,6 +67,8 @@ from airts.visibility import VisibilitySystem
 class Simulation:
     TICKS_PER_SECOND = 10
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
+    NO_PROGRESS_STOP_TICKS = 30
+    MIN_PROGRESS_DISTANCE = 0.02
 
     def __init__(self, game_map: GameMap, random_seed: int = 0) -> None:
         self.game_map = game_map
@@ -96,6 +99,9 @@ class Simulation:
         self.selection = GroundingSelection()
         self._next_automation_number = 1
         self._next_entity_number = 1
+        self._next_projectile_number = 1
+        self.projectiles: dict[str, Projectile] = {}
+        self.projectile_traces: list[ProjectileTrace] = []
         self._command_history: list[dict[str, object]] = []
         self._movement_blocked: set[str] = set()
         self._blocked_ticks: dict[str, int] = {}
@@ -121,6 +127,11 @@ class Simulation:
                 reverse=True,
             )
         )
+
+    def production_queue(self, factory_id: str) -> tuple[Automation, ...]:
+        """Return one factory's unfinished production jobs in FIFO order."""
+
+        return self._factory_production_jobs(factory_id)
 
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
@@ -172,6 +183,7 @@ class Simulation:
             self._generate_income()
             self._drive_automations()
             self._move_entities()
+            self._drive_projectiles()
             self._drive_combat()
             self._update_visibility()
 
@@ -204,6 +216,13 @@ class Simulation:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
             self._handle_automation_without_entities(suspended)
+        for automation in tuple(self.automations.values()):
+            if (
+                automation.kind is AutomationKind.PRODUCTION
+                and not automation.status.terminal
+                and _production_parameters(automation).factory_id == entity_id
+            ):
+                self._transition(automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
         for entity in self.entities.values():
@@ -239,6 +258,11 @@ class Simulation:
             "resources": dict(sorted(self.resources.items())),
             "spatial": self.spatial.to_dict(),
             "selection": self.selection.to_dict(),
+            "projectiles": {
+                projectile_id: projectile.to_dict()
+                for projectile_id, projectile in sorted(self.projectiles.items())
+            },
+            "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
         }
 
     def export_state(self) -> dict[str, object]:
@@ -262,6 +286,12 @@ class Simulation:
             "command_history": list(self._command_history),
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
+            "next_projectile_number": self._next_projectile_number,
+            "projectiles": {
+                projectile_id: projectile.to_dict()
+                for projectile_id, projectile in sorted(self.projectiles.items())
+            },
+            "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
             "movement_blocked": sorted(self._movement_blocked),
             "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
         }
@@ -550,13 +580,12 @@ class Simulation:
             )
         try:
             destinations = self._allocate_destinations(command.entity_ids, command.target)
-            blocked = self.occupancy.blocked_cells(frozenset(command.entity_ids))
             paths = {
                 entity_id: find_path(
                     self.game_map,
                     self.entities[entity_id].position,
                     destinations[entity_id],
-                    blocked,
+                    self._blocked_cells_for_mover(entity_id, frozenset(command.entity_ids)),
                 )
                 for entity_id in command.entity_ids
             }
@@ -612,6 +641,7 @@ class Simulation:
         for entity_id in command.entity_ids:
             self._manual_override(entity_id)
             entity = self.entities[entity_id]
+            self._reset_movement_liveness(entity, clear_stop=True)
             entity.attack_target_id = target.entity_id
             entity.state = UnitState.ATTACKING
         return self._accept("attack")
@@ -626,6 +656,7 @@ class Simulation:
             entity.path.clear()
             entity.move_target = None
             entity.state = UnitState.HOLDING if hold and entity.is_movable else UnitState.IDLE
+            self._reset_movement_liveness(entity, clear_stop=True)
             self._movement_blocked.discard(entity_id)
         return self._accept("hold_position" if hold else "stop")
 
@@ -750,19 +781,17 @@ class Simulation:
                 command.rally_point,
             ),
         )
+        existing_jobs = self._factory_production_jobs(command.factory_id)
+        if existing_jobs:
+            self._activate(automation, ())
+            self._transition(automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
+            return self._accept("create_production", automation.automation_id)
         failure = self._validate_claims(automation, (command.factory_id,))
         if failure is not None:
             return self._reject_validation("create_production", failure)
         self._activate(automation, (command.factory_id,))
         factory.state = UnitState.PRODUCING
-        self.events.record(
-            self.tick,
-            EventType.PRODUCTION_STARTED,
-            automation.automation_id,
-            factory_id=command.factory_id,
-            unit_kind=command.unit_kind.value,
-            target_count=command.target_count,
-        )
+        self._record_production_started(automation)
         return self._accept("create_production", automation.automation_id)
 
     def _create_reinforcement(self, command: CreateReinforcementCommand) -> CommandResult:
@@ -952,6 +981,7 @@ class Simulation:
             entity.path.clear()
             entity.move_target = None
             entity.state = UnitState.IDLE
+            self._reset_movement_liveness(entity, clear_stop=True)
         return self._accept("pause_automation", automation_id)
 
     def _resume(self, automation_id: str, owner_id: str) -> CommandResult:
@@ -970,6 +1000,12 @@ class Simulation:
             )
         if automation.kind is AutomationKind.PRODUCTION:
             parameters = _production_parameters(automation)
+            incumbent_id = self.assignments.get(parameters.factory_id)
+            if incumbent_id is not None and incumbent_id != automation.automation_id:
+                incumbent = self.automations.get(incumbent_id)
+                if incumbent is not None and incumbent.kind is AutomationKind.PRODUCTION:
+                    self._transition(automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
+                    return self._accept("resume_automation", automation_id)
             failure = self._validate_claims(automation, (parameters.factory_id,))
             if failure is not None:
                 return self._reject_validation("resume_automation", failure)
@@ -977,6 +1013,11 @@ class Simulation:
                 automation.entity_ids.append(parameters.factory_id)
             self._assign(parameters.factory_id, automation)
             self.entities[parameters.factory_id].state = UnitState.PRODUCING
+            self._record_production_started(automation)
+        else:
+            for entity_id in automation.entity_ids:
+                if self.assignments.get(entity_id) == automation_id:
+                    self._reset_movement_liveness(self.entities[entity_id], clear_stop=True)
         self._transition(automation, AutomationStatus.ACTIVE, "PLAYER_RESUMED")
         return self._accept("resume_automation", automation_id)
 
@@ -1001,6 +1042,8 @@ class Simulation:
                     self._resume_suspended_assignment(automation, entity_id)
         else:
             self._release_automation(automation, clear_suspended=True)
+        if automation.kind is AutomationKind.PRODUCTION:
+            self._start_next_production(_production_parameters(automation).factory_id)
         return self._accept("cancel_automation", automation_id)
 
     def _drive_automations(self) -> None:
@@ -1027,6 +1070,8 @@ class Simulation:
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
+            if entity.congestion_stopped:
+                continue
             if entity.move_target is not None or entity.path:
                 continue
             target = automation.take_next_waypoint(entity_id)
@@ -1051,6 +1096,8 @@ class Simulation:
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
+            if entity.congestion_stopped:
+                continue
             if entity.path:
                 continue
             if target_contains(parameters.target, entity.position):
@@ -1067,7 +1114,17 @@ class Simulation:
 
     def _drive_production(self, automation: Automation) -> None:
         parameters = _production_parameters(automation)
+        if (
+            automation.reason_code == "FACTORY_QUEUE_STARTED"
+            and automation.modified_tick == self.tick
+        ):
+            return
         if self.assignments.get(parameters.factory_id) != automation.automation_id:
+            if (
+                automation.status is AutomationStatus.WAITING
+                and automation.reason_code == "FACTORY_QUEUED"
+            ):
+                return
             if automation.status is not AutomationStatus.PAUSED:
                 self._transition(automation, AutomationStatus.PAUSED, "FACTORY_UNAVAILABLE")
             return
@@ -1118,6 +1175,54 @@ class Simulation:
         if parameters.produced_count >= parameters.target_count:
             self._transition(automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED")
             self._release_automation(automation)
+            self._start_next_production(parameters.factory_id)
+
+    def _factory_production_jobs(self, factory_id: str) -> tuple[Automation, ...]:
+        return tuple(
+            sorted(
+                (
+                    automation
+                    for automation in self.automations.values()
+                    if automation.kind is AutomationKind.PRODUCTION
+                    and not automation.status.terminal
+                    and _production_parameters(automation).factory_id == factory_id
+                ),
+                key=lambda automation: (automation.created_tick, automation.automation_id),
+            )
+        )
+
+    def _start_next_production(self, factory_id: str) -> None:
+        incumbent_id = self.assignments.get(factory_id)
+        if incumbent_id is not None:
+            incumbent = self.automations.get(incumbent_id)
+            if incumbent is not None and not incumbent.status.terminal:
+                return
+        queued = next(
+            (
+                automation
+                for automation in self._factory_production_jobs(factory_id)
+                if automation.status is AutomationStatus.WAITING
+                and automation.reason_code == "FACTORY_QUEUED"
+            ),
+            None,
+        )
+        if queued is None or factory_id not in self.entities:
+            return
+        self._assign(factory_id, queued)
+        self._transition(queued, AutomationStatus.ACTIVE, "FACTORY_QUEUE_STARTED")
+        self.entities[factory_id].state = UnitState.PRODUCING
+        self._record_production_started(queued)
+
+    def _record_production_started(self, automation: Automation) -> None:
+        parameters = _production_parameters(automation)
+        self.events.record(
+            self.tick,
+            EventType.PRODUCTION_STARTED,
+            automation.automation_id,
+            factory_id=parameters.factory_id,
+            unit_kind=parameters.unit_kind.value,
+            target_count=parameters.target_count,
+        )
 
     def _drive_economy(self, automation: Automation) -> None:
         parameters = _economy_parameters(automation)
@@ -1196,6 +1301,11 @@ class Simulation:
                 continue
             phase = parameters.phases[entity_id]
             entity = self.entities[entity_id]
+            if entity.congestion_stopped and phase in {
+                RepairPhase.TRAVELING,
+                RepairPhase.RETURNING,
+            }:
+                continue
             if phase is RepairPhase.TRAVELING:
                 if entity.path or entity.move_target is not None:
                     continue
@@ -1281,25 +1391,102 @@ class Simulation:
             attacker.state = UnitState.ATTACKING
             if attacker.attack_cooldown:
                 continue
-            damage = attacker.kind.profile.attack_damage
-            target.health = max(0, target.health - damage)
+            speed = projectile_speed(attacker.kind)
+            if speed <= 0:
+                continue
+            projectile_id = f"projectile_{self._next_projectile_number:06d}"
+            self._next_projectile_number += 1
+            projectile = Projectile(
+                projectile_id=projectile_id,
+                source_entity_id=attacker.entity_id,
+                target_entity_id=target.entity_id,
+                owner_id=attacker.owner_id,
+                weapon_kind=attacker.kind,
+                position=attacker.selection_position,
+                damage=attacker.kind.profile.attack_damage,
+                speed=speed,
+            )
+            self.projectiles[projectile_id] = projectile
             attacker.attack_cooldown = 10
             self.events.record(
                 self.tick,
-                EventType.COMBAT_ATTACK,
+                EventType.PROJECTILE_LAUNCHED,
                 attacker.entity_id,
+                projectile_id=projectile_id,
                 target_id=target.entity_id,
-                damage=damage,
-                target_health=target.health,
+                damage=projectile.damage,
+                position=[projectile.position.x, projectile.position.y],
             )
-            if target.health == 0:
-                self.events.record(
-                    self.tick,
-                    EventType.ENTITY_DESTROYED,
-                    target.entity_id,
-                    attacker_id=attacker.entity_id,
-                )
-                self._remove_entity(RemoveEntityCommand(target.entity_id, "COMBAT_DESTROYED"))
+
+    def _drive_projectiles(self) -> None:
+        self.projectile_traces = [
+            trace for trace in self.projectile_traces if trace.expires_tick > self.tick
+        ]
+        for projectile_id in sorted(tuple(self.projectiles)):
+            projectile = self.projectiles.get(projectile_id)
+            if projectile is None:
+                continue
+            target = self.entities.get(projectile.target_entity_id)
+            if target is None or target.owner_id == projectile.owner_id:
+                self._finish_projectile(projectile)
+                continue
+            destination = target.selection_position
+            distance = projectile.position.distance_to(destination)
+            maximum_step = projectile.speed * self.TICK_SECONDS
+            if distance <= maximum_step or isclose(distance, maximum_step):
+                projectile.position = destination
+                projectile.trajectory.append(destination)
+                self._impact_projectile(projectile, target)
+                continue
+            fraction = maximum_step / distance
+            projectile.position = Point(
+                projectile.position.x + (destination.x - projectile.position.x) * fraction,
+                projectile.position.y + (destination.y - projectile.position.y) * fraction,
+            )
+            projectile.trajectory.append(projectile.position)
+
+    def _impact_projectile(self, projectile: Projectile, target: Entity) -> None:
+        target.health = max(0, target.health - projectile.damage)
+        self.events.record(
+            self.tick,
+            EventType.PROJECTILE_IMPACT,
+            projectile.projectile_id,
+            source_id=projectile.source_entity_id,
+            target_id=target.entity_id,
+            damage=projectile.damage,
+            target_health=target.health,
+            position=[projectile.position.x, projectile.position.y],
+        )
+        self.events.record(
+            self.tick,
+            EventType.COMBAT_ATTACK,
+            projectile.source_entity_id,
+            projectile_id=projectile.projectile_id,
+            target_id=target.entity_id,
+            damage=projectile.damage,
+            target_health=target.health,
+        )
+        self._finish_projectile(projectile)
+        if target.health == 0:
+            self.events.record(
+                self.tick,
+                EventType.ENTITY_DESTROYED,
+                target.entity_id,
+                attacker_id=projectile.source_entity_id,
+                projectile_id=projectile.projectile_id,
+            )
+            self._remove_entity(RemoveEntityCommand(target.entity_id, "COMBAT_DESTROYED"))
+
+    def _finish_projectile(self, projectile: Projectile) -> None:
+        self.projectiles.pop(projectile.projectile_id, None)
+        self.projectile_traces.append(
+            ProjectileTrace(
+                projectile.projectile_id,
+                projectile.weapon_kind,
+                tuple(projectile.trajectory),
+                self.tick + self.TICKS_PER_SECOND,
+            )
+        )
 
     def _nearest_enemy_in_range(self, attacker: Entity) -> Entity | None:
         candidates = [
@@ -1316,6 +1503,8 @@ class Simulation:
         return min(candidates)[2] if candidates else None
 
     def _chase_target(self, attacker: Entity, target: Entity) -> None:
+        if attacker.congestion_stopped:
+            return
         paths: list[tuple[float, Point, PathResult]] = []
         blocked = self._building_cells()
         for point in self._interaction_points(target):
@@ -1333,6 +1522,7 @@ class Simulation:
             entity = self.entities[entity_id]
             if not entity.path:
                 continue
+            self._consume_reached_intermediate_waypoints(entity)
             self._skip_crowded_waypoints(entity)
             target = entity.path[0]
             maximum_step = entity.speed * self.TICK_SECONDS
@@ -1341,16 +1531,35 @@ class Simulation:
                 for other_id, other in sorted(self.entities.items())
                 if other_id != entity_id and other.is_movable
             )
-            next_position = next(
-                (
-                    candidate
-                    for candidate in steering_candidates(
-                        entity.position, target, maximum_step, neighbors
-                    )
-                    if self._local_move_is_available(entity, candidate)
-                ),
-                None,
+            next_position: Point | None
+            direct_distance = entity.position.distance_to(target)
+            direct_position = (
+                target
+                if direct_distance <= maximum_step
+                else Point(
+                    entity.position.x
+                    + (target.x - entity.position.x) * maximum_step / direct_distance,
+                    entity.position.y
+                    + (target.y - entity.position.y) * maximum_step / direct_distance,
+                )
             )
+            direct_position = self._clamp_to_collider_contact(entity, direct_position)
+            direct_contact_approach = self._waypoint_has_unit_blocker(entity, target)
+            if (len(entity.path) == 1 or direct_contact_approach) and self._local_move_is_available(
+                entity, direct_position
+            ):
+                next_position = direct_position
+            else:
+                if len(entity.path) == 1 and self._replan_contested_final_approach(entity, target):
+                    continue
+                next_position = None
+                for raw_candidate in steering_candidates(
+                    entity.position, target, maximum_step, neighbors
+                ):
+                    candidate = self._clamp_to_collider_contact(entity, raw_candidate)
+                    if self._local_move_is_available(entity, candidate):
+                        next_position = candidate
+                        break
             if next_position is None:
                 self._record_movement_blocked(entity, "NO_SAFE_LOCAL_VELOCITY")
                 continue
@@ -1377,6 +1586,88 @@ class Simulation:
                         position=[entity.position.x, entity.position.y],
                         assignment=self.assignments.get(entity_id),
                     )
+        self._resolve_unit_collisions()
+        self._track_movement_progress()
+
+    def _track_movement_progress(self) -> None:
+        """Stop orders that are alive but no longer getting closer to their waypoint."""
+
+        for entity_id in sorted(self.entities):
+            entity = self.entities[entity_id]
+            if not entity.path:
+                self._reset_movement_liveness(entity)
+                continue
+            target = entity.path[0]
+            distance = entity.position.distance_to(target)
+            if entity.progress_target != target or entity.progress_distance is None:
+                entity.progress_target = target
+                entity.progress_distance = distance
+                entity.no_progress_ticks = 0
+                continue
+            if distance <= entity.progress_distance - self.MIN_PROGRESS_DISTANCE:
+                entity.progress_distance = distance
+                entity.no_progress_ticks = 0
+                continue
+            entity.no_progress_ticks += 1
+            if entity.no_progress_ticks < self.NO_PROGRESS_STOP_TICKS:
+                continue
+            destination = entity.move_target
+            entity.path.clear()
+            entity.move_target = None
+            entity.state = UnitState.HOLDING
+            entity.congestion_stopped = True
+            self._reset_movement_liveness(entity)
+            self._movement_blocked.discard(entity_id)
+            self._blocked_ticks.pop(entity_id, None)
+            self.events.record(
+                self.tick,
+                EventType.MOVEMENT_STOPPED,
+                entity_id,
+                reason="NO_PROGRESS_TIMEOUT",
+                timeout_ticks=self.NO_PROGRESS_STOP_TICKS,
+                destination=(None if destination is None else [destination.x, destination.y]),
+                position=[entity.position.x, entity.position.y],
+            )
+
+    @staticmethod
+    def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
+        entity.progress_target = None
+        entity.progress_distance = None
+        entity.no_progress_ticks = 0
+        if clear_stop:
+            entity.congestion_stopped = False
+
+    def _replan_contested_final_approach(self, entity: Entity, destination: Point) -> bool:
+        """Route around units that have already settled between this unit and its slot."""
+
+        try:
+            path = find_path(
+                self.game_map,
+                entity.position,
+                destination,
+                self.occupancy.blocked_cells(frozenset({entity.entity_id})),
+            )
+        except PathfindingError:
+            return False
+        if len(path.waypoints) <= 1:
+            return False
+        entity.path = list(path.waypoints)
+        entity.path_cost = path.cost
+        self.events.record(
+            self.tick,
+            EventType.PATH_COMPUTED,
+            entity.entity_id,
+            reason="SETTLED_UNIT_REROUTE",
+            target=[destination.x, destination.y],
+        )
+        return True
+
+    @staticmethod
+    def _consume_reached_intermediate_waypoints(entity: Entity) -> None:
+        """Do not orbit an A* cell center after safely entering its local neighborhood."""
+
+        while len(entity.path) > 1 and entity.position.distance_to(entity.path[0]) <= 0.35:
+            entity.path.pop(0)
 
     def _skip_crowded_waypoints(self, entity: Entity) -> None:
         """Use path lookahead so agents pass a contested cell instead of orbiting its center."""
@@ -1386,27 +1677,266 @@ class Simulation:
             occupants = self.occupancy.occupants(self.game_map.cell_for(waypoint)) - {
                 entity.entity_id
             }
-            moving_occupants = {
-                occupant_id
-                for occupant_id in occupants
-                if self.entities[occupant_id].is_movable and self.entities[occupant_id].path
+            unit_occupants = {
+                occupant_id for occupant_id in occupants if self.entities[occupant_id].is_movable
             }
-            if not moving_occupants:
+            if not unit_occupants:
+                return
+            if not self._waypoint_has_lateral_clearance(entity, waypoint):
                 return
             entity.path.pop(0)
+
+    def _waypoint_has_lateral_clearance(self, entity: Entity, waypoint: Point) -> bool:
+        cell = self.game_map.cell_for(waypoint)
+        offset_x = waypoint.x - entity.position.x
+        offset_y = waypoint.y - entity.position.y
+        lateral_cells = (
+            ((cell[0], cell[1] - 1), (cell[0], cell[1] + 1))
+            if abs(offset_x) >= abs(offset_y)
+            else ((cell[0] - 1, cell[1]), (cell[0] + 1, cell[1]))
+        )
+        return any(self.game_map.is_cell_passable(candidate) for candidate in lateral_cells)
 
     def _local_move_is_available(self, entity: Entity, candidate: Point) -> bool:
         if not self.game_map.is_passable(candidate):
             return False
         cells = self._cells_at(entity, candidate)
-        if any(self.occupancy.occupants(cell) - {entity.entity_id} for cell in cells):
-            return False
-        return all(
+        return not any(
+            self.occupancy.occupants(cell) - {entity.entity_id} for cell in cells
+        ) and all(
             other_id == entity.entity_id
             or not other.is_movable
-            or candidate.distance_to(other.position) >= 0.62
+            or candidate.distance_to(other.position)
+            >= collision_radius(entity.kind) + collision_radius(other.kind) - 1e-6
             for other_id, other in self.entities.items()
         )
+
+    def _clamp_to_collider_contact(self, entity: Entity, candidate: Point) -> Point:
+        direction_x = candidate.x - entity.position.x
+        direction_y = candidate.y - entity.position.y
+        squared_length = direction_x * direction_x + direction_y * direction_y
+        if squared_length <= 1e-12:
+            return candidate
+        maximum_fraction = 1.0
+        for other_id, other in self.entities.items():
+            if other_id == entity.entity_id or not other.is_movable:
+                continue
+            radius = collision_radius(entity.kind) + collision_radius(other.kind)
+            if candidate.distance_to(other.position) >= radius:
+                continue
+            if entity.position.distance_to(other.position) <= radius:
+                continue
+            offset_x = entity.position.x - other.position.x
+            offset_y = entity.position.y - other.position.y
+            linear = 2 * (offset_x * direction_x + offset_y * direction_y)
+            constant = offset_x * offset_x + offset_y * offset_y - radius * radius
+            discriminant = linear * linear - 4 * squared_length * constant
+            if discriminant < 0:
+                continue
+            fraction = (-linear - discriminant**0.5) / (2 * squared_length)
+            if 0 <= fraction <= maximum_fraction:
+                maximum_fraction = max(0.0, fraction - 1e-6)
+        return Point(
+            entity.position.x + direction_x * maximum_fraction,
+            entity.position.y + direction_y * maximum_fraction,
+        )
+
+    def _waypoint_has_unit_blocker(self, mover: Entity, waypoint: Point) -> bool:
+        occupants = self.occupancy.occupants(self.game_map.cell_for(waypoint)) - {mover.entity_id}
+        return any(self.entities[occupant_id].is_movable for occupant_id in occupants)
+
+    def _resolve_unit_collisions(self) -> None:
+        unit_ids = tuple(
+            entity_id for entity_id, entity in sorted(self.entities.items()) if entity.is_movable
+        )
+        forces = {
+            entity_id: self._unit_drive_force(self.entities[entity_id]) for entity_id in unit_ids
+        }
+        for _ in range(2):
+            for first_index, first_id in enumerate(unit_ids):
+                for second_id in unit_ids[first_index + 1 :]:
+                    first = self.entities[first_id]
+                    second = self.entities[second_id]
+                    offset_x = second.position.x - first.position.x
+                    offset_y = second.position.y - first.position.y
+                    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
+                    contact_distance = collision_radius(first.kind) + collision_radius(second.kind)
+                    if distance > contact_distance + 0.03:
+                        continue
+                    if distance <= 1e-9:
+                        normal_x = 1.0 if first_id < second_id else -1.0
+                        normal_y = 0.0
+                    else:
+                        normal_x = offset_x / distance
+                        normal_y = offset_y / distance
+                    first_force = forces[first_id]
+                    second_force = forces[second_id]
+                    first_pressure = max(0.0, first_force[0] * normal_x + first_force[1] * normal_y)
+                    second_pressure = max(
+                        0.0, -(second_force[0] * normal_x + second_force[1] * normal_y)
+                    )
+                    if first_pressure > 0:
+                        forces[second_id] = (
+                            second_force[0] + first_pressure * normal_x,
+                            second_force[1] + first_pressure * normal_y,
+                        )
+                    if second_pressure > 0:
+                        forces[first_id] = (
+                            first_force[0] - second_pressure * normal_x,
+                            first_force[1] - second_pressure * normal_y,
+                        )
+                    net_pressure = first_pressure - second_pressure
+                    if net_pressure > 1e-9:
+                        self._apply_physical_push(
+                            second,
+                            normal_x,
+                            normal_y,
+                            net_pressure,
+                            first_id,
+                        )
+                    elif net_pressure < -1e-9:
+                        self._apply_physical_push(
+                            first,
+                            -normal_x,
+                            -normal_y,
+                            -net_pressure,
+                            second_id,
+                        )
+                    corrected_offset_x = second.position.x - first.position.x
+                    corrected_offset_y = second.position.y - first.position.y
+                    corrected_distance = (
+                        corrected_offset_x * corrected_offset_x
+                        + corrected_offset_y * corrected_offset_y
+                    ) ** 0.5
+                    if corrected_distance < contact_distance:
+                        overlap = contact_distance - corrected_distance
+                        if corrected_distance > 1e-9:
+                            correction_x = corrected_offset_x / corrected_distance
+                            correction_y = corrected_offset_y / corrected_distance
+                        else:
+                            correction_x = normal_x
+                            correction_y = normal_y
+                        total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
+                        first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
+                        second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
+                        self._apply_physical_push(
+                            first,
+                            -correction_x,
+                            -correction_y,
+                            overlap * first_share,
+                            second_id,
+                            correction=True,
+                        )
+                        self._apply_physical_push(
+                            second,
+                            correction_x,
+                            correction_y,
+                            overlap * second_share,
+                            first_id,
+                            correction=True,
+                        )
+        self._separate_overlapping_colliders(unit_ids)
+
+    def _separate_overlapping_colliders(self, unit_ids: tuple[str, ...]) -> None:
+        for _ in range(6):
+            changed = False
+            for first_index, first_id in enumerate(unit_ids):
+                for second_id in unit_ids[first_index + 1 :]:
+                    first = self.entities[first_id]
+                    second = self.entities[second_id]
+                    offset_x = second.position.x - first.position.x
+                    offset_y = second.position.y - first.position.y
+                    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
+                    required = collision_radius(first.kind) + collision_radius(second.kind)
+                    if distance >= required - 1e-6:
+                        continue
+                    if distance <= 1e-9:
+                        normal_x = 1.0 if first_id < second_id else -1.0
+                        normal_y = 0.0
+                    else:
+                        normal_x = offset_x / distance
+                        normal_y = offset_y / distance
+                    overlap = required - distance
+                    total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
+                    first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
+                    second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
+                    changed = (
+                        self._apply_physical_push(
+                            first,
+                            -normal_x,
+                            -normal_y,
+                            overlap * first_share,
+                            second_id,
+                            correction=True,
+                        )
+                        or changed
+                    )
+                    changed = (
+                        self._apply_physical_push(
+                            second,
+                            normal_x,
+                            normal_y,
+                            overlap * second_share,
+                            first_id,
+                            correction=True,
+                        )
+                        or changed
+                    )
+            if not changed:
+                return
+
+    def _unit_drive_force(self, entity: Entity) -> tuple[float, float]:
+        if not entity.path:
+            return 0.0, 0.0
+        target = entity.path[0]
+        offset_x = target.x - entity.position.x
+        offset_y = target.y - entity.position.y
+        distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
+        if distance <= 1e-9:
+            return 0.0, 0.0
+        step = min(entity.speed * self.TICK_SECONDS, distance)
+        force = step * unit_mass(entity.kind)
+        return offset_x / distance * force, offset_y / distance * force
+
+    def _apply_physical_push(
+        self,
+        entity: Entity,
+        normal_x: float,
+        normal_y: float,
+        pressure: float,
+        pusher_id: str,
+        *,
+        correction: bool = False,
+    ) -> bool:
+        scale = 1.0 if correction else 0.2 / unit_mass(entity.kind)
+        amount = min(0.12, pressure * scale)
+        if amount <= 1e-9:
+            return False
+        position = Point(
+            entity.position.x + normal_x * amount,
+            entity.position.y + normal_y * amount,
+        )
+        if not self.game_map.is_passable(position):
+            return False
+        try:
+            self.occupancy.move(entity.entity_id, self._cells_at(entity, position))
+        except OccupancyError:
+            return False
+        previous = entity.position
+        entity.position = position
+        self.events.record(
+            self.tick,
+            EventType.UNIT_PUSHED,
+            entity.entity_id,
+            pusher_id=pusher_id,
+            previous_position=[previous.x, previous.y],
+            position=[position.x, position.y],
+            amount=amount,
+            mass=unit_mass(entity.kind),
+            correction=correction,
+            pushed_was_moving=bool(entity.path),
+        )
+        return True
 
     def _record_movement_blocked(self, entity: Entity, evidence: str) -> None:
         entity_id = entity.entity_id
@@ -1420,8 +1950,27 @@ class Simulation:
                 evidence=evidence,
             )
             self._movement_blocked.add(entity_id)
-        if self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND:
+        if (
+            self._final_destination_is_contested(entity)
+            or self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND
+        ):
             self._recover_blocked_entity(entity)
+
+    def _final_destination_is_contested(self, entity: Entity) -> bool:
+        if len(entity.path) != 1:
+            return False
+        destination = entity.path[0]
+        destination_cell = self.game_map.cell_for(destination)
+        return any(
+            other_id != entity.entity_id
+            and other.is_movable
+            and not other.path
+            and (
+                destination_cell in other.occupied_cells
+                or destination.distance_to(other.position) < 0.62
+            )
+            for other_id, other in self.entities.items()
+        )
 
     def _recover_blocked_entity(self, entity: Entity) -> None:
         """Choose a deterministic free sidestep, then replan to the original target."""
@@ -1429,6 +1978,30 @@ class Simulation:
         destination = entity.move_target
         if destination is None:
             return
+        replacement = self._nearest_unreserved_destination(entity, destination)
+        if replacement is not None and replacement != destination:
+            try:
+                path = find_path(
+                    self.game_map,
+                    entity.position,
+                    replacement,
+                    self.occupancy.blocked_cells(frozenset({entity.entity_id})),
+                )
+            except PathfindingError:
+                pass
+            else:
+                entity.move_target = replacement
+                entity.path = list(path.waypoints)
+                entity.path_cost = path.cost
+                self._blocked_ticks[entity.entity_id] = 0
+                self.events.record(
+                    self.tick,
+                    EventType.PATH_COMPUTED,
+                    entity.entity_id,
+                    reason="CROWDED_DESTINATION_REALLOCATED",
+                    target=[replacement.x, replacement.y],
+                )
+                return
         origin_x, origin_y = int(entity.position.x), int(entity.position.y)
         candidates: list[Point] = []
         for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)):
@@ -1608,6 +2181,7 @@ class Simulation:
                 entity.path.clear()
                 entity.move_target = None
                 entity.state = UnitState.IDLE
+                self._reset_movement_liveness(entity, clear_stop=True)
             if clear_suspended:
                 suspended_id = self.suspended_assignments.pop(entity_id, None)
                 if suspended_id is not None and suspended_id in self.automations:
@@ -1626,14 +2200,17 @@ class Simulation:
                 self.assignments[entity_id] = resume_id
                 if resume.status in {AutomationStatus.WAITING, AutomationStatus.BLOCKED}:
                     self._transition(resume, AutomationStatus.ACTIVE, "REPAIRED_UNIT_RETURNED")
+                self._reset_movement_liveness(entity, clear_stop=True)
                 entity.state = self._state_for_assignment(entity_id)
                 return
+        self._reset_movement_liveness(entity, clear_stop=True)
         entity.state = UnitState.IDLE
 
     def _initialize_runtime_entity(self, automation: Automation, entity_id: str) -> None:
         entity = self.entities[entity_id]
         entity.path.clear()
         entity.move_target = None
+        self._reset_movement_liveness(entity, clear_stop=True)
         if automation.kind is AutomationKind.PATROL:
             patrol_parameters = _patrol_parameters(automation)
             patrol_parameters.waypoint_indices.setdefault(entity_id, 0)
@@ -1846,6 +2423,8 @@ class Simulation:
         incumbent_id = self.assignments.get(entity_id)
         if incumbent_id is None:
             return True
+        if incumbent_id == automation.automation_id:
+            return True
         incumbent = self.automations[incumbent_id]
         incumbent_authority = (
             ControlAuthority.EMERGENCY
@@ -1903,10 +2482,15 @@ class Simulation:
         state: UnitState,
     ) -> None:
         self._movement_blocked.discard(entity.entity_id)
+        self._blocked_ticks.pop(entity.entity_id, None)
+        self._reset_movement_liveness(entity, clear_stop=True)
         entity.path = list(path.waypoints)
         entity.path_cost = path.cost
         entity.move_target = destination if entity.path else None
         entity.state = state if entity.path else self._state_for_assignment(entity.entity_id)
+        if entity.path:
+            entity.progress_target = entity.path[0]
+            entity.progress_distance = entity.position.distance_to(entity.path[0])
         self.events.record(
             self.tick,
             EventType.PATH_COMPUTED,
@@ -1943,6 +2527,7 @@ class Simulation:
         entity.move_target = None
         entity.path.clear()
         entity.state = UnitState.IDLE
+        self._reset_movement_liveness(entity, clear_stop=True)
         self.events.record(
             self.tick,
             EventType.MOVEMENT_FAILED,
@@ -1954,7 +2539,9 @@ class Simulation:
     def _allocate_destinations(
         self, entity_ids: tuple[str, ...], target: Point
     ) -> dict[str, Point]:
-        blocked = self.occupancy.blocked_cells(frozenset(entity_ids))
+        selected = frozenset(entity_ids)
+        blocked = set(self.occupancy.blocked_cells(selected))
+        blocked.update(self._reserved_destination_cells(selected))
         target_cell = self.game_map.cell_for(target)
         frontier = deque([target_cell])
         visited = {target_cell}
@@ -1969,14 +2556,83 @@ class Simulation:
                     frontier.append(neighbor)
         if len(candidates) < len(entity_ids):
             raise PathfindingError("INSUFFICIENT_DESTINATIONS")
-        return {
-            entity_id: (
-                target
-                if index == 0 and candidates[index] == target_cell
-                else Point(candidates[index][0] + 0.5, candidates[index][1] + 0.5)
+        center = Point(
+            sum(self.entities[entity_id].position.x for entity_id in entity_ids) / len(entity_ids),
+            sum(self.entities[entity_id].position.y for entity_id in entity_ids) / len(entity_ids),
+        )
+        direction_x = target.x - center.x
+        direction_y = target.y - center.y
+        length = max((direction_x * direction_x + direction_y * direction_y) ** 0.5, 1.0)
+        direction_x /= length
+        direction_y /= length
+        ordered_entities = sorted(
+            entity_ids,
+            key=lambda entity_id: (
+                -(
+                    (self.entities[entity_id].position.x - center.x) * direction_x
+                    + (self.entities[entity_id].position.y - center.y) * direction_y
+                ),
+                entity_id,
+            ),
+        )
+        ordered_candidates = sorted(
+            candidates,
+            key=lambda cell: (
+                -(
+                    (cell[0] + 0.5 - target.x) * direction_x
+                    + (cell[1] + 0.5 - target.y) * direction_y
+                ),
+                abs(
+                    (cell[0] + 0.5 - target.x) * direction_y
+                    - (cell[1] + 0.5 - target.y) * direction_x
+                ),
+                abs(cell[0] + 0.5 - target.x) + abs(cell[1] + 0.5 - target.y),
+                cell[1],
+                cell[0],
+            ),
+        )
+        destinations: dict[str, Point] = {}
+        for entity_id, cell in zip(ordered_entities, ordered_candidates, strict=True):
+            destinations[entity_id] = (
+                target if cell == target_cell else Point(cell[0] + 0.5, cell[1] + 0.5)
             )
-            for index, entity_id in enumerate(entity_ids)
+        return destinations
+
+    def _reserved_destination_cells(self, excluding: frozenset[str]) -> set[Cell]:
+        return {
+            self.game_map.cell_for(entity.move_target)
+            for entity_id, entity in self.entities.items()
+            if entity_id not in excluding and entity.move_target is not None
         }
+
+    def _blocked_cells_for_mover(
+        self, entity_id: str, excluding: frozenset[str]
+    ) -> frozenset[Cell]:
+        del entity_id, excluding
+        return self._building_cells()
+
+    def _nearest_unreserved_destination(self, entity: Entity, target: Point) -> Point | None:
+        blocked = set(self.occupancy.blocked_cells(frozenset({entity.entity_id})))
+        blocked.update(self._reserved_destination_cells(frozenset({entity.entity_id})))
+        target_cell = self.game_map.cell_for(target)
+        frontier = deque([target_cell])
+        visited = {target_cell}
+        while frontier:
+            cell = frontier.popleft()
+            if self.game_map.is_cell_passable(cell) and cell not in blocked:
+                point = Point(cell[0] + 0.5, cell[1] + 0.5)
+                if all(
+                    other_id == entity.entity_id
+                    or not other.is_movable
+                    or point.distance_to(other.position) >= 0.9
+                    for other_id, other in self.entities.items()
+                ):
+                    return point
+            for neighbor in self._neighbor_cells(cell):
+                if neighbor not in visited and self.game_map.contains_cell(neighbor):
+                    visited.add(neighbor)
+                    frontier.append(neighbor)
+        return None
 
     def _building_cells(self) -> frozenset[Cell]:
         return frozenset(

@@ -36,6 +36,10 @@ class Entity:
     path_cost: float = 0.0
     attack_target_id: str | None = None
     attack_cooldown: int = 0
+    progress_target: Point | None = None
+    progress_distance: float | None = None
+    no_progress_ticks: int = 0
+    congestion_stopped: bool = False
 
     @property
     def category(self) -> EntityCategory:
@@ -86,6 +90,14 @@ class Entity:
             "path_cost": self.path_cost,
             "attack_target_id": self.attack_target_id,
             "attack_cooldown": self.attack_cooldown,
+            "progress_target": (
+                None
+                if self.progress_target is None
+                else [self.progress_target.x, self.progress_target.y]
+            ),
+            "progress_distance": self.progress_distance,
+            "no_progress_ticks": self.no_progress_ticks,
+            "congestion_stopped": self.congestion_stopped,
         }
 
 

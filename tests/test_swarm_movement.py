@@ -6,8 +6,8 @@ from airts.automations import AutomationStatus
 from airts.commands import CreatePatrolCommand, MoveCommand
 from airts.events import EventType
 from airts.geometry import Point, rectangle_region
-from airts.map_model import load_map_data
-from airts.movement import steering_candidates
+from airts.map_model import EntityKind, load_map_data
+from airts.movement import collision_radius, steering_candidates
 from airts.simulation import Simulation
 
 
@@ -60,7 +60,7 @@ def test_units_traveling_in_opposite_directions_pass_without_deadlock() -> None:
     assert not simulation.entities["west"].path
     assert simulation.entities["east"].position == Point(14.5, 8.5)
     assert simulation.entities["west"].position == Point(0.5, 8.5)
-    assert minimum_separation >= 0.62
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
 
 
 def test_perpendicular_groups_cross_and_all_reach_their_destinations() -> None:
@@ -96,7 +96,7 @@ def test_perpendicular_groups_cross_and_all_reach_their_destinations() -> None:
     assert [simulation.entities[command.entity_ids[0]].position for command in commands] == [
         command.target for command in commands
     ]
-    assert minimum_separation >= 0.62
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
 
 
 def test_dense_small_area_patrol_keeps_separation_and_makes_progress() -> None:
@@ -131,7 +131,7 @@ def test_dense_small_area_patrol_keeps_separation_and_makes_progress() -> None:
         entity.position != Point(*positions[entity_id])
         for entity_id, entity in simulation.entities.items()
     )
-    assert minimum_separation >= 0.62
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
     blocked = simulation.events.query(event_types=frozenset({EventType.MOVEMENT_BLOCKED}))
     assert len(blocked) < 12
 
@@ -153,3 +153,108 @@ def test_swarm_movement_is_identical_for_the_same_seed_and_commands() -> None:
     assert [event.to_dict() for event in first.events.events] == [
         event.to_dict() for event in second.events.events
     ]
+
+
+def test_units_finish_the_last_waypoint_without_stopping_midway_or_shaking() -> None:
+    simulation = _swarm_simulation({"unit": (2.5, 2.5)})
+    destination = Point(15.5, 2.5)
+    assert simulation.execute(MoveCommand(("unit",), destination)).accepted
+
+    simulation.advance()
+    assert simulation.entities["unit"].path
+    assert simulation.entities["unit"].position != destination
+
+    simulation.advance(40)
+    settled = simulation.entities["unit"].position
+    assert settled == destination
+    assert not simulation.entities["unit"].path
+
+    simulation.advance(30)
+    assert simulation.entities["unit"].position == settled
+
+
+def test_slow_unit_making_forward_progress_does_not_time_out_midway() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "slow_progress",
+                "name": "Slow Progress",
+                "width": 20,
+                "height": 5,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "heavy",
+                        "kind": "heavy_tank",
+                        "owner": "player",
+                        "position": [1.5, 2.5],
+                    }
+                ],
+            }
+        )
+    )
+    destination = Point(18.5, 2.5)
+    assert simulation.execute(MoveCommand(("heavy",), destination)).accepted
+
+    simulation.advance(Simulation.NO_PROGRESS_STOP_TICKS + 10)
+
+    heavy = simulation.entities["heavy"]
+    assert heavy.path
+    assert not heavy.congestion_stopped
+    assert not simulation.events.query(
+        event_types=frozenset({EventType.MOVEMENT_STOPPED}), subject_id="heavy"
+    )
+
+    simulation.advance(40)
+    assert heavy.position == destination
+    assert not heavy.path
+
+
+def test_separate_move_commands_reserve_distinct_destinations_and_settle() -> None:
+    positions = {
+        "unit_1": (2.5, 3.5),
+        "unit_2": (2.5, 5.5),
+        "unit_3": (2.5, 7.5),
+        "unit_4": (2.5, 9.5),
+        "unit_5": (2.5, 11.5),
+        "unit_6": (2.5, 13.5),
+    }
+    simulation = _swarm_simulation(positions)
+    target = Point(15.5, 8.5)
+
+    for entity_id in sorted(positions):
+        assert simulation.execute(MoveCommand((entity_id,), target)).accepted
+
+    reservations = {simulation.entities[entity_id].move_target for entity_id in sorted(positions)}
+    assert len(reservations) == len(positions)
+
+    simulation.advance(180)
+    settled = {entity_id: entity.position for entity_id, entity in simulation.entities.items()}
+    assert all(not entity.path for entity in simulation.entities.values())
+    assert len(set(settled.values())) == len(positions)
+
+    simulation.advance(40)
+    assert {
+        entity_id: entity.position for entity_id, entity in simulation.entities.items()
+    } == settled
+
+
+def test_convoy_fills_far_formation_slots_before_near_units_block_the_approach() -> None:
+    positions = {f"unit_{index}": (2.5 + index % 3, 5.5 + (index // 3) * 2) for index in range(9)}
+    simulation = _swarm_simulation(positions)
+    entity_ids = tuple(sorted(positions))
+    assert simulation.execute(MoveCommand(entity_ids, Point(15.5, 8.5))).accepted
+
+    front_ids = sorted(entity_ids, key=lambda item: positions[item][0], reverse=True)[:3]
+    rear_ids = sorted(entity_ids, key=lambda item: positions[item][0])[:3]
+    assert min(simulation.entities[item].move_target.x for item in front_ids) >= max(
+        simulation.entities[item].move_target.x for item in rear_ids
+    )
+
+    simulation.advance(200)
+    settled = tuple(entity.position for entity in simulation.entities.values())
+    assert all(not entity.path for entity in simulation.entities.values())
+    assert min(first.distance_to(second) for first, second in combinations(settled, 2)) >= 0.9
+
+    simulation.advance(40)
+    assert tuple(entity.position for entity in simulation.entities.values()) == settled

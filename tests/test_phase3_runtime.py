@@ -14,6 +14,7 @@ from airts.commands import (
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
+    PauseAutomationCommand,
     ResumeAutomationCommand,
     StopCommand,
 )
@@ -42,6 +43,12 @@ def _runtime_map() -> GameMap:
             ],
         }
     )
+
+
+def _production_ids(simulation: Simulation, automation_id: str) -> list[str]:
+    parameters = simulation.automations[automation_id].parameters
+    assert isinstance(parameters, ProductionParameters)
+    return parameters.produced_entity_ids
 
 
 def test_ownership_validation_is_atomic_and_structured() -> None:
@@ -208,6 +215,79 @@ def test_manual_factory_override_pauses_and_resume_reclaims_factory() -> None:
     assert resumed.accepted
     assert simulation.assignments["factory"] == automation_id
     assert simulation.automations[automation_id].status is AutomationStatus.ACTIVE
+
+
+def test_factory_production_requests_run_fifo_and_paused_jobs_resume_without_conflict() -> None:
+    simulation = Simulation(_runtime_map())
+    first = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    second = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    third = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    first_id = first.automation_id or ""
+    second_id = second.automation_id or ""
+    third_id = third.automation_id or ""
+
+    assert first.accepted and second.accepted and third.accepted
+    assert simulation.automations[first_id].status is AutomationStatus.ACTIVE
+    assert simulation.automations[second_id].reason_code == "FACTORY_QUEUED"
+    assert simulation.automations[third_id].reason_code == "FACTORY_QUEUED"
+    assert [item.automation_id for item in simulation.production_queue("factory")] == [
+        first_id,
+        second_id,
+        third_id,
+    ]
+    assert simulation.execute(PauseAutomationCommand(second_id)).accepted
+    resumed_queued = simulation.execute(ResumeAutomationCommand(second_id))
+    assert resumed_queued.accepted
+    assert simulation.automations[second_id].status is AutomationStatus.WAITING
+    assert simulation.automations[second_id].reason_code == "FACTORY_QUEUED"
+
+    assert simulation.execute(PauseAutomationCommand(first_id)).accepted
+    resumed_active = simulation.execute(ResumeAutomationCommand(first_id))
+    assert resumed_active.accepted
+    assert simulation.assignments["factory"] == first_id
+
+    simulation.advance(30)
+
+    assert [simulation.automations[item].status for item in (first_id, second_id, third_id)] == [
+        AutomationStatus.COMPLETED
+    ] * 3
+    assert [_production_ids(simulation, item) for item in (first_id, second_id, third_id)] == [
+        ["scout_001"],
+        ["scout_002"],
+        ["scout_003"],
+    ]
+    active_ticks = [
+        next(
+            transition.tick
+            for transition in simulation.automations[item].transition_history
+            if transition.reason_code == reason
+        )
+        for item, reason in (
+            (first_id, "VALIDATION_SUCCEEDED"),
+            (second_id, "FACTORY_QUEUE_STARTED"),
+            (third_id, "FACTORY_QUEUE_STARTED"),
+        )
+    ]
+    assert active_ticks == [0, 10, 20]
+
+
+def test_canceling_factory_job_starts_next_without_disturbing_the_active_job() -> None:
+    simulation = Simulation(_runtime_map())
+    first = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    second = simulation.execute(CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1))
+    third = simulation.execute(CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1))
+
+    assert simulation.execute(CancelAutomationCommand(third.automation_id or "")).accepted
+    assert simulation.assignments["factory"] == first.automation_id
+    assert [item.automation_id for item in simulation.production_queue("factory")] == [
+        first.automation_id,
+        second.automation_id,
+    ]
+
+    assert simulation.execute(CancelAutomationCommand(first.automation_id or "")).accepted
+    assert simulation.assignments["factory"] == second.automation_id
+    assert simulation.automations[second.automation_id or ""].status is AutomationStatus.ACTIVE
+    assert simulation.automations[second.automation_id or ""].reason_code == "FACTORY_QUEUE_STARTED"
 
 
 def test_removing_production_source_fails_automation() -> None:
