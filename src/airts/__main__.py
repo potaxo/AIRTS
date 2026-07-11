@@ -39,7 +39,7 @@ def main() -> int:
         simulation = run_replay(load_replay(arguments.replay))
     else:
         game_map = load_map(arguments.map) if arguments.map is not None else load_example_map()
-        simulation = Simulation(game_map)
+        simulation = Simulation(game_map, ambient_enemy_spawns=True)
     AirtsApp(simulation).run(arguments.max_frames)
     if arguments.event_log is not None:
         simulation.events.write_jsonl(arguments.event_log)

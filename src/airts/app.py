@@ -82,6 +82,7 @@ class AirtsApp:
         self._command_buttons: list[tuple[pygame.Rect, str]] = []
         self._initial_map = simulation.game_map
         self._initial_seed = simulation.random_seed
+        self._initial_ambient_enemy_spawns = simulation.ambient_enemy_spawns
         self.quick_save_path = Path("airts-quicksave.json")
         self._font: pygame.font.Font | None = None
         self._small_font: pygame.font.Font | None = None
@@ -530,7 +531,11 @@ class AirtsApp:
         self.notice = f"Loaded {self.quick_save_path}."
 
     def _new_game(self) -> None:
-        self.simulation = Simulation(self._initial_map, self._initial_seed)
+        self.simulation = Simulation(
+            self._initial_map,
+            self._initial_seed,
+            ambient_enemy_spawns=self._initial_ambient_enemy_spawns,
+        )
         self._clear_selection_state()
         self.notice = "New game started."
 

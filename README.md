@@ -97,19 +97,21 @@ converts user input into the same tagged commands used by tests and future contr
 sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
 
 Every automation follows an explicit lifecycle from proposal and validation through
-active, waiting, paused, blocked, and terminal states. Control precedence is direct
-human input, emergency repair, explicit priority, and then the newer equal-priority
-instruction. Units have one current assignment and may retain one suspended assignment
-while repairing.
+active, waiting, paused, blocked, and terminal states. Creating a new patrol or defend
+automation for selected units explicitly replaces their older normal assignment; an
+empty replaced automation is canceled and leaves the live panel. Emergency repair may
+temporarily suspend one assignment so it can be restored afterward.
 
 Each factory owns a FIFO production queue: the first unfinished request runs, later requests
 wait visibly, and completion or cancellation starts the next job. Pausing preserves progress;
 resuming an active or queued job does not create a control conflict. Factories reserve unit
-costs before building and wait visibly when funds are insufficient.
-Resource generators produce deterministic passive income every second; an economy automation
-monitors progress toward a target and exposes it through the normal lifecycle. Defend
-behavior maintains grounded positions and engages nearby enemies, reinforcement transfers
-eligible units to another automation, and repair selects destinations by
+costs before building and wait visibly when funds are insufficient. Units take five ticks
+(0.5 seconds) to build. Resource generators produce 1,000 resources every second; an economy
+automation monitors progress toward a target and exposes it through the normal lifecycle.
+GUI games also create one seeded, deterministic enemy light or heavy tank on the right side
+each second. Defend behavior evenly assigns exact stations, locally rallies nearby defenders
+against the source of incoming fire, limits pursuit, and returns survivors to their stations.
+Reinforcement transfers eligible units to another automation, and repair selects destinations by
 repair-hub/factory/command-center order and valid path cost before restoring the original
 assignment.
 
@@ -132,9 +134,9 @@ pushed unit's mass, so heavy tanks accelerate more slowly. Opposing forces combi
 deterministically, equal head-on pressure may stalemate, and touching chains propagate force.
 Swept contact clamping prevents deep overlap. Pushing preserves each unit's current order and is
 recorded as structured `unit_pushed` events. If an order makes no meaningful progress toward its
-current waypoint for three seconds, the unit enters a stable, still-pushable hold and records a
-`movement_stopped` event. A new manual order, automation assignment, or explicit automation resume
-clears that congestion stop.
+current waypoint for three seconds, the unit temporarily yields and records a
+`movement_yielded` event. The path and destination remain intact; staggered physical retries keep
+pushing blockers and automatically restore full movement when space opens.
 
 Combat uses authoritative direct-hit projectiles. Firing creates a visible bullet that moves
 on deterministic simulation ticks, records its map trajectory, and applies the firing unit's

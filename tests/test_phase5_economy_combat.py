@@ -45,7 +45,7 @@ def _phase5_simulation() -> Simulation:
 
 def test_production_charges_cost_and_waits_for_resources() -> None:
     simulation = _phase5_simulation()
-    simulation.execute(CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1))
+    created = simulation.execute(CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1))
     simulation.advance()
     assert simulation.resources["player"] == 400
     assert any(
@@ -53,6 +53,14 @@ def test_production_charges_cost_and_waits_for_resources() -> None:
         and event.details["reason"] == "PRODUCTION_COST"
         for event in simulation.events.events
     )
+    simulation.advance(3)
+    assert not simulation.automations[created.automation_id or ""].parameters.to_dict()[
+        "produced_entity_ids"
+    ]
+    simulation.advance()
+    assert simulation.automations[created.automation_id or ""].parameters.to_dict()[
+        "produced_entity_ids"
+    ] == ["light_tank_001"]
 
     poor = _phase5_simulation()
     poor.resources["player"] = 50
@@ -64,14 +72,39 @@ def test_production_charges_cost_and_waits_for_resources() -> None:
 
 def test_economy_automation_collects_generator_income_to_target() -> None:
     simulation = _phase5_simulation()
-    result = simulation.execute(CreateEconomyCommand(("generator",), 530))
-    simulation.advance(31)
+    result = simulation.execute(CreateEconomyCommand(("generator",), 1500))
+    simulation.advance(10)
     automation = simulation.automations[result.automation_id or ""]
 
-    assert simulation.resources["player"] == 530
+    assert simulation.resources["player"] == 1500
     assert automation.kind is AutomationKind.ECONOMY
     assert automation.status is AutomationStatus.COMPLETED
-    assert automation.parameters.to_dict()["collected"] == 30
+    assert automation.parameters.to_dict()["collected"] == 1000
+
+
+def test_seeded_enemy_tank_reinforcements_spawn_on_the_right_each_second() -> None:
+    first = Simulation(
+        _phase5_simulation().game_map,
+        random_seed=19,
+        ambient_enemy_spawns=True,
+    )
+    second = Simulation(
+        _phase5_simulation().game_map,
+        random_seed=19,
+        ambient_enemy_spawns=True,
+    )
+
+    first.advance(30)
+    second.advance(30)
+
+    spawned = first.events.query(event_types=frozenset({EventType.ENEMY_REINFORCEMENT_SPAWNED}))
+    assert len(spawned) == 3
+    assert all(event.details["position"][0] >= 11.5 for event in spawned)
+    assert {event.details["kind"] for event in spawned} <= {
+        EntityKind.LIGHT_TANK.value,
+        EntityKind.HEAVY_TANK.value,
+    }
+    assert first.snapshot() == second.snapshot()
 
 
 def test_attack_damage_destruction_and_repair_only_when_requested() -> None:

@@ -34,6 +34,7 @@ class ReplayData:
     final_tick: int
     expected_snapshot: dict[str, object]
     expected_events: tuple[dict[str, object], ...]
+    ambient_enemy_spawns: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -41,6 +42,7 @@ class ReplayData:
             "airts_version": "0.1.0",
             "map": self.game_map.to_dict(),
             "random_seed": self.random_seed,
+            "ambient_enemy_spawns": self.ambient_enemy_spawns,
             "commands": [record.to_dict() for record in self.commands],
             "final_tick": self.final_tick,
             "expected_snapshot": self.expected_snapshot,
@@ -63,6 +65,7 @@ def capture_replay(simulation: Simulation) -> ReplayData:
         final_tick=simulation.tick,
         expected_snapshot=simulation.snapshot(),
         expected_events=tuple(event.to_dict() for event in simulation.events.events),
+        ambient_enemy_spawns=simulation.ambient_enemy_spawns,
     )
 
 
@@ -89,6 +92,9 @@ def load_replay_data(raw_data: object) -> ReplayData:
     except MapValidationError as error:
         raise ReplayError(f"invalid replay map: {error}") from error
     random_seed = _integer(document.get("random_seed"), "random_seed")
+    ambient_enemy_spawns = _boolean(
+        document.get("ambient_enemy_spawns", False), "ambient_enemy_spawns"
+    )
     final_tick = _integer(document.get("final_tick"), "final_tick", minimum=0)
     commands: list[RecordedCommand] = []
     previous_tick = 0
@@ -105,17 +111,22 @@ def load_replay_data(raw_data: object) -> ReplayData:
         for event in _list(document.get("expected_events"), "expected_events")
     )
     return ReplayData(
-        game_map,
-        random_seed,
-        tuple(commands),
-        final_tick,
-        expected_snapshot,
-        expected_events,
+        game_map=game_map,
+        random_seed=random_seed,
+        commands=tuple(commands),
+        final_tick=final_tick,
+        expected_snapshot=expected_snapshot,
+        expected_events=expected_events,
+        ambient_enemy_spawns=ambient_enemy_spawns,
     )
 
 
 def run_replay(data: ReplayData, *, verify: bool = True) -> Simulation:
-    simulation = Simulation(data.game_map, data.random_seed)
+    simulation = Simulation(
+        data.game_map,
+        data.random_seed,
+        ambient_enemy_spawns=data.ambient_enemy_spawns,
+    )
     for record in data.commands:
         simulation.advance(record.tick - simulation.tick)
         simulation.execute(record.command)
@@ -152,4 +163,10 @@ def _integer(value: object, field: str, minimum: int | None = None) -> int:
         raise ReplayError(f"{field} must be an integer")
     if minimum is not None and value < minimum:
         raise ReplayError(f"{field} must be at least {minimum}")
+    return value
+
+
+def _boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise ReplayError(f"{field} must be a boolean")
     return value

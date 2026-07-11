@@ -100,3 +100,20 @@ def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> N
     assert restored.snapshot() == simulation.snapshot()
     assert simulation.automations[first.automation_id or ""].status.value == "completed"
     assert simulation.automations[second.automation_id or ""].status.value == "completed"
+
+
+def test_ambient_enemy_reinforcements_continue_after_save_load(
+    make_map: Callable[[int], GameMap], tmp_path: Path
+) -> None:
+    simulation = Simulation(make_map(1), random_seed=37, ambient_enemy_spawns=True)
+    simulation.advance(12)
+    destination = tmp_path / "ambient-enemies.json"
+
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+
+    assert restored.ambient_enemy_spawns
+    assert restored.snapshot() == simulation.snapshot()
+    simulation.advance(10)
+    restored.advance(10)
+    assert restored.snapshot() == simulation.snapshot()

@@ -168,7 +168,7 @@ class RepairParameters:
 class EconomyParameters:
     generator_ids: list[str]
     target_resources: int
-    income_per_cycle: int = 10
+    income_per_cycle: int = 1000
     income_cycle_ticks: int = 10
     collected: int = 0
     starting_resources: int = 0
@@ -386,10 +386,26 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
 def build_defend_stations(
     target: SpatialTarget, entity_ids: tuple[str, ...], game_map: GameMap
 ) -> dict[str, Point]:
-    candidates = build_patrol_waypoints(target, game_map)
-    return {
-        entity_id: candidates[index % len(candidates)] for index, entity_id in enumerate(entity_ids)
-    }
+    candidates = (
+        tuple(
+            point
+            for point in _area_waypoints(target, maximum=max(24, len(entity_ids)))
+            if game_map.is_passable(point)
+        )
+        if isinstance(target, PolygonRegion)
+        else build_patrol_waypoints(target, game_map)
+    )
+    if not candidates:
+        raise ValueError("defend target contains no passable stations")
+    selected: tuple[Point, ...]
+    if len(entity_ids) <= 1:
+        selected = (candidates[len(candidates) // 2],)
+    elif len(entity_ids) <= len(candidates):
+        step = (len(candidates) - 1) / (len(entity_ids) - 1)
+        selected = tuple(candidates[round(index * step)] for index in range(len(entity_ids)))
+    else:
+        selected = tuple(candidates[index % len(candidates)] for index in range(len(entity_ids)))
+    return {entity_id: selected[index] for index, entity_id in enumerate(entity_ids)}
 
 
 def target_contains(target: SpatialTarget, point: Point) -> bool:

@@ -19,7 +19,6 @@ from airts.automations import (
     RepairPhase,
     build_defend_stations,
     build_patrol_waypoints,
-    target_contains,
 )
 from airts.commands import (
     AttackCommand,
@@ -67,12 +66,24 @@ from airts.visibility import VisibilitySystem
 class Simulation:
     TICKS_PER_SECOND = 10
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
-    NO_PROGRESS_STOP_TICKS = 30
+    NO_PROGRESS_YIELD_TICKS = 30
     MIN_PROGRESS_DISTANCE = 0.02
+    CONGESTION_RETRY_TICKS = 5
+    DEFEND_RESPONSE_RADIUS = 4.0
+    DEFEND_PURSUIT_RADIUS = 7.0
+    DEFEND_ATTACK_MEMORY_TICKS = 30
+    DEFEND_STATION_TOLERANCE = 0.05
 
-    def __init__(self, game_map: GameMap, random_seed: int = 0) -> None:
+    def __init__(
+        self,
+        game_map: GameMap,
+        random_seed: int = 0,
+        *,
+        ambient_enemy_spawns: bool = False,
+    ) -> None:
         self.game_map = game_map
         self.random_seed = random_seed
+        self.ambient_enemy_spawns = ambient_enemy_spawns
         self.tick = 0
         self.entities = {
             spec.entity_id: Entity(
@@ -181,6 +192,7 @@ class Simulation:
         for _ in range(ticks):
             self.tick += 1
             self._generate_income()
+            self._spawn_ambient_enemy()
             self._drive_automations()
             self._move_entities()
             self._drive_projectiles()
@@ -228,6 +240,9 @@ class Simulation:
         for entity in self.entities.values():
             if entity.attack_target_id == entity_id:
                 entity.attack_target_id = None
+            if entity.last_attacker_id == entity_id:
+                entity.last_attacker_id = None
+                entity.last_attacked_tick = None
         self._movement_blocked.discard(entity_id)
         self.events.record(
             self.tick,
@@ -243,6 +258,7 @@ class Simulation:
         return {
             "tick": self.tick,
             "random_seed": self.random_seed,
+            "ambient_enemy_spawns": self.ambient_enemy_spawns,
             "map": {"id": self.game_map.map_id, "version": self.game_map.map_version},
             "entities": {
                 entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
@@ -269,6 +285,7 @@ class Simulation:
         return {
             "tick": self.tick,
             "random_seed": self.random_seed,
+            "ambient_enemy_spawns": self.ambient_enemy_spawns,
             "entities": {
                 entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
             },
@@ -687,7 +704,7 @@ class Simulation:
             list(command.entity_ids),
             PatrolParameters(command.target, waypoints),
         )
-        failure = self._validate_claims(automation, command.entity_ids)
+        failure = self._validate_claims(automation, command.entity_ids, replace_existing=True)
         if failure is not None:
             return self._reject_validation("create_patrol", failure)
         self._activate(automation, command.entity_ids)
@@ -720,7 +737,7 @@ class Simulation:
             list(command.entity_ids),
             DefendParameters(command.target, stations),
         )
-        failure = self._validate_claims(automation, command.entity_ids)
+        failure = self._validate_claims(automation, command.entity_ids, replace_existing=True)
         if failure is not None:
             return self._reject_validation("create_defend", failure)
         self._activate(automation, command.entity_ids)
@@ -761,11 +778,7 @@ class Simulation:
                 "create_production",
                 ValidationFailure(ValidationPhase.SPATIAL, "TARGET_NOT_PASSABLE", "rally_point"),
             )
-        build_ticks = {
-            EntityKind.SCOUT: 10,
-            EntityKind.LIGHT_TANK: 20,
-            EntityKind.HEAVY_TANK: 30,
-        }[command.unit_kind]
+        build_ticks = 5
         automation = self._new_automation(
             AutomationKind.PRODUCTION,
             command.title,
@@ -1070,8 +1083,6 @@ class Simulation:
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
-            if entity.congestion_stopped:
-                continue
             if entity.move_target is not None or entity.path:
                 continue
             target = automation.take_next_waypoint(entity_id)
@@ -1092,25 +1103,90 @@ class Simulation:
     def _drive_defend(self, automation: Automation) -> None:
         parameters = _defend_parameters(automation)
         building_cells = self._building_cells()
-        for entity_id in tuple(automation.entity_ids):
+        assigned_ids = tuple(
+            entity_id
+            for entity_id in automation.entity_ids
+            if self.assignments.get(entity_id) == automation.automation_id
+        )
+        for victim_id in assigned_ids:
+            victim = self.entities[victim_id]
+            attacker = self.entities.get(victim.last_attacker_id or "")
+            attacked_tick = victim.last_attacked_tick
+            if (
+                attacker is None
+                or attacker.owner_id == automation.owner_id
+                or attacked_tick is None
+                or self.tick - attacked_tick > self.DEFEND_ATTACK_MEMORY_TICKS
+                or attacker.position.distance_to(parameters.stations[victim_id])
+                > self.DEFEND_PURSUIT_RADIUS
+            ):
+                victim.last_attacker_id = None
+                victim.last_attacked_tick = None
+                continue
+            for responder_id in assigned_ids:
+                responder = self.entities[responder_id]
+                if (
+                    responder_id != victim_id
+                    and responder.position.distance_to(victim.position)
+                    > self.DEFEND_RESPONSE_RADIUS
+                ):
+                    continue
+                if (
+                    attacker.position.distance_to(parameters.stations[responder_id])
+                    > self.DEFEND_PURSUIT_RADIUS
+                ):
+                    continue
+                if responder.attack_target_id != attacker.entity_id:
+                    responder.path.clear()
+                    responder.move_target = None
+                    self._reset_movement_liveness(responder, clear_stop=True)
+                    responder.attack_target_id = attacker.entity_id
+                    responder.state = UnitState.ATTACKING
+                    self.events.record(
+                        self.tick,
+                        EventType.DEFEND_ENGAGED,
+                        responder_id,
+                        automation_id=automation.automation_id,
+                        victim_id=victim_id,
+                        attacker_id=attacker.entity_id,
+                    )
+
+        for entity_id in assigned_ids:
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
-            if entity.congestion_stopped:
-                continue
+            station = parameters.stations[entity_id]
+            target = self.entities.get(entity.attack_target_id or "")
+            if target is not None and target.owner_id != automation.owner_id:
+                if target.position.distance_to(station) <= self.DEFEND_PURSUIT_RADIUS:
+                    entity.state = UnitState.ATTACKING
+                    continue
+                entity.last_attacker_id = None
+                entity.last_attacked_tick = None
+            if entity.attack_target_id is not None:
+                entity.attack_target_id = None
+                entity.path.clear()
+                entity.move_target = None
+                self._reset_movement_liveness(entity, clear_stop=True)
             if entity.path:
                 continue
-            if target_contains(parameters.target, entity.position):
+            if entity.position.distance_to(station) <= self.DEFEND_STATION_TOLERANCE:
                 entity.move_target = None
                 entity.state = UnitState.DEFENDING
                 continue
-            station = parameters.stations[entity_id]
             try:
                 path = find_path(self.game_map, entity.position, station, building_cells)
             except PathfindingError as error:
                 self._transition(automation, AutomationStatus.BLOCKED, str(error))
                 return
             self._start_path(entity, station, path, automation.automation_id, UnitState.DEFENDING)
+            self.events.record(
+                self.tick,
+                EventType.DEFEND_RETURNED,
+                entity_id,
+                automation_id=automation.automation_id,
+                station=[station.x, station.y],
+            )
 
     def _drive_production(self, automation: Automation) -> None:
         parameters = _production_parameters(automation)
@@ -1252,7 +1328,7 @@ class Simulation:
             if entity.kind is EntityKind.RESOURCE_GENERATOR:
                 generators[entity.owner_id] = generators.get(entity.owner_id, 0) + 1
         for owner_id, count in sorted(generators.items()):
-            amount = 10 * count
+            amount = 1000 * count
             self.resources[owner_id] = self.resources.get(owner_id, 0) + amount
             self.events.record(
                 self.tick,
@@ -1262,6 +1338,65 @@ class Simulation:
                 balance=self.resources[owner_id],
                 reason="GENERATOR_INCOME",
             )
+
+    def _spawn_ambient_enemy(self) -> None:
+        """Create a seeded enemy tank on the right side once per second."""
+
+        if not self.ambient_enemy_spawns or self.tick % self.TICKS_PER_SECOND:
+            return
+        minimum_x = max(0, int(self.game_map.width * 0.7))
+        candidates = [
+            (x, y)
+            for y in range(self.game_map.height)
+            for x in range(minimum_x, self.game_map.width)
+            if self.game_map.is_cell_passable((x, y)) and not self.occupancy.occupants((x, y))
+        ]
+        if not candidates:
+            return
+        random_value = (
+            self.random_seed * 1_103_515_245
+            + self.tick * 12_345
+            + self._next_entity_number * 2_654_435_761
+        ) & 0x7FFFFFFF
+        cell = candidates[random_value % len(candidates)]
+        kind = (EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK)[
+            (random_value // max(1, len(candidates))) % 2
+        ]
+        while True:
+            entity_id = f"enemy_tank_{self._next_entity_number:03d}"
+            self._next_entity_number += 1
+            if entity_id not in self.entities:
+                break
+        position = Point(cell[0] + 0.5, cell[1] + 0.5)
+        entity = Entity(
+            entity_id=entity_id,
+            kind=kind,
+            owner_id="enemy",
+            position=position,
+            health=kind.profile.max_health,
+        )
+        targets = [target for target in self.entities.values() if target.owner_id == "player"]
+        if targets:
+            target = min(
+                targets,
+                key=lambda item: (
+                    position.distance_to(item.selection_position),
+                    item.entity_id,
+                ),
+            )
+            entity.attack_target_id = target.entity_id
+            entity.state = UnitState.ATTACKING
+        self.entities[entity_id] = entity
+        self.occupancy.place(entity_id, entity.occupied_cells)
+        self.resources.setdefault("enemy", 500)
+        self.events.record(
+            self.tick,
+            EventType.ENEMY_REINFORCEMENT_SPAWNED,
+            entity_id,
+            kind=kind.value,
+            position=[position.x, position.y],
+            target_id=entity.attack_target_id,
+        )
 
     def _drive_reinforcement(self, automation: Automation) -> None:
         parameters = _reinforcement_parameters(automation)
@@ -1377,7 +1512,11 @@ class Simulation:
                 attacker.attack_cooldown -= 1
             target = self.entities.get(attacker.attack_target_id or "")
             if target is None or target.owner_id == attacker.owner_id:
-                target = self._nearest_enemy_in_range(attacker)
+                defending = (
+                    assigned_id is not None
+                    and self.automations[assigned_id].kind is AutomationKind.DEFEND
+                )
+                target = None if defending else self._nearest_enemy_in_range(attacker)
                 attacker.attack_target_id = None if target is None else target.entity_id
             if target is None:
                 continue
@@ -1447,6 +1586,8 @@ class Simulation:
 
     def _impact_projectile(self, projectile: Projectile, target: Entity) -> None:
         target.health = max(0, target.health - projectile.damage)
+        target.last_attacker_id = projectile.source_entity_id
+        target.last_attacked_tick = self.tick
         self.events.record(
             self.tick,
             EventType.PROJECTILE_IMPACT,
@@ -1522,6 +1663,15 @@ class Simulation:
             entity = self.entities[entity_id]
             if not entity.path:
                 continue
+            if entity.congestion_stopped:
+                retry_phase = sum(ord(character) for character in entity_id) % (
+                    self.CONGESTION_RETRY_TICKS
+                )
+                if self.tick % self.CONGESTION_RETRY_TICKS != retry_phase:
+                    continue
+                entity.congestion_stopped = False
+                entity.no_progress_ticks = self.NO_PROGRESS_YIELD_TICKS - 1
+                entity.progress_distance = entity.position.distance_to(entity.path[0])
             self._consume_reached_intermediate_waypoints(entity)
             self._skip_crowded_waypoints(entity)
             target = entity.path[0]
@@ -1590,7 +1740,7 @@ class Simulation:
         self._track_movement_progress()
 
     def _track_movement_progress(self) -> None:
-        """Stop orders that are alive but no longer getting closer to their waypoint."""
+        """Temporarily yield orders that are not getting closer to their waypoint."""
 
         for entity_id in sorted(self.entities):
             entity = self.entities[entity_id]
@@ -1603,29 +1753,36 @@ class Simulation:
                 entity.progress_target = target
                 entity.progress_distance = distance
                 entity.no_progress_ticks = 0
+                entity.congestion_stopped = False
+                continue
+            if entity.congestion_stopped:
+                if distance <= entity.progress_distance - self.MIN_PROGRESS_DISTANCE:
+                    entity.progress_distance = distance
+                    entity.no_progress_ticks = 0
+                    entity.congestion_stopped = False
                 continue
             if distance <= entity.progress_distance - self.MIN_PROGRESS_DISTANCE:
                 entity.progress_distance = distance
                 entity.no_progress_ticks = 0
                 continue
             entity.no_progress_ticks += 1
-            if entity.no_progress_ticks < self.NO_PROGRESS_STOP_TICKS:
+            if entity.no_progress_ticks < self.NO_PROGRESS_YIELD_TICKS:
                 continue
-            destination = entity.move_target
-            entity.path.clear()
-            entity.move_target = None
-            entity.state = UnitState.HOLDING
             entity.congestion_stopped = True
-            self._reset_movement_liveness(entity)
             self._movement_blocked.discard(entity_id)
             self._blocked_ticks.pop(entity_id, None)
             self.events.record(
                 self.tick,
-                EventType.MOVEMENT_STOPPED,
+                EventType.MOVEMENT_YIELDED,
                 entity_id,
-                reason="NO_PROGRESS_TIMEOUT",
-                timeout_ticks=self.NO_PROGRESS_STOP_TICKS,
-                destination=(None if destination is None else [destination.x, destination.y]),
+                reason="NO_PROGRESS_YIELD",
+                timeout_ticks=self.NO_PROGRESS_YIELD_TICKS,
+                retry_ticks=self.CONGESTION_RETRY_TICKS,
+                destination=(
+                    None
+                    if entity.move_target is None
+                    else [entity.move_target.x, entity.move_target.y]
+                ),
                 position=[entity.position.x, entity.position.y],
             )
 
@@ -2399,8 +2556,14 @@ class Simulation:
         entity_ids: tuple[str, ...],
         *,
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
+        replace_existing: bool = False,
     ) -> ValidationFailure | None:
         for entity_id in entity_ids:
+            incumbent_id = self.assignments.get(entity_id)
+            if replace_existing and incumbent_id is not None:
+                incumbent = self.automations[incumbent_id]
+                if incumbent.kind is not AutomationKind.REPAIR_AND_RETURN:
+                    continue
             if not self._claim_wins(automation, entity_id, authority):
                 return ValidationFailure(
                     ValidationPhase.CONFLICT,

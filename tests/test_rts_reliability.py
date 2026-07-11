@@ -119,7 +119,7 @@ def test_resource_generators_produce_without_an_automation() -> None:
 
     simulation.advance(20)
 
-    assert simulation.resources["player"] == 520
+    assert simulation.resources["player"] == 2500
 
 
 def test_crossing_units_recover_and_are_deterministic() -> None:

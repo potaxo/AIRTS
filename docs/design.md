@@ -977,6 +977,11 @@ Control conflicts are resolved in this order:
 ```
 
 A recent low-priority patrol instruction must not override an emergency retreat.
+Creating a new patrol or defend automation for an explicitly selected unit is a direct
+reassignment, not background arbitration. It replaces that unit's older normal automation
+assignment even when the new automation has lower priority. If the older automation loses its
+last unit, it is canceled and removed from the live automation list. Emergency repair remains
+the exception because it intentionally suspends and later restores the operational assignment.
 
 ## 15.3 Manual override
 
@@ -2130,4 +2135,3 @@ The initial AIRTS prototype is successful when:
 This document should guide development without prescribing every internal class or method.
 
 Codex should retain meaningful engineering freedom while preserving the architectural principles and research goals defined here.
-

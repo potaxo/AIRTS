@@ -196,13 +196,13 @@ def test_slow_unit_making_forward_progress_does_not_time_out_midway() -> None:
     destination = Point(18.5, 2.5)
     assert simulation.execute(MoveCommand(("heavy",), destination)).accepted
 
-    simulation.advance(Simulation.NO_PROGRESS_STOP_TICKS + 10)
+    simulation.advance(Simulation.NO_PROGRESS_YIELD_TICKS + 10)
 
     heavy = simulation.entities["heavy"]
     assert heavy.path
     assert not heavy.congestion_stopped
     assert not simulation.events.query(
-        event_types=frozenset({EventType.MOVEMENT_STOPPED}), subject_id="heavy"
+        event_types=frozenset({EventType.MOVEMENT_YIELDED}), subject_id="heavy"
     )
 
     simulation.advance(40)

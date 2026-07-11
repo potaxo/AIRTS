@@ -3,10 +3,12 @@ from __future__ import annotations
 from airts.automations import (
     AutomationKind,
     AutomationStatus,
+    DefendParameters,
     ProductionParameters,
     RepairParameters,
 )
 from airts.commands import (
+    AttackCommand,
     CancelAutomationCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
@@ -20,7 +22,7 @@ from airts.commands import (
 )
 from airts.entities import UnitState
 from airts.events import EventType
-from airts.geometry import Point, PointTarget
+from airts.geometry import Point, PointTarget, rectangle_region
 from airts.map_model import EntityKind, GameMap, load_map_data
 from airts.simulation import Simulation
 
@@ -76,7 +78,7 @@ def test_ownership_validation_is_atomic_and_structured() -> None:
     assert simulation.events.events[-2].details["phase"] == "ownership"
 
 
-def test_priority_then_newness_resolves_automation_conflicts() -> None:
+def test_new_unit_automation_replaces_older_assignment_even_at_lower_priority() -> None:
     simulation = Simulation(_runtime_map())
     patrol = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=10)
@@ -90,11 +92,14 @@ def test_priority_then_newness_resolves_automation_conflicts() -> None:
         CreateDefendCommand(("unit_01",), PointTarget(Point(12, 3)), priority=10)
     )
 
-    assert not lower.accepted
-    assert lower.reason == "CONTROL_CONFLICT"
+    assert lower.accepted
+    assert simulation.automations[patrol_id].status is AutomationStatus.CANCELED
     assert equal_newer.accepted
     assert simulation.assignments["unit_01"] == equal_newer.automation_id
-    assert simulation.automations[patrol_id].status is AutomationStatus.CANCELED
+    assert simulation.automations[lower.automation_id or ""].status is AutomationStatus.CANCELED
+    assert [item.automation_id for item in simulation.live_automations] == [
+        equal_newer.automation_id
+    ]
 
 
 def test_low_health_does_not_override_the_current_automation() -> None:
@@ -150,6 +155,33 @@ def test_replaced_and_empty_automations_do_not_consume_live_panel_space() -> Non
     assert simulation.automations[defend.automation_id or ""].status is AutomationStatus.CANCELED
 
 
+def test_reassigning_a_tank_group_discards_the_empty_older_automation() -> None:
+    simulation = Simulation(_runtime_map())
+    group = ("unit_01", "unit_02", "unit_03")
+    defend = simulation.execute(
+        CreateDefendCommand(
+            group,
+            rectangle_region(Point(8, 2), Point(13, 7)),
+            priority=10,
+        )
+    )
+    patrol = simulation.execute(
+        CreatePatrolCommand(
+            group,
+            rectangle_region(Point(14, 1), Point(22, 7)),
+            priority=1,
+        )
+    )
+
+    older = simulation.automations[defend.automation_id or ""]
+    assert patrol.accepted
+    assert older.status is AutomationStatus.CANCELED
+    assert older.reason_code == "NO_ASSIGNED_ENTITIES"
+    assert not older.entity_ids
+    assert all(simulation.assignments[entity_id] == patrol.automation_id for entity_id in group)
+    assert [item.automation_id for item in simulation.live_automations] == [patrol.automation_id]
+
+
 def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:
     simulation = Simulation(_runtime_map())
     created = simulation.execute(
@@ -161,6 +193,109 @@ def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:
     assert created.accepted
     assert Point(12, 3).distance_to(simulation.entities["unit_01"].position) <= 2
     assert simulation.entities["unit_01"].state is UnitState.DEFENDING
+
+
+def test_defend_distributes_units_across_exact_area_stations() -> None:
+    simulation = Simulation(_runtime_map())
+    created = simulation.execute(
+        CreateDefendCommand(
+            ("unit_01", "unit_02", "unit_03"),
+            rectangle_region(Point(8, 1), Point(22, 7)),
+        )
+    )
+    automation = simulation.automations[created.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+
+    simulation.advance(100)
+
+    stations = automation.parameters.stations
+    assert {
+        entity_id: simulation.entities[entity_id].position for entity_id in stations
+    } == stations
+    assert (
+        min(
+            first.distance_to(second)
+            for index, first in enumerate(stations.values())
+            for second in tuple(stations.values())[index + 1 :]
+        )
+        >= 5
+    )
+    assert all(
+        simulation.entities[entity_id].state is UnitState.DEFENDING for entity_id in stations
+    )
+
+
+def test_nearby_defenders_retaliate_then_return_when_attacker_runs_away() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "defend_response",
+                "name": "Defend Response",
+                "width": 26,
+                "height": 20,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": f"guard_{index}",
+                        "kind": "light_tank",
+                        "owner": "player",
+                        "position": [2.5, 5.5 + index * 2],
+                    }
+                    for index in range(1, 4)
+                ]
+                + [
+                    {
+                        "id": "raider",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [23.5, 2.5],
+                    }
+                ],
+            }
+        )
+    )
+    created = simulation.execute(
+        CreateDefendCommand(
+            ("guard_1", "guard_2", "guard_3"),
+            PointTarget(Point(10.5, 10.5), radius=2),
+        )
+    )
+    automation = simulation.automations[created.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+    simulation.advance(80)
+    victim_station = automation.parameters.stations["guard_1"]
+    raider = simulation.entities["raider"]
+    raider.position = Point(victim_station.x, victim_station.y - 3)
+    simulation.occupancy.move("raider", raider.occupied_cells)
+
+    assert simulation.execute(AttackCommand(("raider",), "guard_1", owner_id="enemy")).accepted
+    simulation.advance(9)
+
+    engaged = simulation.events.query(event_types=frozenset({EventType.DEFEND_ENGAGED}))
+    assert {event.subject_id for event in engaged} == {
+        "guard_1",
+        "guard_2",
+        "guard_3",
+    }
+    assert all(
+        simulation.entities[entity_id].attack_target_id == "raider"
+        for entity_id in ("guard_1", "guard_2", "guard_3")
+    )
+
+    raider.position = Point(23.5, 17.5)
+    simulation.occupancy.move("raider", raider.occupied_cells)
+    raider.path.clear()
+    raider.move_target = None
+    raider.attack_target_id = None
+    raider.state = UnitState.HOLDING
+    simulation.advance(100)
+
+    assert all(
+        simulation.entities[entity_id].attack_target_id is None
+        and simulation.entities[entity_id].position == station
+        and simulation.entities[entity_id].state is UnitState.DEFENDING
+        for entity_id, station in automation.parameters.stations.items()
+    )
 
 
 def test_cost_free_fixed_tick_production_completes_with_deterministic_ids() -> None:
@@ -268,7 +403,7 @@ def test_factory_production_requests_run_fifo_and_paused_jobs_resume_without_con
             (third_id, "FACTORY_QUEUE_STARTED"),
         )
     ]
-    assert active_ticks == [0, 10, 20]
+    assert active_ticks == [0, 5, 10]
 
 
 def test_canceling_factory_job_starts_next_without_disturbing_the_active_job() -> None:

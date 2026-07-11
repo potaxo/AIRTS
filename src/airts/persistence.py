@@ -79,9 +79,16 @@ def load_simulation_data(raw_data: object) -> Simulation:
     state = _mapping(document.get("state"), "state")
     tick = _integer(state.get("tick"), "state.tick", minimum=0)
     random_seed = _integer(state.get("random_seed"), "state.random_seed")
-    simulation = Simulation(game_map, random_seed)
+    ambient_enemy_spawns = _boolean(
+        state.get("ambient_enemy_spawns", False), "state.ambient_enemy_spawns"
+    )
+    simulation = Simulation(
+        game_map,
+        random_seed,
+        ambient_enemy_spawns=ambient_enemy_spawns,
+    )
     simulation.tick = tick
-    simulation.entities = _load_entities(state.get("entities"), game_map)
+    simulation.entities = _load_entities(state.get("entities"), game_map, tick)
     simulation.occupancy = _build_occupancy(simulation)
     simulation.projectiles = _load_projectiles(state.get("projectiles", {}), simulation)
     simulation.projectile_traces = _load_projectile_traces(
@@ -217,7 +224,7 @@ def _load_selection(raw_data: object, simulation: Simulation) -> GroundingSelect
     return selection
 
 
-def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
+def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
     for entity_id, raw_entity in entities_data.items():
@@ -257,6 +264,21 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
         congestion_stopped = _boolean(
             entity.get("congestion_stopped", False), "entity.congestion_stopped"
         )
+        last_attacker_id = _nullable_string(
+            entity.get("last_attacker_id"), "entity.last_attacker_id"
+        )
+        last_attacked_tick_raw = entity.get("last_attacked_tick")
+        last_attacked_tick = (
+            None
+            if last_attacked_tick_raw is None
+            else _integer(last_attacked_tick_raw, "entity.last_attacked_tick", minimum=0)
+        )
+        if (last_attacker_id is None) != (last_attacked_tick is None):
+            raise PersistenceError(
+                f"entity {entity_id} attack-source fields must both be set or null"
+            )
+        if last_attacked_tick is not None and last_attacked_tick > current_tick:
+            raise PersistenceError(f"entity {entity_id} was attacked in the future")
         if (progress_target is None) != (progress_distance is None):
             raise PersistenceError(
                 f"entity {entity_id} movement progress fields must both be set or null"
@@ -269,10 +291,12 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
             raise PersistenceError(
                 f"entity {entity_id} cannot have stalled ticks without movement progress"
             )
-        if congestion_stopped and (
-            path or move_target is not None or state is not UnitState.HOLDING
-        ):
-            raise PersistenceError(f"entity {entity_id} has inconsistent congestion-stopped state")
+        if congestion_stopped and not path:
+            # Normalize saves created by the short-lived implementation that
+            # canceled a blocked order instead of preserving it for retry.
+            congestion_stopped = False
+        if congestion_stopped and (move_target is None or progress_target is None):
+            raise PersistenceError(f"entity {entity_id} has inconsistent congestion-stop state")
         if kind.profile.category is EntityCategory.BUILDING and (
             path
             or move_target is not None
@@ -307,6 +331,8 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
             attack_cooldown=_integer(
                 entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
             ),
+            last_attacker_id=last_attacker_id,
+            last_attacked_tick=last_attacked_tick,
             progress_target=progress_target,
             progress_distance=progress_distance,
             no_progress_ticks=no_progress_ticks,
@@ -318,6 +344,11 @@ def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
             and loaded_entity.attack_target_id not in entities
         ):
             raise PersistenceError(f"entity {loaded_entity.entity_id} has an unknown attack target")
+        if (
+            loaded_entity.last_attacker_id is not None
+            and loaded_entity.last_attacker_id not in entities
+        ):
+            raise PersistenceError(f"entity {loaded_entity.entity_id} has an unknown last attacker")
     if not entities:
         raise PersistenceError("saved state must contain at least one entity")
     return entities

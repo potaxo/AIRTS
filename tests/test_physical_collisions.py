@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from airts.commands import MoveCommand
+from airts.automations import AutomationStatus
+from airts.commands import CreatePatrolCommand, MoveCommand
 from airts.entities import UnitState
 from airts.events import EventType
-from airts.geometry import Point
+from airts.geometry import Point, PolylineTarget
 from airts.map_model import EntityKind, load_map_data
 from airts.movement import collision_radius
 from airts.simulation import Simulation
@@ -130,7 +131,7 @@ def test_equal_units_pushing_head_on_stalemate_without_overlap_or_bounce() -> No
     assert all(event.details["amount"] < 0.02 for event in pushes)
 
 
-def test_head_on_stalemate_times_out_to_a_stable_pushable_hold() -> None:
+def test_head_on_stalemate_yields_without_discarding_either_order() -> None:
     simulation = _collision_simulation(EntityKind.LIGHT_TANK, EntityKind.LIGHT_TANK, lane_width=1)
     assert simulation.execute(MoveCommand(("mover",), Point(12.5, 2.5))).accepted
     assert simulation.execute(MoveCommand(("blocker",), Point(0.5, 2.5))).accepted
@@ -138,19 +139,36 @@ def test_head_on_stalemate_times_out_to_a_stable_pushable_hold() -> None:
     simulation.advance(80)
 
     for entity in simulation.entities.values():
-        assert entity.state is UnitState.HOLDING
-        assert entity.congestion_stopped
-        assert not entity.path
-        assert entity.move_target is None
-    stopped = simulation.events.query(event_types=frozenset({EventType.MOVEMENT_STOPPED}))
-    assert {event.subject_id for event in stopped} == {"mover", "blocker"}
-    assert all(event.details["reason"] == "NO_PROGRESS_TIMEOUT" for event in stopped)
+        assert entity.state is UnitState.MOVING
+        assert entity.path
+        assert entity.move_target is not None
+    yielded = simulation.events.query(event_types=frozenset({EventType.MOVEMENT_YIELDED}))
+    assert yielded
+    assert {event.subject_id for event in yielded} <= {"mover", "blocker"}
+    assert all(event.details["reason"] == "NO_PROGRESS_YIELD" for event in yielded)
 
-    settled = {entity_id: entity.position for entity_id, entity in simulation.entities.items()}
-    simulation.advance(30)
-    assert {
-        entity_id: entity.position for entity_id, entity in simulation.entities.items()
-    } == settled
+    simulation.remove_entity("blocker")
+    simulation.advance(40)
+    assert simulation.entities["mover"].position == Point(12.5, 2.5)
+    assert not simulation.entities["mover"].path
+
+
+def test_line_patrol_preserves_its_assignment_while_pushing_a_blocker() -> None:
+    simulation = _collision_simulation(EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK, lane_width=1)
+    created = simulation.execute(
+        CreatePatrolCommand(
+            ("mover",),
+            PolylineTarget((Point(2.5, 2.5), Point(12.5, 2.5))),
+        )
+    )
+
+    simulation.advance(140)
+
+    automation = simulation.automations[created.automation_id or ""]
+    assert automation.status is AutomationStatus.ACTIVE
+    assert automation.entity_ids == ["mover"]
+    assert simulation.assignments["mover"] == automation.automation_id
+    assert simulation.entities["mover"].state is UnitState.PATROLLING
 
 
 def test_continuous_physical_pushing_is_deterministic() -> None:
