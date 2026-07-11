@@ -2,8 +2,9 @@
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
 automation. Phase 5 adds deterministic resources, paid production, generator-driven
-economic automation, simple combat, and emergency retreat-and-repair behavior. It does
-not add a language model yet.
+economic automation, simple combat, and explicit repair-and-return behavior. It does
+not add a language model yet. Units never retreat automatically because of low health;
+repair-and-return runs only after an explicit player command or automation request.
 
 The authoritative project scope and architecture are defined in
 [`docs/design.md`](docs/design.md).
@@ -83,7 +84,9 @@ operation. Drawing creates stable point, route, and region IDs. Named regions ar
 must have unique names; overlapping regions are allowed. Click an automation card to
 inspect its provenance, owner, priority, reason, timestamps, and entities. The panel
 also provides pause/resume and cancel controls, and the event view includes validation
-reasons where available. Production target counts and reinforcement minimums are
+reasons where available. Terminal and entity-less automations are removed from the live
+panel so newer active work remains visible; their event and replay history is preserved.
+Production target counts and reinforcement minimums are
 editable through the shared Python command interface.
 
 ## Architecture
@@ -109,9 +112,11 @@ repair-hub/factory/command-center order and valid path cost before restoring the
 assignment.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
-footprints are hard obstacles. Group destinations and patrol starts are distributed, and a
-unit blocked for one second chooses a deterministic free sidestep before replanning. The UI
-displays the calculated path rather than deriving one itself.
+footprints are hard obstacles. A deterministic local swarm controller ranks short steering
+velocities by route progress, unit separation, and a left-hand passing convention. Moving
+units look past contested intermediate waypoints; a unit still blocked for one second uses
+a free sidestep and replans as a final recovery. Group destinations and patrol starts remain
+distributed. The UI displays the global path rather than deriving one itself.
 
 Visibility is stored separately for each owner as visible, explored, or unexplored cells.
 This phase exposes the authoritative information state but deliberately does not hide map

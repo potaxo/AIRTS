@@ -50,6 +50,7 @@ from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PointTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
+from airts.movement import steering_candidates
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.pathfinding import PathfindingError, PathResult, find_path
 from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
@@ -104,6 +105,23 @@ class Simulation:
     def command_history(self) -> tuple[dict[str, object], ...]:
         return tuple(self._command_history)
 
+    @property
+    def live_automations(self) -> tuple[Automation, ...]:
+        """Automations that still own work and belong in the live management panel."""
+
+        return tuple(
+            sorted(
+                (
+                    automation
+                    for automation in self.automations.values()
+                    if not automation.status.terminal
+                    and (automation.entity_ids or automation.has_future_source)
+                ),
+                key=lambda automation: (automation.created_tick, automation.automation_id),
+                reverse=True,
+            )
+        )
+
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
@@ -154,7 +172,6 @@ class Simulation:
             self._generate_income()
             self._drive_automations()
             self._move_entities()
-            self._drive_retreats()
             self._drive_combat()
             self._update_visibility()
 
@@ -1235,38 +1252,6 @@ class Simulation:
         if all(phase is RepairPhase.DONE for phase in parameters.phases.values()):
             self._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
 
-    def _drive_retreats(self) -> None:
-        for entity_id in sorted(tuple(self.entities)):
-            entity = self.entities.get(entity_id)
-            if entity is None or not entity.is_movable or entity.health <= 0:
-                continue
-            if entity.health / entity.kind.profile.max_health > 0.25:
-                continue
-            assigned_id = self.assignments.get(entity_id)
-            if (
-                assigned_id is not None
-                and self.automations[assigned_id].kind is AutomationKind.REPAIR_AND_RETURN
-            ):
-                continue
-            result = self._create_repair(
-                CreateRepairAndReturnCommand(
-                    (entity_id,),
-                    health_threshold=0.25,
-                    title="Emergency Retreat",
-                    owner_id=entity.owner_id,
-                )
-            )
-            if result.accepted:
-                entity.attack_target_id = None
-                entity.state = UnitState.RETREATING
-                self.events.record(
-                    self.tick,
-                    EventType.RETREAT_STARTED,
-                    entity_id,
-                    automation_id=result.automation_id,
-                    health=entity.health,
-                )
-
     def _drive_combat(self) -> None:
         for entity_id in sorted(tuple(self.entities)):
             attacker = self.entities.get(entity_id)
@@ -1348,41 +1333,38 @@ class Simulation:
             entity = self.entities[entity_id]
             if not entity.path:
                 continue
+            self._skip_crowded_waypoints(entity)
             target = entity.path[0]
-            distance = entity.position.distance_to(target)
             maximum_step = entity.speed * self.TICK_SECONDS
-            if distance <= maximum_step or isclose(distance, maximum_step):
-                next_position = target
-                arrived = True
-            else:
-                fraction = maximum_step / distance
-                next_position = Point(
-                    entity.position.x + (target.x - entity.position.x) * fraction,
-                    entity.position.y + (target.y - entity.position.y) * fraction,
-                )
-                arrived = False
-            if not self.game_map.is_passable(next_position):
-                self._fail_movement(entity, "IMPASSABLE_TERRAIN", next_position)
+            neighbors = tuple(
+                other.position
+                for other_id, other in sorted(self.entities.items())
+                if other_id != entity_id and other.is_movable
+            )
+            next_position = next(
+                (
+                    candidate
+                    for candidate in steering_candidates(
+                        entity.position, target, maximum_step, neighbors
+                    )
+                    if self._local_move_is_available(entity, candidate)
+                ),
+                None,
+            )
+            if next_position is None:
+                self._record_movement_blocked(entity, "NO_SAFE_LOCAL_VELOCITY")
                 continue
             try:
                 self.occupancy.move(entity_id, self._cells_at(entity, next_position))
             except OccupancyError as error:
-                self._blocked_ticks[entity_id] = self._blocked_ticks.get(entity_id, 0) + 1
-                if entity_id not in self._movement_blocked:
-                    self.events.record(
-                        self.tick,
-                        EventType.MOVEMENT_BLOCKED,
-                        entity_id,
-                        reason="OCCUPIED",
-                        evidence=str(error),
-                    )
-                    self._movement_blocked.add(entity_id)
-                if self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND:
-                    self._recover_blocked_entity(entity)
+                self._record_movement_blocked(entity, str(error))
                 continue
             self._movement_blocked.discard(entity_id)
             self._blocked_ticks.pop(entity_id, None)
             entity.position = next_position
+            arrived = entity.position.distance_to(target) <= 1e-9 or isclose(
+                entity.position.distance_to(target), 0.0, abs_tol=1e-9
+            )
             if arrived:
                 entity.path.pop(0)
                 if not entity.path:
@@ -1395,6 +1377,51 @@ class Simulation:
                         position=[entity.position.x, entity.position.y],
                         assignment=self.assignments.get(entity_id),
                     )
+
+    def _skip_crowded_waypoints(self, entity: Entity) -> None:
+        """Use path lookahead so agents pass a contested cell instead of orbiting its center."""
+
+        while len(entity.path) > 1:
+            waypoint = entity.path[0]
+            occupants = self.occupancy.occupants(self.game_map.cell_for(waypoint)) - {
+                entity.entity_id
+            }
+            moving_occupants = {
+                occupant_id
+                for occupant_id in occupants
+                if self.entities[occupant_id].is_movable and self.entities[occupant_id].path
+            }
+            if not moving_occupants:
+                return
+            entity.path.pop(0)
+
+    def _local_move_is_available(self, entity: Entity, candidate: Point) -> bool:
+        if not self.game_map.is_passable(candidate):
+            return False
+        cells = self._cells_at(entity, candidate)
+        if any(self.occupancy.occupants(cell) - {entity.entity_id} for cell in cells):
+            return False
+        return all(
+            other_id == entity.entity_id
+            or not other.is_movable
+            or candidate.distance_to(other.position) >= 0.62
+            for other_id, other in self.entities.items()
+        )
+
+    def _record_movement_blocked(self, entity: Entity, evidence: str) -> None:
+        entity_id = entity.entity_id
+        self._blocked_ticks[entity_id] = self._blocked_ticks.get(entity_id, 0) + 1
+        if entity_id not in self._movement_blocked:
+            self.events.record(
+                self.tick,
+                EventType.MOVEMENT_BLOCKED,
+                entity_id,
+                reason="LOCAL_AVOIDANCE_BLOCKED",
+                evidence=evidence,
+            )
+            self._movement_blocked.add(entity_id)
+        if self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND:
+            self._recover_blocked_entity(entity)
 
     def _recover_blocked_entity(self, entity: Entity) -> None:
         """Choose a deterministic free sidestep, then replan to the original target."""

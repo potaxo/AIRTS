@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from airts.automations import (
+    AutomationKind,
     AutomationStatus,
     ProductionParameters,
     RepairParameters,
@@ -87,6 +88,59 @@ def test_priority_then_newness_resolves_automation_conflicts() -> None:
     assert equal_newer.accepted
     assert simulation.assignments["unit_01"] == equal_newer.automation_id
     assert simulation.automations[patrol_id].status is AutomationStatus.CANCELED
+
+
+def test_low_health_does_not_override_the_current_automation() -> None:
+    simulation = Simulation(_runtime_map())
+    patrol = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3))))
+    simulation.entities["unit_01"].health = 1
+
+    simulation.advance(5)
+
+    assert simulation.assignments["unit_01"] == patrol.automation_id
+    assert all(
+        automation.kind is not AutomationKind.REPAIR_AND_RETURN
+        for automation in simulation.automations.values()
+    )
+
+
+def test_canceling_explicit_repair_restores_current_work_and_hides_canceled_work() -> None:
+    simulation = Simulation(_runtime_map())
+    patrol = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3))))
+    simulation.entities["unit_01"].health = 20
+    repair = simulation.execute(CreateRepairAndReturnCommand(("unit_01",), health_threshold=0.5))
+
+    canceled = simulation.execute(CancelAutomationCommand(repair.automation_id or ""))
+
+    assert canceled.accepted
+    assert simulation.assignments["unit_01"] == patrol.automation_id
+    assert repair.automation_id not in {
+        automation.automation_id for automation in simulation.live_automations
+    }
+    assert patrol.automation_id in {
+        automation.automation_id for automation in simulation.live_automations
+    }
+
+
+def test_replaced_and_empty_automations_do_not_consume_live_panel_space() -> None:
+    simulation = Simulation(_runtime_map())
+    patrol = simulation.execute(
+        CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=4)
+    )
+    defend = simulation.execute(
+        CreateDefendCommand(("unit_01",), PointTarget(Point(12, 3)), priority=4)
+    )
+
+    assert simulation.assignments["unit_01"] == defend.automation_id
+    assert [automation.automation_id for automation in simulation.live_automations] == [
+        defend.automation_id
+    ]
+
+    simulation.remove_entity("unit_01")
+
+    assert not simulation.live_automations
+    assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
+    assert simulation.automations[defend.automation_id or ""].status is AutomationStatus.CANCELED
 
 
 def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:

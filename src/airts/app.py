@@ -843,9 +843,13 @@ class AirtsApp:
         self._text(screen, "Automations", (x, y), (245, 245, 245))
         y += 25
         self._automation_buttons.clear()
-        for automation in self.simulation.automations.values():
-            if self.selected_automation_id is None:
-                self.selected_automation_id = automation.automation_id
+        live_automations = self.simulation.live_automations
+        live_ids = {automation.automation_id for automation in live_automations}
+        if self.selected_automation_id not in live_ids:
+            self.selected_automation_id = (
+                live_automations[0].automation_id if live_automations else None
+            )
+        for automation in live_automations:
             self._small_text(screen, automation.title, (x, y), (232, 232, 232))
             self._automation_buttons.append(
                 (

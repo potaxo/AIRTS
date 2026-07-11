@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from airts.automations import AutomationKind, AutomationStatus
-from airts.commands import AttackCommand, CreateEconomyCommand, CreateProductionCommand
+from airts.commands import (
+    AttackCommand,
+    CreateEconomyCommand,
+    CreateProductionCommand,
+    CreateRepairAndReturnCommand,
+)
 from airts.events import EventType
 from airts.map_model import EntityKind, load_map_data
 from airts.persistence import load_simulation, save_simulation
@@ -69,7 +74,7 @@ def test_economy_automation_collects_generator_income_to_target() -> None:
     assert automation.parameters.to_dict()["collected"] == 30
 
 
-def test_attack_damage_destruction_and_emergency_retreat() -> None:
+def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     simulation = _phase5_simulation()
     assert simulation.execute(AttackCommand(("tank",), "enemy")).accepted
     simulation.advance()
@@ -84,10 +89,18 @@ def test_attack_damage_destruction_and_emergency_retreat() -> None:
 
     simulation.entities["tank"].health = 20
     simulation.advance()
+    assert "tank" not in simulation.assignments
+    assert not any(
+        automation.kind is AutomationKind.REPAIR_AND_RETURN
+        for automation in simulation.automations.values()
+    )
+    assert not simulation.events.query(event_types=frozenset({EventType.RETREAT_STARTED}))
+
+    requested = simulation.execute(CreateRepairAndReturnCommand(("tank",)))
     assigned = simulation.automations[simulation.assignments["tank"]]
+    assert requested.accepted
     assert assigned.kind is AutomationKind.REPAIR_AND_RETURN
-    assert assigned.title == "Emergency Retreat"
-    assert simulation.events.query(event_types=frozenset({EventType.RETREAT_STARTED}))
+    assert assigned.title == "Repair And Return"
 
 
 def test_phase5_save_and_replay_preserve_resources_and_combat(
