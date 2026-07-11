@@ -83,9 +83,12 @@ class AirtsApp:
         self._initial_map = simulation.game_map
         self._initial_seed = simulation.random_seed
         self._initial_ambient_enemy_spawns = simulation.ambient_enemy_spawns
+        self._initial_enemy_spawn_interval_ticks = simulation.enemy_spawn_interval_ticks
+        self._initial_enemy_spawn_cap = simulation.enemy_spawn_cap
         self.quick_save_path = Path("airts-quicksave.json")
         self._font: pygame.font.Font | None = None
         self._small_font: pygame.font.Font | None = None
+        self._map_surface: pygame.Surface | None = None
 
     @property
     def tile_size(self) -> float:
@@ -459,8 +462,19 @@ class AirtsApp:
         rally_point = (
             self.active_target.point if isinstance(self.active_target, PointTarget) else None
         )
+        defend_target = (
+            self.active_target if isinstance(self.active_target, PolygonRegion) else None
+        )
         result = self.simulation.execute(
-            CreateProductionCommand(factories[0], EntityKind.LIGHT_TANK, 3, rally_point)
+            CreateProductionCommand(
+                factories[0],
+                EntityKind.LIGHT_TANK,
+                1,
+                rally_point,
+                title="Continuous Tank Reinforcements",
+                continuous=True,
+                defend_target=defend_target,
+            )
         )
         self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
         if result.accepted:
@@ -527,6 +541,7 @@ class AirtsApp:
             self.notice = f"Load failed: {error}"
             return
         self.simulation = simulation
+        self._map_surface = None
         self._clear_selection_state()
         self.notice = f"Loaded {self.quick_save_path}."
 
@@ -535,7 +550,10 @@ class AirtsApp:
             self._initial_map,
             self._initial_seed,
             ambient_enemy_spawns=self._initial_ambient_enemy_spawns,
+            enemy_spawn_interval_ticks=self._initial_enemy_spawn_interval_ticks,
+            enemy_spawn_cap=self._initial_enemy_spawn_cap,
         )
+        self._map_surface = None
         self._clear_selection_state()
         self.notice = "New game started."
 
@@ -558,6 +576,7 @@ class AirtsApp:
                 "hold": self._hold_selected,
                 "patrol": self._create_patrol,
                 "defend": self._create_defend,
+                "produce": self._create_production,
                 "delete": self._delete_selected_region,
                 "save": self._save_game,
                 "load": self._load_game,
@@ -583,6 +602,7 @@ class AirtsApp:
             return
 
     def _draw(self, screen: pygame.Surface) -> None:
+        self._prune_removed_entities()
         screen.fill(self.BACKGROUND)
         self._draw_map(screen)
         self._draw_spatial_input(screen)
@@ -591,7 +611,17 @@ class AirtsApp:
         self._draw_command_bar(screen)
         self._draw_panel(screen)
 
+    def _prune_removed_entities(self) -> None:
+        existing = self.simulation.entities.keys()
+        self.selected_entities.intersection_update(existing)
+        if self.inspected_entity_id not in self.simulation.entities:
+            self.inspected_entity_id = None
+
     def _draw_map(self, screen: pygame.Surface) -> None:
+        if self._map_surface is not None:
+            screen.blit(self._map_surface, (0, 0))
+            return
+        surface = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS))
         terrain_colors = {
             Terrain.GRASS: (64, 102, 60),
             Terrain.ROAD: (119, 106, 77),
@@ -606,11 +636,13 @@ class AirtsApp:
                 rectangle = pygame.Rect(
                     round(x * tile), round(y * tile), round(tile + 1), round(tile + 1)
                 )
-                pygame.draw.rect(screen, terrain_colors[terrain], rectangle)
+                pygame.draw.rect(surface, terrain_colors[terrain], rectangle)
         for cell in range(0, self.simulation.game_map.width + 1, 8):
             pixel = round(cell * tile)
-            pygame.draw.line(screen, (44, 65, 49), (pixel, 0), (pixel, self.MAP_PIXELS))
-            pygame.draw.line(screen, (44, 65, 49), (0, pixel), (self.MAP_PIXELS, pixel))
+            pygame.draw.line(surface, (44, 65, 49), (pixel, 0), (pixel, self.MAP_PIXELS))
+            pygame.draw.line(surface, (44, 65, 49), (0, pixel), (self.MAP_PIXELS, pixel))
+        self._map_surface = surface
+        screen.blit(surface, (0, 0))
 
     def _draw_entities(self, screen: pygame.Surface) -> None:
         colors = {
@@ -622,7 +654,13 @@ class AirtsApp:
             EntityKind.COMMAND_CENTER: (155, 129, 190),
             EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
         }
-        for entity in self.simulation.entities.values():
+        path_entity_ids = set(self.selected_entities)
+        if self.inspected_entity_id is not None:
+            path_entity_ids.add(self.inspected_entity_id)
+        for entity_id in sorted(path_entity_ids):
+            entity = self.simulation.entities.get(entity_id)
+            if entity is None:
+                continue
             if entity.path:
                 points = [self._screen_point(entity.position)] + [
                     self._screen_point(point) for point in entity.path
@@ -797,6 +835,18 @@ class AirtsApp:
             actions.extend([("stop", "Stop"), ("hold", "Hold")])
             if self.active_target is not None:
                 actions.extend([("patrol", "Patrol"), ("defend", "Defend")])
+        factories = [
+            entity
+            for entity in selected
+            if entity.owner_id == "player" and entity.kind is EntityKind.FACTORY
+        ]
+        if len(factories) == 1:
+            label = (
+                "Produce + Defend"
+                if isinstance(self.active_target, PolygonRegion)
+                else "Produce Continuously"
+            )
+            actions.append(("produce", label))
         if len(self.selected_regions) == 1:
             actions.append(("delete", "Delete region"))
         actions.extend([("save", "Save"), ("load", "Load"), ("new", "New game")])
@@ -912,6 +962,10 @@ class AirtsApp:
                 queue = self.simulation.production_queue(parameters.factory_id)
                 queue_ids = [item.automation_id for item in queue]
                 summary += f" | queue {queue_ids.index(automation.automation_id) + 1}/{len(queue)}"
+                if parameters.continuous:
+                    summary += f" | nonstop {parameters.produced_count}"
+                if parameters.defend_automation_id is not None:
+                    summary += f" | -> {parameters.defend_automation_id}"
             self._small_text(screen, summary, (x, y), (153, 178, 198))
             y += 21
             if automation.status in {

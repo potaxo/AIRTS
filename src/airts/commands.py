@@ -72,6 +72,8 @@ class CreateProductionCommand:
     priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
+    continuous: bool = False
+    defend_target: SpatialTarget | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +302,10 @@ def command_to_dict(command: Command) -> dict[str, object]:
                 if command.rally_point is None
                 else [command.rally_point.x, command.rally_point.y]
             ),
+            "continuous": command.continuous,
+            "defend_target": (
+                None if command.defend_target is None else target_to_dict(command.defend_target)
+            ),
             "title": command.title,
             "priority": command.priority,
             "owner_id": command.owner_id,
@@ -428,6 +434,8 @@ def command_from_dict(raw_data: object) -> Command:
             raise ValueError(f"unsupported unit_kind: {error}") from error
         rally_data = data.get("rally_point")
         rally_point = None if rally_data is None else _point(rally_data, "rally_point")
+        defend_data = data.get("defend_target")
+        defend_target = None if defend_data is None else target_from_dict(defend_data)
         return CreateProductionCommand(
             factory_id=_string(data.get("factory_id"), "factory_id"),
             unit_kind=unit_kind,
@@ -437,6 +445,8 @@ def command_from_dict(raw_data: object) -> Command:
             priority=_integer(data.get("priority", 0), "priority"),
             owner_id=owner_id,
             original_instruction=_optional_string(data.get("original_instruction", "")),
+            continuous=_boolean(data.get("continuous", False), "continuous"),
+            defend_target=defend_target,
         )
     if command_type == "create_reinforcement":
         return CreateReinforcementCommand(
@@ -546,3 +556,9 @@ def _number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"{field} must be a number")
     return float(value)
+
+
+def _boolean(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field} must be a boolean")
+    return value

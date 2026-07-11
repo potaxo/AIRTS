@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from airts.app import AirtsApp
 from airts.commands import (
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
@@ -69,6 +70,23 @@ def test_grounded_selection_is_typed_owned_and_replayable(
     save_replay(simulation, destination)
     replayed = run_replay(load_replay(destination))
     assert replayed.snapshot() == simulation.snapshot()
+
+
+def test_destroyed_selected_entities_are_pruned_from_core_and_ui(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    simulation = Simulation(make_map(2))
+    simulation.execute(SetSelectionCommand(entity_ids=("unit_01", "unit_02")))
+    app = AirtsApp(simulation)
+    app.selected_entities = {"unit_01", "unit_02"}
+    app.inspected_entity_id = "unit_01"
+
+    simulation.remove_entity("unit_01", "COMBAT_DESTROYED")
+    app._prune_removed_entities()
+
+    assert simulation.selection.entity_ids == ("unit_02",)
+    assert app.selected_entities == {"unit_02"}
+    assert app.inspected_entity_id is None
 
 
 def test_automation_modification_is_atomic_and_inspectable(

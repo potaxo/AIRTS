@@ -1113,6 +1113,23 @@ Automations may configure:
 
 AIRTS may use deterministic behavior controllers that appear intelligent without requiring continuous LLM inference.
 
+Local movement, physical collision, and nearby combat queries should use deterministic spatial
+broadphase indexing so per-tick work depends primarily on nearby entities rather than every
+possible entity pair. Automatically generated forces must have configurable rates and active
+population caps to prevent unbounded scenario growth.
+
+Weapon firing and locomotion are independent controller concerns. Entering firing range must not
+clear a valid move, patrol, defend, pursue, or return path; all armed units should opportunistically
+fire at enemies in range regardless of their current movement automation. Line patrol groups should traverse route
+vertices in the same direction with deterministic formation spacing rather than assigning members
+to opposing endpoint flows. Unit occupancy must defer unit-unit exclusion to physical colliders;
+stationary units remain pushable and may yield laterally when forward pressure is obstructed.
+
+A continuous production automation keeps its factory reserved and begins another unit after each
+spawn until explicitly paused or canceled. If it includes a defend area, every produced unit joins
+one linked defend automation for that area without resetting the stations or movement of existing
+defenders.
+
 Examples:
 
 * patrol controller;
@@ -1901,7 +1918,7 @@ Deliverables:
 * resource generators;
 * simple combat;
 * health;
-*ack range;
+* attack range;
 * attack power;
 * retreat;
 * repair hubs;

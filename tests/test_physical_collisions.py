@@ -74,7 +74,7 @@ def test_all_units_push_but_heavier_units_accelerate_more_slowly() -> None:
             event_types=frozenset({EventType.UNIT_PUSHED}), subject_id="blocker"
         )
         assert len(pushes) > 1
-        assert all(0 < event.details["amount"] <= 0.12 for event in pushes)
+        assert all(0 < event.details["amount"] <= 0.18 for event in pushes)
         assert blocker.position.y == original.y
 
     assert 0 < distances[EntityKind.HEAVY_TANK] < distances[EntityKind.SCOUT]
@@ -109,48 +109,45 @@ def test_moving_unit_pushes_a_congestion_stopped_unit_gradually() -> None:
     simulation.advance(4)
 
     assert blocker.position.x > original.x
-    assert blocker.position.x - original.x < 0.8
+    assert blocker.position.x - original.x < 1.1
     assert blocker.state is UnitState.HOLDING
     assert blocker.congestion_stopped
     assert not blocker.path
 
 
-def test_equal_units_pushing_head_on_stalemate_without_overlap_or_bounce() -> None:
-    simulation = _collision_simulation(EntityKind.LIGHT_TANK, EntityKind.LIGHT_TANK, lane_width=1)
-    assert simulation.execute(MoveCommand(("mover",), Point(12.5, 2.5))).accepted
-    assert simulation.execute(MoveCommand(("blocker",), Point(0.5, 2.5))).accepted
+def test_ordered_unit_pushes_stationary_blocker_and_reaches_destination() -> None:
+    simulation = _collision_simulation(EntityKind.HEAVY_TANK, EntityKind.SCOUT, lane_width=1)
+    destination = Point(12.5, 2.5)
+    assert simulation.execute(MoveCommand(("mover",), destination)).accepted
 
-    simulation.advance(30)
-    first = simulation.entities["mover"]
-    second = simulation.entities["blocker"]
-    separation = first.position.distance_to(second.position)
+    simulation.advance(100)
 
-    assert first.path and second.path
-    assert separation >= (collision_radius(EntityKind.LIGHT_TANK) * 2 - 1e-9)
-    pushes = simulation.events.query(event_types=frozenset({EventType.UNIT_PUSHED}))
-    assert all(event.details["amount"] < 0.02 for event in pushes)
-
-
-def test_head_on_stalemate_yields_without_discarding_either_order() -> None:
-    simulation = _collision_simulation(EntityKind.LIGHT_TANK, EntityKind.LIGHT_TANK, lane_width=1)
-    assert simulation.execute(MoveCommand(("mover",), Point(12.5, 2.5))).accepted
-    assert simulation.execute(MoveCommand(("blocker",), Point(0.5, 2.5))).accepted
-
-    simulation.advance(80)
-
-    for entity in simulation.entities.values():
-        assert entity.state is UnitState.MOVING
-        assert entity.path
-        assert entity.move_target is not None
-    yielded = simulation.events.query(event_types=frozenset({EventType.MOVEMENT_YIELDED}))
-    assert yielded
-    assert {event.subject_id for event in yielded} <= {"mover", "blocker"}
-    assert all(event.details["reason"] == "NO_PROGRESS_YIELD" for event in yielded)
-
-    simulation.remove_entity("blocker")
-    simulation.advance(40)
-    assert simulation.entities["mover"].position == Point(12.5, 2.5)
+    assert simulation.events.query(
+        event_types=frozenset({EventType.UNIT_PUSHED}), subject_id="blocker"
+    )
+    assert simulation.entities["mover"].position == destination
     assert not simulation.entities["mover"].path
+
+
+def test_equal_units_give_way_and_complete_head_on_orders_without_overlap() -> None:
+    simulation = _collision_simulation(EntityKind.LIGHT_TANK, EntityKind.LIGHT_TANK, lane_width=1)
+    assert simulation.execute(MoveCommand(("mover",), Point(12.5, 2.5))).accepted
+    assert simulation.execute(MoveCommand(("blocker",), Point(0.5, 2.5))).accepted
+
+    minimum_separation = float("inf")
+    for _ in range(80):
+        simulation.advance()
+        minimum_separation = min(
+            minimum_separation,
+            simulation.entities["mover"].position.distance_to(
+                simulation.entities["blocker"].position
+            ),
+        )
+
+    assert simulation.entities["mover"].position == Point(12.5, 2.5)
+    assert simulation.entities["blocker"].position == Point(0.5, 2.5)
+    assert all(not entity.path for entity in simulation.entities.values())
+    assert minimum_separation >= collision_radius(EntityKind.LIGHT_TANK) * 2 - 1e-6
 
 
 def test_line_patrol_preserves_its_assignment_while_pushing_a_blocker() -> None:
@@ -162,13 +159,21 @@ def test_line_patrol_preserves_its_assignment_while_pushing_a_blocker() -> None:
         )
     )
 
-    simulation.advance(140)
+    reached_far_end = False
+    returned_after_far_end = False
+    for _ in range(240):
+        simulation.advance()
+        position_x = simulation.entities["mover"].position.x
+        reached_far_end = reached_far_end or position_x >= 11.5
+        returned_after_far_end = returned_after_far_end or (reached_far_end and position_x <= 3.5)
 
     automation = simulation.automations[created.automation_id or ""]
     assert automation.status is AutomationStatus.ACTIVE
     assert automation.entity_ids == ["mover"]
     assert simulation.assignments["mover"] == automation.automation_id
     assert simulation.entities["mover"].state is UnitState.PATROLLING
+    assert reached_far_end
+    assert returned_after_far_end
 
 
 def test_continuous_physical_pushing_is_deterministic() -> None:

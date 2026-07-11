@@ -22,10 +22,15 @@ class OccupancyGrid:
         self._validate_available(entity_id, cells)
         self._set_cells(entity_id, cells)
 
-    def move(self, entity_id: str, cells: frozenset[Cell]) -> None:
+    def move(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
         if entity_id not in self._entity_cells:
             raise OccupancyError(f"entity is not placed: {entity_id}")
-        self._validate_available(entity_id, cells)
+        self._validate_available(entity_id, cells, allowed_conflicts)
         self.remove(entity_id)
         self._set_cells(entity_id, cells)
 
@@ -54,13 +59,18 @@ class OccupancyGrid:
             for entity_id, cells in sorted(self._entity_cells.items())
         }
 
-    def _validate_available(self, entity_id: str, cells: frozenset[Cell]) -> None:
+    def _validate_available(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
         if not cells:
             raise OccupancyError("an entity must occupy at least one cell")
         for cell in cells:
             if not (0 <= cell[0] < self.width and 0 <= cell[1] < self.height):
                 raise OccupancyError(f"cell outside occupancy grid: {cell}")
-            conflicts = self._cells.get(cell, set()).difference({entity_id})
+            conflicts = self._cells.get(cell, set()).difference({entity_id}, allowed_conflicts)
             if conflicts:
                 conflict = min(conflicts)
                 raise OccupancyError(f"cell {cell} is occupied by {conflict}")

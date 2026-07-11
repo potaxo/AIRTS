@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from airts.app import AirtsApp, InputMode
-from airts.automations import AutomationStatus
+from airts.automations import AutomationStatus, ProductionParameters
 from airts.commands import (
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
@@ -120,6 +120,26 @@ def test_resource_generators_produce_without_an_automation() -> None:
     simulation.advance(20)
 
     assert simulation.resources["player"] == 2500
+
+
+def test_factory_and_area_interaction_creates_continuous_defense_production() -> None:
+    simulation = _interaction_simulation()
+    app = AirtsApp(simulation)
+    target = rectangle_region(Point(8, 8), Point(13, 13))
+    created_region = simulation.execute(CreateSpatialReferenceCommand(target, "Front Line"))
+    factory_position = simulation.entities["factory"].selection_position
+
+    app._select_entities(factory_position, factory_position)
+    app._select_entities(Point(9, 9), Point(9, 9))
+
+    app._create_production()
+
+    assert app.selected_entities == {"factory"}
+    assert app.selected_regions == {created_region.reference_id}
+    automation = simulation.automations[app.selected_automation_id or ""]
+    assert isinstance(automation.parameters, ProductionParameters)
+    assert automation.parameters.continuous
+    assert automation.parameters.defend_target == target
 
 
 def test_crossing_units_recover_and_are_deterministic() -> None:

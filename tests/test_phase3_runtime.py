@@ -315,6 +315,41 @@ def test_cost_free_fixed_tick_production_completes_with_deterministic_ids() -> N
     assert "factory" not in simulation.assignments
 
 
+def test_continuous_factory_production_assigns_every_unit_to_area_defense() -> None:
+    simulation = Simulation(_runtime_map())
+    simulation.resources["player"] = 10_000
+    defend_target = rectangle_region(Point(14, 2), Point(22, 7))
+    created = simulation.execute(
+        CreateProductionCommand(
+            "factory",
+            EntityKind.LIGHT_TANK,
+            1,
+            continuous=True,
+            defend_target=defend_target,
+        )
+    )
+
+    simulation.advance(16)
+
+    production = simulation.automations[created.automation_id or ""]
+    assert isinstance(production.parameters, ProductionParameters)
+    parameters = production.parameters
+    assert production.status is AutomationStatus.ACTIVE
+    assert parameters.continuous
+    assert parameters.produced_count == 3
+    defend = simulation.automations[parameters.defend_automation_id or ""]
+    assert defend.kind is AutomationKind.DEFEND
+    assert defend.entity_ids == parameters.produced_entity_ids
+    assert all(
+        simulation.assignments[entity_id] == defend.automation_id
+        for entity_id in parameters.produced_entity_ids
+    )
+
+    simulation.advance(10)
+    assert parameters.produced_count == 5
+    assert production.status is AutomationStatus.ACTIVE
+
+
 def test_production_waits_when_no_spawn_cell_is_available() -> None:
     game_map = load_map_data(
         {

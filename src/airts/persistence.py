@@ -17,6 +17,7 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
+    build_defend_stations,
     transition_is_allowed,
 )
 from airts.commands import command_from_dict, command_to_dict
@@ -82,10 +83,25 @@ def load_simulation_data(raw_data: object) -> Simulation:
     ambient_enemy_spawns = _boolean(
         state.get("ambient_enemy_spawns", False), "state.ambient_enemy_spawns"
     )
+    enemy_spawn_interval_ticks = _integer(
+        state.get(
+            "enemy_spawn_interval_ticks",
+            Simulation.DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS,
+        ),
+        "state.enemy_spawn_interval_ticks",
+        minimum=1,
+    )
+    enemy_spawn_cap = _integer(
+        state.get("enemy_spawn_cap", Simulation.DEFAULT_ENEMY_SPAWN_CAP),
+        "state.enemy_spawn_cap",
+        minimum=0,
+    )
     simulation = Simulation(
         game_map,
         random_seed,
         ambient_enemy_spawns=ambient_enemy_spawns,
+        enemy_spawn_interval_ticks=enemy_spawn_interval_ticks,
+        enemy_spawn_cap=enemy_spawn_cap,
     )
     simulation.tick = tick
     simulation.entities = _load_entities(state.get("entities"), game_map, tick)
@@ -264,6 +280,7 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
         congestion_stopped = _boolean(
             entity.get("congestion_stopped", False), "entity.congestion_stopped"
         )
+        pursue_target = _boolean(entity.get("pursue_target", False), "entity.pursue_target")
         last_attacker_id = _nullable_string(
             entity.get("last_attacker_id"), "entity.last_attacker_id"
         )
@@ -297,6 +314,11 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
             congestion_stopped = False
         if congestion_stopped and (move_target is None or progress_target is None):
             raise PersistenceError(f"entity {entity_id} has inconsistent congestion-stop state")
+        attack_target_id = _nullable_string(
+            entity.get("attack_target_id"), "entity.attack_target_id"
+        )
+        if pursue_target and attack_target_id is None:
+            raise PersistenceError(f"entity {entity_id} cannot pursue without an attack target")
         if kind.profile.category is EntityCategory.BUILDING and (
             path
             or move_target is not None
@@ -325,9 +347,8 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
             move_target=move_target,
             path=path,
             path_cost=path_cost,
-            attack_target_id=_nullable_string(
-                entity.get("attack_target_id"), "entity.attack_target_id"
-            ),
+            attack_target_id=attack_target_id,
+            pursue_target=pursue_target,
             attack_cooldown=_integer(
                 entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
             ),
@@ -502,6 +523,18 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
             target = automations.get(automation.parameters.target_automation_id)
             if target is None or target.owner_id != automation.owner_id:
                 raise PersistenceError("reinforcement references an invalid target automation")
+        elif isinstance(automation.parameters, ProductionParameters):
+            defend_id = automation.parameters.defend_automation_id
+            if defend_id is not None:
+                target = automations.get(defend_id)
+                if (
+                    target is None
+                    or target.kind is not AutomationKind.DEFEND
+                    or target.owner_id != automation.owner_id
+                    or not isinstance(target.parameters, DefendParameters)
+                    or target.parameters.target != automation.parameters.defend_target
+                ):
+                    raise PersistenceError("production references an invalid defend automation")
         elif isinstance(automation.parameters, RepairParameters):
             for building_id in automation.parameters.destinations.values():
                 building = simulation.entities.get(building_id)
@@ -577,11 +610,23 @@ def _load_automation_parameters(
         ):
             raise PersistenceError("production references an invalid factory")
         rally_data = data.get("rally_point")
+        defend_data = data.get("defend_target")
+        try:
+            defend_target = None if defend_data is None else target_from_dict(defend_data)
+            if defend_target is not None:
+                build_defend_stations(
+                    defend_target,
+                    ("produced_unit",),
+                    simulation.game_map,
+                )
+        except ValueError as error:
+            raise PersistenceError(f"invalid production defend target: {error}") from error
+        continuous = _boolean(data.get("continuous", False), "production.continuous")
         target_count = _integer(data.get("target_count"), "production.target_count", minimum=1)
         produced_count = _integer(
             data.get("produced_count"), "production.produced_count", minimum=0
         )
-        if produced_count > target_count:
+        if not continuous and produced_count > target_count:
             raise PersistenceError("production count exceeds target")
         return ProductionParameters(
             factory_id=factory_id,
@@ -597,6 +642,12 @@ def _load_automation_parameters(
                 data.get("produced_entity_ids"), "production.produced_entity_ids"
             ),
             cost_paid=_boolean(data.get("cost_paid"), "production.cost_paid"),
+            continuous=continuous,
+            defend_target=defend_target,
+            defend_automation_id=_nullable_string(
+                data.get("defend_automation_id"),
+                "production.defend_automation_id",
+            ),
         )
     if kind is AutomationKind.REINFORCEMENT:
         return ReinforcementParameters(

@@ -35,6 +35,8 @@ class ReplayData:
     expected_snapshot: dict[str, object]
     expected_events: tuple[dict[str, object], ...]
     ambient_enemy_spawns: bool = False
+    enemy_spawn_interval_ticks: int = Simulation.DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS
+    enemy_spawn_cap: int = Simulation.DEFAULT_ENEMY_SPAWN_CAP
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -43,6 +45,8 @@ class ReplayData:
             "map": self.game_map.to_dict(),
             "random_seed": self.random_seed,
             "ambient_enemy_spawns": self.ambient_enemy_spawns,
+            "enemy_spawn_interval_ticks": self.enemy_spawn_interval_ticks,
+            "enemy_spawn_cap": self.enemy_spawn_cap,
             "commands": [record.to_dict() for record in self.commands],
             "final_tick": self.final_tick,
             "expected_snapshot": self.expected_snapshot,
@@ -66,6 +70,8 @@ def capture_replay(simulation: Simulation) -> ReplayData:
         expected_snapshot=simulation.snapshot(),
         expected_events=tuple(event.to_dict() for event in simulation.events.events),
         ambient_enemy_spawns=simulation.ambient_enemy_spawns,
+        enemy_spawn_interval_ticks=simulation.enemy_spawn_interval_ticks,
+        enemy_spawn_cap=simulation.enemy_spawn_cap,
     )
 
 
@@ -95,6 +101,19 @@ def load_replay_data(raw_data: object) -> ReplayData:
     ambient_enemy_spawns = _boolean(
         document.get("ambient_enemy_spawns", False), "ambient_enemy_spawns"
     )
+    enemy_spawn_interval_ticks = _integer(
+        document.get(
+            "enemy_spawn_interval_ticks",
+            Simulation.DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS,
+        ),
+        "enemy_spawn_interval_ticks",
+        minimum=1,
+    )
+    enemy_spawn_cap = _integer(
+        document.get("enemy_spawn_cap", Simulation.DEFAULT_ENEMY_SPAWN_CAP),
+        "enemy_spawn_cap",
+        minimum=0,
+    )
     final_tick = _integer(document.get("final_tick"), "final_tick", minimum=0)
     commands: list[RecordedCommand] = []
     previous_tick = 0
@@ -118,6 +137,8 @@ def load_replay_data(raw_data: object) -> ReplayData:
         expected_snapshot=expected_snapshot,
         expected_events=expected_events,
         ambient_enemy_spawns=ambient_enemy_spawns,
+        enemy_spawn_interval_ticks=enemy_spawn_interval_ticks,
+        enemy_spawn_cap=enemy_spawn_cap,
     )
 
 
@@ -126,6 +147,8 @@ def run_replay(data: ReplayData, *, verify: bool = True) -> Simulation:
         data.game_map,
         data.random_seed,
         ambient_enemy_spawns=data.ambient_enemy_spawns,
+        enemy_spawn_interval_ticks=data.enemy_spawn_interval_ticks,
+        enemy_spawn_cap=data.enemy_spawn_cap,
     )
     for record in data.commands:
         simulation.advance(record.tick - simulation.tick)

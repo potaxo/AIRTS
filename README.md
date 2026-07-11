@@ -33,6 +33,20 @@ Development plus packaging
 The bundled scenario is a validated 64 × 64 map with opposing forces, support and
 economic buildings, roads, forest, a river, and a bridge. A custom map can be
 supplied with `--map PATH`.
+
+Enemy generation is configurable for new games:
+
+```bash
+# One enemy every 2.5 seconds, with at most 60 active enemy mobile units
+.venv/bin/python -m airts --enemy-spawn-seconds 2.5 --enemy-cap 60
+
+# Disable automatic enemy generation
+.venv/bin/python -m airts --enemy-spawn-seconds 0
+```
+
+The default is one enemy per second with a cap of 100 active enemy mobile units.
+The interval and cap are preserved by saves and replays.
+
 Structured events can be written when the application exits:
 
 ```bash
@@ -63,7 +77,7 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `4` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
 | `D` | Create a defend automation from selected units and current target |
-| `P` | Produce three light tanks from exactly one selected factory |
+| `P` | Continuously produce light tanks from one selected factory; with an active area, send them to defend it |
 | `R` | Repair selected units and return them to suspended assignments |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
 | `S` / `H` | Stop selected units or hold their current position |
@@ -92,9 +106,13 @@ editable through the shared Python command interface.
 
 The core simulation modules are authoritative and do not import Pygame. Map, geometry,
 entity, occupancy, pathfinding, visibility, command, automation, validation, control,
-persistence, replay, and event modules are independently testable. The Pygame app
+persistence, replay, event, and spatial-index modules are independently testable. The Pygame app
 converts user input into the same tagged commands used by tests and future control
 sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
+Local steering, collision broadphase, and nearby targeting use deterministic spatial buckets
+instead of global entity-pair scans. The UI caches static terrain and draws movement paths only
+for selected or inspected units. Repeated physical corrections are limited to one structured
+push event per unit per tick.
 
 Every automation follows an explicit lifecycle from proposal and validation through
 active, waiting, paused, blocked, and terminal states. Creating a new patrol or defend
@@ -105,11 +123,13 @@ temporarily suspend one assignment so it can be restored afterward.
 Each factory owns a FIFO production queue: the first unfinished request runs, later requests
 wait visibly, and completion or cancellation starts the next job. Pausing preserves progress;
 resuming an active or queued job does not create a control conflict. Factories reserve unit
-costs before building and wait visibly when funds are insufficient. Units take five ticks
-(0.5 seconds) to build. Resource generators produce 1,000 resources every second; an economy
+costs before building and wait visibly when funds are insufficient. A continuous production
+request remains active and starts the next unit after every spawn. When a factory and polygon
+area are selected together, each produced unit joins a persistent defend automation for that
+area. Units take five ticks (0.5 seconds) to build. Resource generators produce 1,000 resources every second; an economy
 automation monitors progress toward a target and exposes it through the normal lifecycle.
-GUI games also create one seeded, deterministic enemy light or heavy tank on the right side
-each second. Defend behavior evenly assigns exact stations, locally rallies nearby defenders
+GUI games create seeded, deterministic enemy light or heavy tanks on the right side at the
+configured interval and stop at the configured cap. Defend behavior evenly assigns exact stations, locally rallies nearby defenders
 against the source of incoming fire, limits pursuit, and returns survivors to their stations.
 Reinforcement transfers eligible units to another automation, and repair selects destinations by
 repair-hub/factory/command-center order and valid path cost before restoring the original
@@ -123,8 +143,9 @@ destination cells. Group moves fill forward formation slots first so early arriv
 plug the approach. Intermediate A* cell centers use a small completion radius, while final
 destinations remain exact and reroute around settled units when necessary. A unit still
 blocked uses a free sidestep and reallocates a crowded destination as final recovery. Group
-destinations and patrol starts remain distributed. The UI displays the global path rather
-than deriving one itself.
+destinations and patrol starts remain distributed. Line-patrol groups start from the first
+vertex together and use same-direction formation slots at each route vertex, preventing the
+old opposing-flow endpoint jam. The UI displays the global path rather than deriving one itself.
 On the final waypoint a unit snaps to its validated destination and becomes idle (or resumes
 its assigned behavior), preventing local separation steering from making it oscillate there.
 Every unit has a physical collider and mass. Contact pressure is resolved continuously over
@@ -136,13 +157,18 @@ Swept contact clamping prevents deep overlap. Pushing preserves each unit's curr
 recorded as structured `unit_pushed` events. If an order makes no meaningful progress toward its
 current waypoint for three seconds, the unit temporarily yields and records a
 `movement_yielded` event. The path and destination remain intact; staggered physical retries keep
-pushing blockers and automatically restore full movement when space opens.
+pushing blockers and automatically restore full movement when space opens. Unit occupancy no
+longer duplicates collider blocking at cell boundaries: moving units have right-of-way pressure,
+while stationary units are pushed forward or yield laterally when forward displacement is blocked.
 
 Combat uses authoritative direct-hit projectiles. Firing creates a visible bullet that moves
 on deterministic simulation ticks, records its map trajectory, and applies the firing unit's
 damage only when it reaches the selected target. Completed trajectories remain briefly visible;
 projectiles and traces are included in save/load and replay state. Scouts, light tanks, and heavy
-tanks retain distinct damage, range, and projectile-speed profiles.
+tanks retain distinct damage and projectile-speed profiles; their attack ranges are 5, 6, and 7
+map units respectively. Weapon firing never clears a movement path: explicit attack orders pursue
+and fire concurrently, while units moving, patrolling, or defending automatically fire at enemies
+in range without abandoning their current locomotion or automation order.
 
 Visibility is stored separately for each owner as visible, explored, or unexplored cells.
 This phase exposes the authoritative information state but deliberately does not hide map

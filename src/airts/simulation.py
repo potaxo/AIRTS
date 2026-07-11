@@ -19,6 +19,7 @@ from airts.automations import (
     RepairPhase,
     build_defend_stations,
     build_patrol_waypoints,
+    patrol_formation_waypoint,
 )
 from airts.commands import (
     AttackCommand,
@@ -49,11 +50,12 @@ from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PointTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
-from airts.movement import collision_radius, steering_candidates, unit_mass
+from airts.movement import NEIGHBOR_RADIUS, collision_radius, steering_candidates, unit_mass
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.pathfinding import PathfindingError, PathResult, find_path
 from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
+from airts.spatial_index import SpatialIndex
 from airts.validation import (
     ValidationFailure,
     ValidationPhase,
@@ -73,6 +75,8 @@ class Simulation:
     DEFEND_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
+    DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
+    DEFAULT_ENEMY_SPAWN_CAP = 100
 
     def __init__(
         self,
@@ -80,10 +84,18 @@ class Simulation:
         random_seed: int = 0,
         *,
         ambient_enemy_spawns: bool = False,
+        enemy_spawn_interval_ticks: int = DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS,
+        enemy_spawn_cap: int = DEFAULT_ENEMY_SPAWN_CAP,
     ) -> None:
+        if enemy_spawn_interval_ticks <= 0:
+            raise ValueError("enemy_spawn_interval_ticks must be positive")
+        if enemy_spawn_cap < 0:
+            raise ValueError("enemy_spawn_cap cannot be negative")
         self.game_map = game_map
         self.random_seed = random_seed
         self.ambient_enemy_spawns = ambient_enemy_spawns
+        self.enemy_spawn_interval_ticks = enemy_spawn_interval_ticks
+        self.enemy_spawn_cap = enemy_spawn_cap
         self.tick = 0
         self.entities = {
             spec.entity_id: Entity(
@@ -116,6 +128,7 @@ class Simulation:
         self._command_history: list[dict[str, object]] = []
         self._movement_blocked: set[str] = set()
         self._blocked_ticks: dict[str, int] = {}
+        self._push_events_this_tick: set[str] = set()
         self._update_visibility()
 
     @property
@@ -191,6 +204,7 @@ class Simulation:
             raise ValueError("tick count cannot be negative")
         for _ in range(ticks):
             self.tick += 1
+            self._push_events_this_tick.clear()
             self._generate_income()
             self._spawn_ambient_enemy()
             self._drive_automations()
@@ -237,9 +251,17 @@ class Simulation:
                 self._transition(automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
+        if entity_id in self.selection.entity_ids:
+            self.selection = GroundingSelection(
+                tuple(item for item in self.selection.entity_ids if item != entity_id),
+                self.selection.point_ids,
+                self.selection.route_ids,
+                self.selection.region_ids,
+            )
         for entity in self.entities.values():
             if entity.attack_target_id == entity_id:
                 entity.attack_target_id = None
+                entity.pursue_target = False
             if entity.last_attacker_id == entity_id:
                 entity.last_attacker_id = None
                 entity.last_attacked_tick = None
@@ -259,6 +281,8 @@ class Simulation:
             "tick": self.tick,
             "random_seed": self.random_seed,
             "ambient_enemy_spawns": self.ambient_enemy_spawns,
+            "enemy_spawn_interval_ticks": self.enemy_spawn_interval_ticks,
+            "enemy_spawn_cap": self.enemy_spawn_cap,
             "map": {"id": self.game_map.map_id, "version": self.game_map.map_version},
             "entities": {
                 entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
@@ -286,6 +310,8 @@ class Simulation:
             "tick": self.tick,
             "random_seed": self.random_seed,
             "ambient_enemy_spawns": self.ambient_enemy_spawns,
+            "enemy_spawn_interval_ticks": self.enemy_spawn_interval_ticks,
+            "enemy_spawn_cap": self.enemy_spawn_cap,
             "entities": {
                 entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
             },
@@ -618,6 +644,7 @@ class Simulation:
             )
         for entity_id in command.entity_ids:
             self._manual_override(entity_id)
+            self.entities[entity_id].pursue_target = False
             self._start_path(
                 self.entities[entity_id],
                 destinations[entity_id],
@@ -658,9 +685,13 @@ class Simulation:
         for entity_id in command.entity_ids:
             self._manual_override(entity_id)
             entity = self.entities[entity_id]
+            entity.path.clear()
+            entity.move_target = None
             self._reset_movement_liveness(entity, clear_stop=True)
             entity.attack_target_id = target.entity_id
+            entity.pursue_target = True
             entity.state = UnitState.ATTACKING
+            self._chase_target(entity, target)
         return self._accept("attack")
 
     def _stop(self, command: StopCommand | HoldPositionCommand, *, hold: bool) -> CommandResult:
@@ -672,6 +703,7 @@ class Simulation:
             entity = self.entities[entity_id]
             entity.path.clear()
             entity.move_target = None
+            entity.pursue_target = False
             entity.state = UnitState.HOLDING if hold and entity.is_movable else UnitState.IDLE
             self._reset_movement_liveness(entity, clear_stop=True)
             self._movement_blocked.discard(entity_id)
@@ -778,6 +810,34 @@ class Simulation:
                 "create_production",
                 ValidationFailure(ValidationPhase.SPATIAL, "TARGET_NOT_PASSABLE", "rally_point"),
             )
+        if command.rally_point is not None and command.defend_target is not None:
+            return self._reject_validation(
+                "create_production",
+                ValidationFailure(
+                    ValidationPhase.SCHEMA,
+                    "RALLY_AND_DEFEND_TARGET_CONFLICT",
+                    "defend_target",
+                ),
+            )
+        if command.defend_target is not None:
+            geometry_failure = self._validate_geometry(command.defend_target)
+            if geometry_failure is not None:
+                return self._reject_validation("create_production", geometry_failure)
+            try:
+                build_defend_stations(
+                    command.defend_target,
+                    ("produced_unit",),
+                    self.game_map,
+                )
+            except ValueError as error:
+                return self._reject_validation(
+                    "create_production",
+                    ValidationFailure(
+                        ValidationPhase.SPATIAL,
+                        _reason(error),
+                        "defend_target",
+                    ),
+                )
         build_ticks = 5
         automation = self._new_automation(
             AutomationKind.PRODUCTION,
@@ -792,6 +852,8 @@ class Simulation:
                 command.target_count,
                 build_ticks,
                 command.rally_point,
+                continuous=command.continuous,
+                defend_target=command.defend_target,
             ),
         )
         existing_jobs = self._factory_production_jobs(command.factory_id)
@@ -1085,7 +1147,16 @@ class Simulation:
             entity = self.entities[entity_id]
             if entity.move_target is not None or entity.path:
                 continue
-            target = automation.take_next_waypoint(entity_id)
+            parameters = _patrol_parameters(automation)
+            waypoint_index = parameters.waypoint_indices[entity_id]
+            automation.take_next_waypoint(entity_id)
+            target = patrol_formation_waypoint(
+                parameters,
+                tuple(automation.entity_ids),
+                entity_id,
+                waypoint_index,
+                self.game_map,
+            )
             try:
                 path = find_path(self.game_map, entity.position, target, building_cells)
             except PathfindingError as error:
@@ -1136,11 +1207,12 @@ class Simulation:
                     > self.DEFEND_PURSUIT_RADIUS
                 ):
                     continue
-                if responder.attack_target_id != attacker.entity_id:
+                if responder.attack_target_id != attacker.entity_id or not responder.pursue_target:
                     responder.path.clear()
                     responder.move_target = None
                     self._reset_movement_liveness(responder, clear_stop=True)
                     responder.attack_target_id = attacker.entity_id
+                    responder.pursue_target = True
                     responder.state = UnitState.ATTACKING
                     self.events.record(
                         self.tick,
@@ -1165,6 +1237,7 @@ class Simulation:
                 entity.last_attacked_tick = None
             if entity.attack_target_id is not None:
                 entity.attack_target_id = None
+                entity.pursue_target = False
                 entity.path.clear()
                 entity.move_target = None
                 self._reset_movement_liveness(entity, clear_stop=True)
@@ -1240,6 +1313,8 @@ class Simulation:
         entity_id = self._spawn_unit(automation, parameters, spawn)
         parameters.produced_count += 1
         parameters.produced_entity_ids.append(entity_id)
+        if parameters.defend_target is not None:
+            self._assign_produced_defender(automation, parameters, entity_id)
         self.events.record(
             self.tick,
             EventType.PRODUCTION_COMPLETED,
@@ -1248,7 +1323,7 @@ class Simulation:
             factory_id=parameters.factory_id,
             produced_count=parameters.produced_count,
         )
-        if parameters.produced_count >= parameters.target_count:
+        if not parameters.continuous and parameters.produced_count >= parameters.target_count:
             self._transition(automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED")
             self._release_automation(automation)
             self._start_next_production(parameters.factory_id)
@@ -1342,7 +1417,15 @@ class Simulation:
     def _spawn_ambient_enemy(self) -> None:
         """Create a seeded enemy tank on the right side once per second."""
 
-        if not self.ambient_enemy_spawns or self.tick % self.TICKS_PER_SECOND:
+        if (
+            not self.ambient_enemy_spawns
+            or self.tick % self.enemy_spawn_interval_ticks
+            or sum(
+                entity.owner_id == "enemy" and entity.is_movable
+                for entity in self.entities.values()
+            )
+            >= self.enemy_spawn_cap
+        ):
             return
         minimum_x = max(0, int(self.game_map.width * 0.7))
         candidates = [
@@ -1385,6 +1468,7 @@ class Simulation:
                 ),
             )
             entity.attack_target_id = target.entity_id
+            entity.pursue_target = True
             entity.state = UnitState.ATTACKING
         self.entities[entity_id] = entity
         self.occupancy.place(entity_id, entity.occupied_cells)
@@ -1498,6 +1582,9 @@ class Simulation:
             self._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
 
     def _drive_combat(self) -> None:
+        entity_index = SpatialIndex(
+            {entity_id: entity.selection_position for entity_id, entity in self.entities.items()}
+        )
         for entity_id in sorted(tuple(self.entities)):
             attacker = self.entities.get(entity_id)
             if attacker is None or attacker.kind.profile.attack_damage <= 0:
@@ -1510,24 +1597,42 @@ class Simulation:
                 continue
             if attacker.attack_cooldown > 0:
                 attacker.attack_cooldown -= 1
-            target = self.entities.get(attacker.attack_target_id or "")
-            if target is None or target.owner_id == attacker.owner_id:
-                defending = (
-                    assigned_id is not None
-                    and self.automations[assigned_id].kind is AutomationKind.DEFEND
-                )
-                target = None if defending else self._nearest_enemy_in_range(attacker)
-                attacker.attack_target_id = None if target is None else target.entity_id
-            if target is None:
+            ordered_target = self.entities.get(attacker.attack_target_id or "")
+            if ordered_target is None or ordered_target.owner_id == attacker.owner_id:
+                attacker.pursue_target = False
+                ordered_target = None
+                attacker.attack_target_id = None
+            attack_range = attacker.kind.profile.attack_range
+            if (
+                ordered_target is not None
+                and not attacker.pursue_target
+                and attacker.selection_position.distance_to(ordered_target.selection_position)
+                > attack_range
+            ):
+                ordered_target = None
+                attacker.attack_target_id = None
+            if (
+                attacker.pursue_target
+                and ordered_target is not None
+                and not attacker.path
+                and self.game_map.cell_for(attacker.position)
+                not in {
+                    self.game_map.cell_for(point)
+                    for point in self._interaction_points(ordered_target)
+                }
+            ):
+                self._chase_target(attacker, ordered_target)
+            firing_target = (
+                ordered_target
+                if ordered_target is not None
+                and attacker.selection_position.distance_to(ordered_target.selection_position)
+                <= attack_range
+                else self._nearest_enemy_in_range(attacker, entity_index)
+            )
+            if firing_target is None:
                 continue
-            distance = attacker.selection_position.distance_to(target.selection_position)
-            if distance > attacker.kind.profile.attack_range:
-                if attacker.state is UnitState.ATTACKING and not attacker.path:
-                    self._chase_target(attacker, target)
-                continue
-            attacker.path.clear()
-            attacker.move_target = None
-            attacker.state = UnitState.ATTACKING
+            if not attacker.pursue_target:
+                attacker.attack_target_id = firing_target.entity_id
             if attacker.attack_cooldown:
                 continue
             speed = projectile_speed(attacker.kind)
@@ -1538,7 +1643,7 @@ class Simulation:
             projectile = Projectile(
                 projectile_id=projectile_id,
                 source_entity_id=attacker.entity_id,
-                target_entity_id=target.entity_id,
+                target_entity_id=firing_target.entity_id,
                 owner_id=attacker.owner_id,
                 weapon_kind=attacker.kind,
                 position=attacker.selection_position,
@@ -1552,7 +1657,7 @@ class Simulation:
                 EventType.PROJECTILE_LAUNCHED,
                 attacker.entity_id,
                 projectile_id=projectile_id,
-                target_id=target.entity_id,
+                target_id=firing_target.entity_id,
                 damage=projectile.damage,
                 position=[projectile.position.x, projectile.position.y],
             )
@@ -1629,17 +1734,20 @@ class Simulation:
             )
         )
 
-    def _nearest_enemy_in_range(self, attacker: Entity) -> Entity | None:
+    def _nearest_enemy_in_range(
+        self, attacker: Entity, entity_index: SpatialIndex
+    ) -> Entity | None:
+        attack_range = attacker.kind.profile.attack_range
         candidates = [
             (
                 attacker.selection_position.distance_to(entity.selection_position),
                 entity.entity_id,
                 entity,
             )
-            for entity in self.entities.values()
+            for entity_id in entity_index.nearby(attacker.selection_position, attack_range)
+            if (entity := self.entities[entity_id]).entity_id != attacker.entity_id
             if entity.owner_id != attacker.owner_id
-            and attacker.selection_position.distance_to(entity.selection_position)
-            <= attacker.kind.profile.attack_range
+            and attacker.selection_position.distance_to(entity.selection_position) <= attack_range
         ]
         return min(candidates)[2] if candidates else None
 
@@ -1659,6 +1767,16 @@ class Simulation:
             self._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
 
     def _move_entities(self) -> None:
+        movable_ids = frozenset(
+            entity_id for entity_id, entity in self.entities.items() if entity.is_movable
+        )
+        unit_index = SpatialIndex(
+            {
+                entity_id: entity.position
+                for entity_id, entity in self.entities.items()
+                if entity_id in movable_ids
+            }
+        )
         for entity_id in sorted(self.entities):
             entity = self.entities[entity_id]
             if not entity.path:
@@ -1677,13 +1795,13 @@ class Simulation:
             target = entity.path[0]
             maximum_step = entity.speed * self.TICK_SECONDS
             neighbors = tuple(
-                other.position
-                for other_id, other in sorted(self.entities.items())
-                if other_id != entity_id and other.is_movable
+                self.entities[other_id].position
+                for other_id in unit_index.nearby(entity.position, NEIGHBOR_RADIUS)
+                if other_id != entity_id
             )
             next_position: Point | None
             direct_distance = entity.position.distance_to(target)
-            direct_position = (
+            desired_direct_position = (
                 target
                 if direct_distance <= maximum_step
                 else Point(
@@ -1693,11 +1811,16 @@ class Simulation:
                     + (target.y - entity.position.y) * maximum_step / direct_distance,
                 )
             )
-            direct_position = self._clamp_to_collider_contact(entity, direct_position)
-            direct_contact_approach = self._waypoint_has_unit_blocker(entity, target)
-            if (len(entity.path) == 1 or direct_contact_approach) and self._local_move_is_available(
-                entity, direct_position
-            ):
+            direct_position = self._clamp_to_collider_contact(
+                entity, desired_direct_position, unit_index
+            )
+            direct_was_clamped = direct_position.distance_to(desired_direct_position) > 1e-9
+            push_stationary_blocker = direct_was_clamped and self._contact_has_stationary_blocker(
+                entity, desired_direct_position, unit_index
+            )
+            if (
+                not direct_was_clamped or push_stationary_blocker
+            ) and self._local_move_is_available(entity, direct_position, unit_index):
                 next_position = direct_position
             else:
                 if len(entity.path) == 1 and self._replan_contested_final_approach(entity, target):
@@ -1706,21 +1829,32 @@ class Simulation:
                 for raw_candidate in steering_candidates(
                     entity.position, target, maximum_step, neighbors
                 ):
-                    candidate = self._clamp_to_collider_contact(entity, raw_candidate)
-                    if self._local_move_is_available(entity, candidate):
+                    if (
+                        direct_was_clamped
+                        and not push_stationary_blocker
+                        and raw_candidate.distance_to(desired_direct_position) <= 1e-9
+                    ):
+                        continue
+                    candidate = self._clamp_to_collider_contact(entity, raw_candidate, unit_index)
+                    if self._local_move_is_available(entity, candidate, unit_index):
                         next_position = candidate
                         break
             if next_position is None:
                 self._record_movement_blocked(entity, "NO_SAFE_LOCAL_VELOCITY")
                 continue
             try:
-                self.occupancy.move(entity_id, self._cells_at(entity, next_position))
+                self.occupancy.move(
+                    entity_id,
+                    self._cells_at(entity, next_position),
+                    movable_ids,
+                )
             except OccupancyError as error:
                 self._record_movement_blocked(entity, str(error))
                 continue
             self._movement_blocked.discard(entity_id)
             self._blocked_ticks.pop(entity_id, None)
             entity.position = next_position
+            unit_index.move(entity_id, next_position)
             arrived = entity.position.distance_to(target) <= 1e-9 or isclose(
                 entity.position.distance_to(target), 0.0, abs_tol=1e-9
             )
@@ -1854,34 +1988,44 @@ class Simulation:
         )
         return any(self.game_map.is_cell_passable(candidate) for candidate in lateral_cells)
 
-    def _local_move_is_available(self, entity: Entity, candidate: Point) -> bool:
+    def _local_move_is_available(
+        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+    ) -> bool:
         if not self.game_map.is_passable(candidate):
             return False
         cells = self._cells_at(entity, candidate)
         return not any(
-            self.occupancy.occupants(cell) - {entity.entity_id} for cell in cells
+            occupant_id != entity.entity_id and not self.entities[occupant_id].is_movable
+            for cell in cells
+            for occupant_id in self.occupancy.occupants(cell)
         ) and all(
             other_id == entity.entity_id
-            or not other.is_movable
-            or candidate.distance_to(other.position)
-            >= collision_radius(entity.kind) + collision_radius(other.kind) - 1e-6
-            for other_id, other in self.entities.items()
+            or candidate.distance_to(self.entities[other_id].position)
+            >= collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind) - 1e-6
+            for other_id in unit_index.nearby(candidate, collision_radius(entity.kind) + 0.5)
         )
 
-    def _clamp_to_collider_contact(self, entity: Entity, candidate: Point) -> Point:
+    def _clamp_to_collider_contact(
+        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+    ) -> Point:
         direction_x = candidate.x - entity.position.x
         direction_y = candidate.y - entity.position.y
         squared_length = direction_x * direction_x + direction_y * direction_y
         if squared_length <= 1e-12:
             return candidate
         maximum_fraction = 1.0
-        for other_id, other in self.entities.items():
-            if other_id == entity.entity_id or not other.is_movable:
+        query_radius = squared_length**0.5 + collision_radius(entity.kind) + 0.5
+        for other_id in unit_index.nearby(entity.position, query_radius):
+            if other_id == entity.entity_id:
                 continue
+            other = self.entities[other_id]
             radius = collision_radius(entity.kind) + collision_radius(other.kind)
             if candidate.distance_to(other.position) >= radius:
                 continue
-            if entity.position.distance_to(other.position) <= radius:
+            current_distance = entity.position.distance_to(other.position)
+            if current_distance <= radius:
+                if candidate.distance_to(other.position) < current_distance - 1e-9:
+                    return entity.position
                 continue
             offset_x = entity.position.x - other.position.x
             offset_y = entity.position.y - other.position.y
@@ -1898,9 +2042,16 @@ class Simulation:
             entity.position.y + direction_y * maximum_fraction,
         )
 
-    def _waypoint_has_unit_blocker(self, mover: Entity, waypoint: Point) -> bool:
-        occupants = self.occupancy.occupants(self.game_map.cell_for(waypoint)) - {mover.entity_id}
-        return any(self.entities[occupant_id].is_movable for occupant_id in occupants)
+    def _contact_has_stationary_blocker(
+        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+    ) -> bool:
+        return any(
+            other_id != entity.entity_id
+            and not self.entities[other_id].path
+            and candidate.distance_to(self.entities[other_id].position)
+            < collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind)
+            for other_id in unit_index.nearby(candidate, collision_radius(entity.kind) + 0.5)
+        )
 
     def _resolve_unit_collisions(self) -> None:
         unit_ids = tuple(
@@ -1910,135 +2061,139 @@ class Simulation:
             entity_id: self._unit_drive_force(self.entities[entity_id]) for entity_id in unit_ids
         }
         for _ in range(2):
-            for first_index, first_id in enumerate(unit_ids):
-                for second_id in unit_ids[first_index + 1 :]:
-                    first = self.entities[first_id]
-                    second = self.entities[second_id]
-                    offset_x = second.position.x - first.position.x
-                    offset_y = second.position.y - first.position.y
-                    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-                    contact_distance = collision_radius(first.kind) + collision_radius(second.kind)
-                    if distance > contact_distance + 0.03:
-                        continue
-                    if distance <= 1e-9:
-                        normal_x = 1.0 if first_id < second_id else -1.0
-                        normal_y = 0.0
-                    else:
-                        normal_x = offset_x / distance
-                        normal_y = offset_y / distance
-                    first_force = forces[first_id]
-                    second_force = forces[second_id]
-                    first_pressure = max(0.0, first_force[0] * normal_x + first_force[1] * normal_y)
-                    second_pressure = max(
-                        0.0, -(second_force[0] * normal_x + second_force[1] * normal_y)
+            unit_index = SpatialIndex(
+                {entity_id: self.entities[entity_id].position for entity_id in unit_ids}
+            )
+            for first_id, second_id in unit_index.candidate_pairs(0.93):
+                first = self.entities[first_id]
+                second = self.entities[second_id]
+                offset_x = second.position.x - first.position.x
+                offset_y = second.position.y - first.position.y
+                distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
+                contact_distance = collision_radius(first.kind) + collision_radius(second.kind)
+                if distance > contact_distance + 0.03:
+                    continue
+                if distance <= 1e-9:
+                    normal_x = 1.0 if first_id < second_id else -1.0
+                    normal_y = 0.0
+                else:
+                    normal_x = offset_x / distance
+                    normal_y = offset_y / distance
+                first_force = forces[first_id]
+                second_force = forces[second_id]
+                first_pressure = max(0.0, first_force[0] * normal_x + first_force[1] * normal_y)
+                second_pressure = max(
+                    0.0, -(second_force[0] * normal_x + second_force[1] * normal_y)
+                )
+                if first_pressure > 0:
+                    forces[second_id] = (
+                        second_force[0] + first_pressure * normal_x,
+                        second_force[1] + first_pressure * normal_y,
                     )
-                    if first_pressure > 0:
-                        forces[second_id] = (
-                            second_force[0] + first_pressure * normal_x,
-                            second_force[1] + first_pressure * normal_y,
-                        )
-                    if second_pressure > 0:
-                        forces[first_id] = (
-                            first_force[0] - second_pressure * normal_x,
-                            first_force[1] - second_pressure * normal_y,
-                        )
-                    net_pressure = first_pressure - second_pressure
-                    if net_pressure > 1e-9:
-                        self._apply_physical_push(
-                            second,
-                            normal_x,
-                            normal_y,
-                            net_pressure,
-                            first_id,
-                        )
-                    elif net_pressure < -1e-9:
-                        self._apply_physical_push(
-                            first,
-                            -normal_x,
-                            -normal_y,
-                            -net_pressure,
-                            second_id,
-                        )
-                    corrected_offset_x = second.position.x - first.position.x
-                    corrected_offset_y = second.position.y - first.position.y
-                    corrected_distance = (
-                        corrected_offset_x * corrected_offset_x
-                        + corrected_offset_y * corrected_offset_y
-                    ) ** 0.5
-                    if corrected_distance < contact_distance:
-                        overlap = contact_distance - corrected_distance
-                        if corrected_distance > 1e-9:
-                            correction_x = corrected_offset_x / corrected_distance
-                            correction_y = corrected_offset_y / corrected_distance
-                        else:
-                            correction_x = normal_x
-                            correction_y = normal_y
-                        total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
-                        first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
-                        second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
-                        self._apply_physical_push(
-                            first,
-                            -correction_x,
-                            -correction_y,
-                            overlap * first_share,
-                            second_id,
-                            correction=True,
-                        )
-                        self._apply_physical_push(
-                            second,
-                            correction_x,
-                            correction_y,
-                            overlap * second_share,
-                            first_id,
-                            correction=True,
-                        )
+                if second_pressure > 0:
+                    forces[first_id] = (
+                        first_force[0] - second_pressure * normal_x,
+                        first_force[1] - second_pressure * normal_y,
+                    )
+                net_pressure = first_pressure - second_pressure
+                if net_pressure > 1e-9:
+                    self._apply_physical_push(
+                        second,
+                        normal_x,
+                        normal_y,
+                        net_pressure,
+                        first_id,
+                    )
+                elif net_pressure < -1e-9:
+                    self._apply_physical_push(
+                        first,
+                        -normal_x,
+                        -normal_y,
+                        -net_pressure,
+                        second_id,
+                    )
+                corrected_offset_x = second.position.x - first.position.x
+                corrected_offset_y = second.position.y - first.position.y
+                corrected_distance = (
+                    corrected_offset_x * corrected_offset_x
+                    + corrected_offset_y * corrected_offset_y
+                ) ** 0.5
+                if corrected_distance < contact_distance:
+                    overlap = contact_distance - corrected_distance
+                    if corrected_distance > 1e-9:
+                        correction_x = corrected_offset_x / corrected_distance
+                        correction_y = corrected_offset_y / corrected_distance
+                    else:
+                        correction_x = normal_x
+                        correction_y = normal_y
+                    total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
+                    first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
+                    second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
+                    self._apply_physical_push(
+                        first,
+                        -correction_x,
+                        -correction_y,
+                        overlap * first_share,
+                        second_id,
+                        correction=True,
+                    )
+                    self._apply_physical_push(
+                        second,
+                        correction_x,
+                        correction_y,
+                        overlap * second_share,
+                        first_id,
+                        correction=True,
+                    )
         self._separate_overlapping_colliders(unit_ids)
 
     def _separate_overlapping_colliders(self, unit_ids: tuple[str, ...]) -> None:
         for _ in range(6):
             changed = False
-            for first_index, first_id in enumerate(unit_ids):
-                for second_id in unit_ids[first_index + 1 :]:
-                    first = self.entities[first_id]
-                    second = self.entities[second_id]
-                    offset_x = second.position.x - first.position.x
-                    offset_y = second.position.y - first.position.y
-                    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-                    required = collision_radius(first.kind) + collision_radius(second.kind)
-                    if distance >= required - 1e-6:
-                        continue
-                    if distance <= 1e-9:
-                        normal_x = 1.0 if first_id < second_id else -1.0
-                        normal_y = 0.0
-                    else:
-                        normal_x = offset_x / distance
-                        normal_y = offset_y / distance
-                    overlap = required - distance
-                    total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
-                    first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
-                    second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
-                    changed = (
-                        self._apply_physical_push(
-                            first,
-                            -normal_x,
-                            -normal_y,
-                            overlap * first_share,
-                            second_id,
-                            correction=True,
-                        )
-                        or changed
+            unit_index = SpatialIndex(
+                {entity_id: self.entities[entity_id].position for entity_id in unit_ids}
+            )
+            for first_id, second_id in unit_index.candidate_pairs(0.9):
+                first = self.entities[first_id]
+                second = self.entities[second_id]
+                offset_x = second.position.x - first.position.x
+                offset_y = second.position.y - first.position.y
+                distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
+                required = collision_radius(first.kind) + collision_radius(second.kind)
+                if distance >= required - 1e-6:
+                    continue
+                if distance <= 1e-9:
+                    normal_x = 1.0 if first_id < second_id else -1.0
+                    normal_y = 0.0
+                else:
+                    normal_x = offset_x / distance
+                    normal_y = offset_y / distance
+                overlap = required - distance
+                total_inverse_mass = 1 / unit_mass(first.kind) + 1 / unit_mass(second.kind)
+                first_share = (1 / unit_mass(first.kind)) / total_inverse_mass
+                second_share = (1 / unit_mass(second.kind)) / total_inverse_mass
+                changed = (
+                    self._apply_physical_push(
+                        first,
+                        -normal_x,
+                        -normal_y,
+                        overlap * first_share,
+                        second_id,
+                        correction=True,
                     )
-                    changed = (
-                        self._apply_physical_push(
-                            second,
-                            normal_x,
-                            normal_y,
-                            overlap * second_share,
-                            first_id,
-                            correction=True,
-                        )
-                        or changed
+                    or changed
+                )
+                changed = (
+                    self._apply_physical_push(
+                        second,
+                        normal_x,
+                        normal_y,
+                        overlap * second_share,
+                        first_id,
+                        correction=True,
                     )
+                    or changed
+                )
             if not changed:
                 return
 
@@ -2065,34 +2220,66 @@ class Simulation:
         *,
         correction: bool = False,
     ) -> bool:
-        scale = 1.0 if correction else 0.2 / unit_mass(entity.kind)
-        amount = min(0.12, pressure * scale)
+        stationary = not entity.path
+        scale = 1.0 if correction else (0.35 if stationary else 0.2) / unit_mass(entity.kind)
+        amount = min(0.18 if stationary and not correction else 0.12, pressure * scale)
         if amount <= 1e-9:
             return False
-        position = Point(
-            entity.position.x + normal_x * amount,
-            entity.position.y + normal_y * amount,
-        )
-        if not self.game_map.is_passable(position):
-            return False
-        try:
-            self.occupancy.move(entity.entity_id, self._cells_at(entity, position))
-        except OccupancyError:
+        directions = [(normal_x, normal_y)]
+        if stationary and not correction:
+            preferred_sign = 1 if sum(map(ord, entity.entity_id + pusher_id)) % 2 else -1
+            directions.extend(
+                [
+                    (-normal_y * preferred_sign, normal_x * preferred_sign),
+                    (normal_y * preferred_sign, -normal_x * preferred_sign),
+                ]
+            )
+        position: Point | None = None
+        yielded_laterally = False
+        for index, (direction_x, direction_y) in enumerate(directions):
+            candidate = Point(
+                entity.position.x + direction_x * amount,
+                entity.position.y + direction_y * amount,
+            )
+            if not self.game_map.is_passable(candidate):
+                continue
+            try:
+                cells = self._cells_at(entity, candidate)
+                allowed_conflicts = frozenset(
+                    occupant_id
+                    for cell in cells
+                    for occupant_id in self.occupancy.occupants(cell)
+                    if self.entities[occupant_id].is_movable
+                )
+                self.occupancy.move(
+                    entity.entity_id,
+                    cells,
+                    allowed_conflicts,
+                )
+            except OccupancyError:
+                continue
+            position = candidate
+            yielded_laterally = index > 0
+            break
+        if position is None:
             return False
         previous = entity.position
         entity.position = position
-        self.events.record(
-            self.tick,
-            EventType.UNIT_PUSHED,
-            entity.entity_id,
-            pusher_id=pusher_id,
-            previous_position=[previous.x, previous.y],
-            position=[position.x, position.y],
-            amount=amount,
-            mass=unit_mass(entity.kind),
-            correction=correction,
-            pushed_was_moving=bool(entity.path),
-        )
+        if entity.entity_id not in self._push_events_this_tick:
+            self._push_events_this_tick.add(entity.entity_id)
+            self.events.record(
+                self.tick,
+                EventType.UNIT_PUSHED,
+                entity.entity_id,
+                pusher_id=pusher_id,
+                previous_position=[previous.x, previous.y],
+                position=[position.x, position.y],
+                amount=amount,
+                mass=unit_mass(entity.kind),
+                correction=correction,
+                yielded_laterally=yielded_laterally,
+                pushed_was_moving=bool(entity.path),
+            )
         return True
 
     def _record_movement_blocked(self, entity: Entity, evidence: str) -> None:
@@ -2337,6 +2524,7 @@ class Simulation:
                 entity = self.entities[entity_id]
                 entity.path.clear()
                 entity.move_target = None
+                entity.pursue_target = False
                 entity.state = UnitState.IDLE
                 self._reset_movement_liveness(entity, clear_stop=True)
             if clear_suspended:
@@ -2367,6 +2555,8 @@ class Simulation:
         entity = self.entities[entity_id]
         entity.path.clear()
         entity.move_target = None
+        entity.attack_target_id = None
+        entity.pursue_target = False
         self._reset_movement_liveness(entity, clear_stop=True)
         if automation.kind is AutomationKind.PATROL:
             patrol_parameters = _patrol_parameters(automation)
@@ -2430,6 +2620,52 @@ class Simulation:
                     UnitState.MOVING,
                 )
         return entity_id
+
+    def _assign_produced_defender(
+        self,
+        production: Automation,
+        parameters: ProductionParameters,
+        entity_id: str,
+    ) -> None:
+        target = parameters.defend_target
+        assert target is not None
+        defend = self.automations.get(parameters.defend_automation_id or "")
+        if defend is None or defend.status.terminal:
+            stations = build_defend_stations(target, (entity_id,), self.game_map)
+            defend = self._new_automation(
+                AutomationKind.DEFEND,
+                f"Defend {production.title}",
+                production.owner_id,
+                production.priority,
+                production.original_instruction,
+                [entity_id],
+                DefendParameters(target, stations),
+            )
+            self._activate(defend, (entity_id,))
+            parameters.defend_automation_id = defend.automation_id
+            return
+        if entity_id not in defend.entity_ids:
+            defend.entity_ids.append(entity_id)
+        defend_parameters = _defend_parameters(defend)
+        defend_parameters.stations[entity_id] = self._next_reinforcement_station(
+            target,
+            tuple(defend_parameters.stations.values()),
+        )
+        self._assign(entity_id, defend)
+        self._initialize_runtime_entity(defend, entity_id)
+
+    def _next_reinforcement_station(
+        self, target: SpatialTarget, occupied: tuple[Point, ...]
+    ) -> Point:
+        candidates = build_patrol_waypoints(target, self.game_map)
+        return max(
+            candidates,
+            key=lambda point: (
+                min((point.distance_to(item) for item in occupied), default=float("inf")),
+                -point.y,
+                -point.x,
+            ),
+        )
 
     def _find_spawn_point(self, factory: Entity) -> Point | None:
         occupied = factory.occupied_cells

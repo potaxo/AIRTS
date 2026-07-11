@@ -11,7 +11,7 @@ from airts.commands import (
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
 )
-from airts.geometry import Point, PointTarget, PolylineTarget
+from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.map_model import EntityKind, GameMap, load_example_map
 from airts.persistence import PersistenceError, load_simulation, save_simulation
 from airts.simulation import Simulation
@@ -105,7 +105,13 @@ def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> N
 def test_ambient_enemy_reinforcements_continue_after_save_load(
     make_map: Callable[[int], GameMap], tmp_path: Path
 ) -> None:
-    simulation = Simulation(make_map(1), random_seed=37, ambient_enemy_spawns=True)
+    simulation = Simulation(
+        make_map(1),
+        random_seed=37,
+        ambient_enemy_spawns=True,
+        enemy_spawn_interval_ticks=7,
+        enemy_spawn_cap=12,
+    )
     simulation.advance(12)
     destination = tmp_path / "ambient-enemies.json"
 
@@ -113,6 +119,34 @@ def test_ambient_enemy_reinforcements_continue_after_save_load(
     restored = load_simulation(destination)
 
     assert restored.ambient_enemy_spawns
+    assert restored.enemy_spawn_interval_ticks == 7
+    assert restored.enemy_spawn_cap == 12
+    assert restored.snapshot() == simulation.snapshot()
+    simulation.advance(10)
+    restored.advance(10)
+    assert restored.snapshot() == simulation.snapshot()
+
+
+def test_continuous_production_defense_link_round_trips(
+    tmp_path: Path,
+) -> None:
+    simulation = Simulation(load_example_map(), random_seed=13)
+    simulation.resources["player"] = 10_000
+    simulation.execute(
+        CreateProductionCommand(
+            "factory_01",
+            EntityKind.LIGHT_TANK,
+            1,
+            continuous=True,
+            defend_target=rectangle_region(Point(32, 38), Point(43, 48)),
+        )
+    )
+    simulation.advance(11)
+    destination = tmp_path / "continuous-defense.json"
+
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+
     assert restored.snapshot() == simulation.snapshot()
     simulation.advance(10)
     restored.advance(10)

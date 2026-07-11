@@ -5,11 +5,15 @@ from pathlib import Path
 from airts.automations import AutomationKind, AutomationStatus
 from airts.commands import (
     AttackCommand,
+    CreateDefendCommand,
     CreateEconomyCommand,
+    CreatePatrolCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
+    MoveCommand,
 )
 from airts.events import EventType
+from airts.geometry import Point, PointTarget
 from airts.map_model import EntityKind, load_map_data
 from airts.persistence import load_simulation, save_simulation
 from airts.replay import load_replay, run_replay, save_replay
@@ -107,6 +111,52 @@ def test_seeded_enemy_tank_reinforcements_spawn_on_the_right_each_second() -> No
     assert first.snapshot() == second.snapshot()
 
 
+def test_enemy_reinforcement_interval_and_cap_limit_world_growth() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "enemy_cap",
+                "name": "Enemy Cap",
+                "width": 40,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "base",
+                        "kind": "command_center",
+                        "owner": "player",
+                        "position": [1, 4],
+                    },
+                    {
+                        "id": "initial_enemy",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [38.5, 10.5],
+                    },
+                ],
+            }
+        ),
+        random_seed=19,
+        ambient_enemy_spawns=True,
+        enemy_spawn_interval_ticks=20,
+        enemy_spawn_cap=2,
+    )
+
+    simulation.advance(80)
+
+    spawned = simulation.events.query(
+        event_types=frozenset({EventType.ENEMY_REINFORCEMENT_SPAWNED})
+    )
+    assert [event.tick for event in reversed(spawned)] == [20]
+    assert (
+        sum(
+            entity.owner_id == "enemy" and entity.is_movable
+            for entity in simulation.entities.values()
+        )
+        == 2
+    )
+
+
 def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     simulation = _phase5_simulation()
     assert simulation.execute(AttackCommand(("tank",), "enemy")).accepted
@@ -151,6 +201,107 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     assert requested.accepted
     assert assigned.kind is AutomationKind.REPAIR_AND_RETURN
     assert assigned.title == "Repair And Return"
+
+
+def test_explicit_attack_moves_and_fires_without_canceling_locomotion() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "attack_move",
+                "name": "Attack Move",
+                "width": 18,
+                "height": 8,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "attacker",
+                        "kind": "light_tank",
+                        "owner": "player",
+                        "position": [2.5, 3.5],
+                    },
+                    {
+                        "id": "target",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [10.5, 3.5],
+                    },
+                ],
+            }
+        )
+    )
+    initial = simulation.entities["attacker"].position
+    assert simulation.execute(AttackCommand(("attacker",), "target")).accepted
+
+    for _ in range(20):
+        simulation.advance()
+        if simulation.events.query(
+            event_types=frozenset({EventType.PROJECTILE_LAUNCHED}),
+            subject_id="attacker",
+        ):
+            break
+    attacker = simulation.entities["attacker"]
+    firing_position = attacker.position
+
+    assert firing_position != initial
+    assert attacker.path
+    assert attacker.move_target is not None
+    simulation.advance()
+    assert attacker.position != firing_position
+    assert attacker.path
+
+
+def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range() -> None:
+    commands = (
+        MoveCommand(("unit",), Point(14.5, 2.5)),
+        CreatePatrolCommand(("unit",), PointTarget(Point(13.5, 4.5), radius=1)),
+        CreateDefendCommand(("unit",), PointTarget(Point(4.5, 4.5), radius=1)),
+    )
+    for command in commands:
+        simulation = Simulation(
+            load_map_data(
+                {
+                    "id": "behavior_fire",
+                    "name": "Behavior Fire",
+                    "width": 18,
+                    "height": 8,
+                    "terrain": {"default": "grass", "rectangles": []},
+                    "entities": [
+                        {
+                            "id": "unit",
+                            "kind": "light_tank",
+                            "owner": "player",
+                            "position": [2.5, 2.5],
+                        },
+                        {
+                            "id": "enemy",
+                            "kind": "heavy_tank",
+                            "owner": "enemy",
+                            "position": [7.5, 2.5],
+                        },
+                    ],
+                }
+            )
+        )
+        assert simulation.execute(command).accepted
+
+        simulation.advance()
+
+        assert simulation.events.query(
+            event_types=frozenset({EventType.PROJECTILE_LAUNCHED}),
+            subject_id="unit",
+        )
+        assert simulation.entities["unit"].path
+
+
+def test_all_unit_attack_ranges_are_doubled() -> None:
+    assert {
+        kind: kind.profile.attack_range
+        for kind in (EntityKind.SCOUT, EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK)
+    } == {
+        EntityKind.SCOUT: 5.0,
+        EntityKind.LIGHT_TANK: 6.0,
+        EntityKind.HEAVY_TANK: 7.0,
+    }
 
 
 def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities() -> None:

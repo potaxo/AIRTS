@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from math import ceil, floor
+from math import ceil, floor, hypot
 
 from airts.geometry import (
     Point,
@@ -113,6 +113,9 @@ class ProductionParameters:
     progress_ticks: int = 0
     produced_entity_ids: list[str] = field(default_factory=list)
     cost_paid: bool = False
+    continuous: bool = False
+    defend_target: SpatialTarget | None = None
+    defend_automation_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -127,6 +130,11 @@ class ProductionParameters:
             "progress_ticks": self.progress_ticks,
             "produced_entity_ids": list(self.produced_entity_ids),
             "cost_paid": self.cost_paid,
+            "continuous": self.continuous,
+            "defend_target": (
+                None if self.defend_target is None else target_to_dict(self.defend_target)
+            ),
+            "defend_automation_id": self.defend_automation_id,
         }
 
 
@@ -220,7 +228,10 @@ class Automation:
         if isinstance(self.parameters, PatrolParameters):
             for index, entity_id in enumerate(self.entity_ids):
                 self.parameters.waypoint_indices.setdefault(
-                    entity_id, index % len(self.parameters.waypoints)
+                    entity_id,
+                    0
+                    if isinstance(self.parameters.target, PolylineTarget)
+                    else index % len(self.parameters.waypoints),
                 )
 
     @property
@@ -406,6 +417,43 @@ def build_defend_stations(
     else:
         selected = tuple(candidates[index % len(candidates)] for index in range(len(entity_ids)))
     return {entity_id: selected[index] for index, entity_id in enumerate(entity_ids)}
+
+
+def patrol_formation_waypoint(
+    parameters: PatrolParameters,
+    entity_ids: tuple[str, ...],
+    entity_id: str,
+    waypoint_index: int,
+    game_map: GameMap,
+) -> Point:
+    """Give line patrols same-direction formation slots around each route vertex."""
+
+    base = parameters.waypoints[waypoint_index]
+    if not isinstance(parameters.target, PolylineTarget) or len(entity_ids) == 1:
+        return base
+    previous = parameters.waypoints[(waypoint_index - 1) % len(parameters.waypoints)]
+    direction_x = base.x - previous.x
+    direction_y = base.y - previous.y
+    length = hypot(direction_x, direction_y)
+    if length <= 1e-9:
+        return base
+    direction_x /= length
+    direction_y /= length
+    ordered_ids = tuple(sorted(entity_ids))
+    slot_index = ordered_ids.index(entity_id)
+    columns = min(5, len(ordered_ids))
+    column = slot_index % columns
+    row = slot_index // columns
+    lateral = (column - (columns - 1) / 2) * 0.9
+    trailing = row * 0.95
+    for scale in (1.0, 0.5):
+        candidate = Point(
+            base.x - direction_y * lateral * scale - direction_x * trailing * scale,
+            base.y + direction_x * lateral * scale - direction_y * trailing * scale,
+        )
+        if game_map.is_passable(candidate):
+            return candidate
+    return base
 
 
 def target_contains(target: SpatialTarget, point: Point) -> bool:

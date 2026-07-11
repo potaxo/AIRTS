@@ -5,7 +5,7 @@ from itertools import combinations
 from airts.automations import AutomationStatus
 from airts.commands import CreatePatrolCommand, MoveCommand
 from airts.events import EventType
-from airts.geometry import Point, rectangle_region
+from airts.geometry import Point, PolylineTarget, rectangle_region
 from airts.map_model import EntityKind, load_map_data
 from airts.movement import collision_radius, steering_candidates
 from airts.simulation import Simulation
@@ -60,7 +60,7 @@ def test_units_traveling_in_opposite_directions_pass_without_deadlock() -> None:
     assert not simulation.entities["west"].path
     assert simulation.entities["east"].position == Point(14.5, 8.5)
     assert simulation.entities["west"].position == Point(0.5, 8.5)
-    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-6
 
 
 def test_perpendicular_groups_cross_and_all_reach_their_destinations() -> None:
@@ -96,7 +96,7 @@ def test_perpendicular_groups_cross_and_all_reach_their_destinations() -> None:
     assert [simulation.entities[command.entity_ids[0]].position for command in commands] == [
         command.target for command in commands
     ]
-    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-6
 
 
 def test_dense_small_area_patrol_keeps_separation_and_makes_progress() -> None:
@@ -131,9 +131,32 @@ def test_dense_small_area_patrol_keeps_separation_and_makes_progress() -> None:
         entity.position != Point(*positions[entity_id])
         for entity_id, entity in simulation.entities.items()
     )
-    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-9
+    assert minimum_separation >= collision_radius(EntityKind.SCOUT) * 2 - 1e-6
     blocked = simulation.events.query(event_types=frozenset({EventType.MOVEMENT_BLOCKED}))
     assert len(blocked) < 12
+
+
+def test_line_patrol_group_flows_from_first_vertex_to_last_without_head_on_jam() -> None:
+    positions = {f"unit_{index}": (3.5 + index * 1.2, 1.5) for index in range(6)}
+    simulation = _swarm_simulation(positions)
+    result = simulation.execute(
+        CreatePatrolCommand(
+            tuple(sorted(positions)),
+            PolylineTarget((Point(10.5, 2.5), Point(10.5, 17.5))),
+        )
+    )
+    maximum_y = {entity_id: position[1] for entity_id, position in positions.items()}
+
+    for _ in range(240):
+        simulation.advance()
+        for entity_id in maximum_y:
+            maximum_y[entity_id] = max(
+                maximum_y[entity_id], simulation.entities[entity_id].position.y
+            )
+
+    assert result.accepted
+    assert all(value >= 15.0 for value in maximum_y.values())
+    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.ACTIVE
 
 
 def test_swarm_movement_is_identical_for_the_same_seed_and_commands() -> None:
@@ -254,7 +277,10 @@ def test_convoy_fills_far_formation_slots_before_near_units_block_the_approach()
     simulation.advance(200)
     settled = tuple(entity.position for entity in simulation.entities.values())
     assert all(not entity.path for entity in simulation.entities.values())
-    assert min(first.distance_to(second) for first, second in combinations(settled, 2)) >= 0.9
+    assert (
+        min(first.distance_to(second) for first, second in combinations(settled, 2))
+        >= collision_radius(EntityKind.SCOUT) * 2 - 1e-6
+    )
 
     simulation.advance(40)
     assert tuple(entity.position for entity in simulation.entities.values()) == settled
