@@ -18,6 +18,11 @@ AIRTS is developed in WSL2 Ubuntu with Python 3.13. From the repository root:
 
 The project uses `pygame-ce`; do not install the separate `pygame` package.
 
+Development plus packaging
+```bash
+.venv/bin/python -m pip install -e ".[dev,package]"
+```
+
 ## Run
 
 ```bash

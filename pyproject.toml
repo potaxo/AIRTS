@@ -21,6 +21,9 @@ dev = [
     "ruff>=0.15.21,<0.16",
 ]
 
+package = [
+    "pyinstaller==6.21.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

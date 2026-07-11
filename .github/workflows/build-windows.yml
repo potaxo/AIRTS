@@ -1,0 +1,57 @@
+name: Build Windows debug package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,package]"
+
+      - name: Run validation
+        shell: pwsh
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m mypy src
+          python -m pytest
+          python -m pip check
+
+      - name: Build Windows debug package
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --console --collect-data airts --name AIRTS src/airts/__main__.py
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\AIRTS\AIRTS.exe")) {
+            throw "Expected executable dist\AIRTS\AIRTS.exe was not created."
+          }
+
+          Get-ChildItem "dist\AIRTS" -Recurse
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIRTS-windows-debug
+          path: dist/AIRTS/
+          if-no-files-found: error
+          retention-days: 14
