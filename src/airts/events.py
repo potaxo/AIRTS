@@ -28,6 +28,11 @@ class EventType(StrEnum):
     REPAIR_STARTED = "repair_started"
     REPAIR_COMPLETED = "repair_completed"
     VISIBILITY_CHANGED = "visibility_changed"
+    SPATIAL_REFERENCE_CREATED = "spatial_reference_created"
+    SPATIAL_REFERENCE_EDITED = "spatial_reference_edited"
+    SPATIAL_REFERENCE_NAMED = "spatial_reference_named"
+    SELECTION_CHANGED = "selection_changed"
+    AUTOMATION_MODIFIED = "automation_modified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,3 +82,31 @@ class EventLog:
         if [event.sequence for event in events] != expected:
             raise ValueError("event sequences must be contiguous and start at one")
         self._events = list(events)
+
+    def query(
+        self,
+        *,
+        event_types: frozenset[EventType] | None = None,
+        subject_id: str | None = None,
+        since_tick: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[Event, ...]:
+        """Return matching events newest-first, suitable for an inspector."""
+
+        matches = (
+            event
+            for event in reversed(self._events)
+            if (event_types is None or event.event_type in event_types)
+            and (subject_id is None or event.subject_id == subject_id)
+            and (since_tick is None or event.tick >= since_tick)
+        )
+        if limit is None:
+            return tuple(matches)
+        if limit < 0:
+            raise ValueError("event query limit cannot be negative")
+        result: list[Event] = []
+        for event in matches:
+            if len(result) == limit:
+                break
+            result.append(event)
+        return tuple(result)

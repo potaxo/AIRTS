@@ -1,4 +1,4 @@
-"""Deterministic Phase 3 command, automation, and simulation runtime."""
+"""Deterministic command, automation, spatial-grounding, and simulation runtime."""
 
 from __future__ import annotations
 
@@ -28,21 +28,27 @@ from airts.commands import (
     CreateProductionCommand,
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
+    CreateSpatialReferenceCommand,
+    EditSpatialReferenceCommand,
     HoldPositionCommand,
+    ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
     RemoveEntityCommand,
+    RenameRegionCommand,
     ResumeAutomationCommand,
+    SetSelectionCommand,
     StopCommand,
     command_to_dict,
 )
 from airts.control import ControlAuthority, ControlClaim, claim_precedes
 from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
-from airts.geometry import Point
+from airts.geometry import Point, PointTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.pathfinding import PathfindingError, PathResult, find_path
+from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
 from airts.validation import (
     ValidationFailure,
     ValidationPhase,
@@ -78,6 +84,8 @@ class Simulation:
         self.suspended_assignments: dict[str, str] = {}
         self.events = EventLog()
         self.visibility = VisibilitySystem(game_map)
+        self.spatial = SpatialStore()
+        self.selection = GroundingSelection()
         self._next_automation_number = 1
         self._next_entity_number = 1
         self._command_history: list[dict[str, object]] = []
@@ -90,6 +98,16 @@ class Simulation:
 
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
+        if isinstance(command, CreateSpatialReferenceCommand):
+            return self._create_spatial_reference(command)
+        if isinstance(command, EditSpatialReferenceCommand):
+            return self._edit_spatial_reference(command)
+        if isinstance(command, RenameRegionCommand):
+            return self._rename_region(command)
+        if isinstance(command, SetSelectionCommand):
+            return self._set_selection(command)
+        if isinstance(command, ModifyAutomationCommand):
+            return self._modify_automation(command)
         if isinstance(command, MoveCommand):
             return self._move(command)
         if isinstance(command, StopCommand):
@@ -181,6 +199,8 @@ class Simulation:
                 for automation_id, automation in sorted(self.automations.items())
             },
             "visibility": self.visibility.to_dict(),
+            "spatial": self.spatial.to_dict(),
+            "selection": self.selection.to_dict(),
         }
 
     def export_state(self) -> dict[str, object]:
@@ -197,12 +217,237 @@ class Simulation:
                 for automation_id, automation in sorted(self.automations.items())
             },
             "visibility": self.visibility.to_dict(),
+            "spatial": self.spatial.to_dict(),
+            "selection": self.selection.to_dict(),
             "events": [event.to_dict() for event in self.events.events],
             "command_history": list(self._command_history),
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
             "movement_blocked": sorted(self._movement_blocked),
         }
+
+    def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
+        points = (target.point,) if isinstance(target, PointTarget) else target.points
+        if any(not self.game_map.contains(point) for point in points):
+            return ValidationFailure(ValidationPhase.SPATIAL, "TARGET_OUTSIDE_MAP", "target")
+        return None
+
+    def _create_spatial_reference(self, command: CreateSpatialReferenceCommand) -> CommandResult:
+        failure = self._validate_geometry(command.target)
+        if failure is not None:
+            return self._reject_validation("create_spatial_reference", failure)
+        try:
+            reference = self.spatial.create(command.target, self.tick, command.name)
+        except ValueError as error:
+            return self._reject_validation(
+                "create_spatial_reference",
+                ValidationFailure(ValidationPhase.SCHEMA, str(error), "name"),
+            )
+        self.events.record(
+            self.tick,
+            EventType.SPATIAL_REFERENCE_CREATED,
+            reference.reference_id,
+            kind=reference.kind.value,
+            name=reference.name,
+        )
+        return self._accept("create_spatial_reference", reference_id=reference.reference_id)
+
+    def _edit_spatial_reference(self, command: EditSpatialReferenceCommand) -> CommandResult:
+        failure = self._validate_geometry(command.target)
+        if failure is not None:
+            return self._reject_validation("edit_spatial_reference", failure)
+        try:
+            reference = self.spatial.edit(command.reference_id, command.target, self.tick)
+        except ValueError as error:
+            return self._reject_validation(
+                "edit_spatial_reference",
+                ValidationFailure(ValidationPhase.REFERENCE, str(error), "reference_id"),
+            )
+        self.events.record(
+            self.tick,
+            EventType.SPATIAL_REFERENCE_EDITED,
+            reference.reference_id,
+            kind=reference.kind.value,
+        )
+        return self._accept("edit_spatial_reference", reference_id=reference.reference_id)
+
+    def _rename_region(self, command: RenameRegionCommand) -> CommandResult:
+        try:
+            reference = self.spatial.rename_region(command.reference_id, command.name, self.tick)
+        except ValueError as error:
+            return self._reject_validation(
+                "rename_region", ValidationFailure(ValidationPhase.SCHEMA, str(error), "name")
+            )
+        self.events.record(
+            self.tick,
+            EventType.SPATIAL_REFERENCE_NAMED,
+            reference.reference_id,
+            name=reference.name,
+        )
+        return self._accept("rename_region", reference_id=reference.reference_id)
+
+    def _set_selection(self, command: SetSelectionCommand) -> CommandResult:
+        if len(set(command.entity_ids)) != len(command.entity_ids):
+            return self._reject_validation(
+                "set_selection",
+                ValidationFailure(ValidationPhase.SCHEMA, "DUPLICATE_SELECTION", "entity_ids"),
+            )
+        for entity_id in command.entity_ids:
+            entity = self.entities.get(entity_id)
+            if entity is None:
+                return self._reject_validation(
+                    "set_selection",
+                    ValidationFailure(ValidationPhase.REFERENCE, "UNKNOWN_ENTITY", "entity_ids"),
+                )
+            if entity.owner_id != command.owner_id:
+                return self._reject_validation(
+                    "set_selection",
+                    ValidationFailure(ValidationPhase.OWNERSHIP, "ENTITY_NOT_OWNED", "entity_ids"),
+                )
+        groups = (
+            (command.point_ids, SpatialKind.POINT),
+            (command.route_ids, SpatialKind.ROUTE),
+            (command.region_ids, SpatialKind.REGION),
+        )
+        for reference_ids, kind in groups:
+            if len(set(reference_ids)) != len(reference_ids):
+                return self._reject_validation(
+                    "set_selection",
+                    ValidationFailure(
+                        ValidationPhase.SCHEMA, "DUPLICATE_SELECTION", f"{kind.value}_ids"
+                    ),
+                )
+            for reference_id in reference_ids:
+                reference = self.spatial.references.get(reference_id)
+                if reference is None or reference.kind is not kind:
+                    return self._reject_validation(
+                        "set_selection",
+                        ValidationFailure(
+                            ValidationPhase.REFERENCE,
+                            "INVALID_SPATIAL_SELECTION",
+                            f"{kind.value}_ids",
+                        ),
+                    )
+        self.selection = GroundingSelection(
+            command.entity_ids, command.point_ids, command.route_ids, command.region_ids
+        )
+        self.events.record(
+            self.tick, EventType.SELECTION_CHANGED, command.owner_id, **self.selection.to_dict()
+        )
+        return self._accept("set_selection")
+
+    def _modify_automation(self, command: ModifyAutomationCommand) -> CommandResult:
+        automation, failure = self._owned_automation(command.automation_id, command.owner_id)
+        if failure is not None:
+            return self._reject_validation("modify_automation", failure)
+        assert automation is not None
+        if automation.status.terminal:
+            return self._reject_validation(
+                "modify_automation",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "AUTOMATION_TERMINAL", "automation_id"
+                ),
+            )
+        if all(
+            value is None
+            for value in (
+                command.title,
+                command.priority,
+                command.target,
+                command.minimum_units,
+                command.target_count,
+            )
+        ):
+            return self._reject_validation(
+                "modify_automation",
+                ValidationFailure(ValidationPhase.SCHEMA, "NO_CHANGES", "automation_id"),
+            )
+        if command.title is not None and not command.title.strip():
+            return self._reject_validation(
+                "modify_automation",
+                ValidationFailure(ValidationPhase.SCHEMA, "TITLE_EMPTY", "title"),
+            )
+        if command.priority is not None:
+            failure = validate_priority(command.priority)
+            if failure is not None:
+                return self._reject_validation("modify_automation", failure)
+        new_parameters: object | None = None
+        if command.target is not None:
+            if automation.kind is AutomationKind.PATROL:
+                try:
+                    waypoints = build_patrol_waypoints(command.target, self.game_map)
+                    self._validate_paths(tuple(automation.entity_ids), waypoints)
+                except (ValueError, PathfindingError) as error:
+                    return self._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(ValidationPhase.PATH, _reason(error), "target"),
+                    )
+                indices = {entity_id: 0 for entity_id in automation.entity_ids}
+                new_parameters = PatrolParameters(command.target, waypoints, indices)
+            elif automation.kind is AutomationKind.DEFEND:
+                try:
+                    stations = build_defend_stations(
+                        command.target, tuple(automation.entity_ids), self.game_map
+                    )
+                    self._validate_paths(tuple(automation.entity_ids), tuple(stations.values()))
+                except (ValueError, PathfindingError) as error:
+                    return self._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(ValidationPhase.PATH, _reason(error), "target"),
+                    )
+                new_parameters = DefendParameters(command.target, stations)
+            else:
+                return self._reject_validation(
+                    "modify_automation",
+                    ValidationFailure(ValidationPhase.CAPABILITY, "TARGET_NOT_EDITABLE", "target"),
+                )
+        if command.minimum_units is not None:
+            if automation.kind is not AutomationKind.REINFORCEMENT:
+                return self._reject_validation(
+                    "modify_automation",
+                    ValidationFailure(
+                        ValidationPhase.CAPABILITY, "MINIMUM_UNITS_NOT_EDITABLE", "minimum_units"
+                    ),
+                )
+            failure = validate_positive(command.minimum_units, "minimum_units")
+            if failure is not None:
+                return self._reject_validation("modify_automation", failure)
+        if command.target_count is not None:
+            if automation.kind is not AutomationKind.PRODUCTION:
+                return self._reject_validation(
+                    "modify_automation",
+                    ValidationFailure(
+                        ValidationPhase.CAPABILITY, "TARGET_COUNT_NOT_EDITABLE", "target_count"
+                    ),
+                )
+            parameters = _production_parameters(automation)
+            if command.target_count <= 0 or command.target_count < parameters.produced_count:
+                return self._reject_validation(
+                    "modify_automation",
+                    ValidationFailure(
+                        ValidationPhase.SCHEMA, "TARGET_COUNT_BELOW_PRODUCED", "target_count"
+                    ),
+                )
+        if command.title is not None:
+            automation.title = command.title.strip()
+        if command.priority is not None:
+            automation.priority = command.priority
+        if new_parameters is not None:
+            automation.parameters = new_parameters  # type: ignore[assignment]
+        if command.minimum_units is not None:
+            _reinforcement_parameters(automation).minimum_units = command.minimum_units
+        if command.target_count is not None:
+            _production_parameters(automation).target_count = command.target_count
+        automation.modified_tick = self.tick
+        self.events.record(
+            self.tick,
+            EventType.AUTOMATION_MODIFIED,
+            automation.automation_id,
+            title=automation.title,
+            priority=automation.priority,
+            parameters=automation.parameters.to_dict(),
+        )
+        return self._accept("modify_automation", automation.automation_id)
 
     def _move(self, command: MoveCommand) -> CommandResult:
         failure = self._validate_entities(
@@ -1381,14 +1626,16 @@ class Simulation:
                     no_longer_visible=no_longer_visible,
                 )
 
-    def _accept(self, command: str, automation_id: str | None = None) -> CommandResult:
+    def _accept(
+        self, command: str, automation_id: str | None = None, reference_id: str | None = None
+    ) -> CommandResult:
         self.events.record(
             self.tick,
             EventType.COMMAND_ACCEPTED,
             automation_id,
             command=command,
         )
-        return CommandResult(True, "ACCEPTED", automation_id)
+        return CommandResult(True, "ACCEPTED", automation_id, reference_id)
 
     def _reject_validation(self, command: str, failure: ValidationFailure) -> CommandResult:
         if failure.phase is ValidationPhase.PATH:

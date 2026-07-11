@@ -107,6 +107,47 @@ class CancelAutomationCommand:
     owner_id: str = "player"
 
 
+@dataclass(frozen=True, slots=True)
+class CreateSpatialReferenceCommand:
+    target: SpatialTarget
+    name: str | None = None
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
+class EditSpatialReferenceCommand:
+    reference_id: str
+    target: SpatialTarget
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
+class RenameRegionCommand:
+    reference_id: str
+    name: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
+class SetSelectionCommand:
+    entity_ids: tuple[str, ...] = ()
+    point_ids: tuple[str, ...] = ()
+    route_ids: tuple[str, ...] = ()
+    region_ids: tuple[str, ...] = ()
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
+class ModifyAutomationCommand:
+    automation_id: str
+    title: str | None = None
+    priority: int | None = None
+    target: SpatialTarget | None = None
+    minimum_units: int | None = None
+    target_count: int | None = None
+    owner_id: str = "player"
+
+
 Command = (
     MoveCommand
     | StopCommand
@@ -120,6 +161,11 @@ Command = (
     | PauseAutomationCommand
     | ResumeAutomationCommand
     | CancelAutomationCommand
+    | CreateSpatialReferenceCommand
+    | EditSpatialReferenceCommand
+    | RenameRegionCommand
+    | SetSelectionCommand
+    | ModifyAutomationCommand
 )
 
 
@@ -128,9 +174,51 @@ class CommandResult:
     accepted: bool
     reason: str
     automation_id: str | None = None
+    reference_id: str | None = None
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, CreateSpatialReferenceCommand):
+        return {
+            "type": "create_spatial_reference",
+            "target": target_to_dict(command.target),
+            "name": command.name,
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, EditSpatialReferenceCommand):
+        return {
+            "type": "edit_spatial_reference",
+            "reference_id": command.reference_id,
+            "target": target_to_dict(command.target),
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, RenameRegionCommand):
+        return {
+            "type": "rename_region",
+            "reference_id": command.reference_id,
+            "name": command.name,
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, SetSelectionCommand):
+        return {
+            "type": "set_selection",
+            "entity_ids": list(command.entity_ids),
+            "point_ids": list(command.point_ids),
+            "route_ids": list(command.route_ids),
+            "region_ids": list(command.region_ids),
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, ModifyAutomationCommand):
+        return {
+            "type": "modify_automation",
+            "automation_id": command.automation_id,
+            "title": command.title,
+            "priority": command.priority,
+            "target": None if command.target is None else target_to_dict(command.target),
+            "minimum_units": command.minimum_units,
+            "target_count": command.target_count,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, MoveCommand):
         return {
             "type": "move",
@@ -217,6 +305,42 @@ def command_from_dict(raw_data: object) -> Command:
     data = _mapping(raw_data, "command")
     command_type = data.get("type")
     owner_id = _string(data.get("owner_id", "player"), "owner_id")
+    if command_type == "create_spatial_reference":
+        name = data.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string or null")
+        return CreateSpatialReferenceCommand(target_from_dict(data.get("target")), name, owner_id)
+    if command_type == "edit_spatial_reference":
+        return EditSpatialReferenceCommand(
+            _string(data.get("reference_id"), "reference_id"),
+            target_from_dict(data.get("target")),
+            owner_id,
+        )
+    if command_type == "rename_region":
+        return RenameRegionCommand(
+            _string(data.get("reference_id"), "reference_id"),
+            _string(data.get("name"), "name"),
+            owner_id,
+        )
+    if command_type == "set_selection":
+        return SetSelectionCommand(
+            _string_ids(data.get("entity_ids"), "entity_ids"),
+            _string_ids(data.get("point_ids"), "point_ids"),
+            _string_ids(data.get("route_ids"), "route_ids"),
+            _string_ids(data.get("region_ids"), "region_ids"),
+            owner_id,
+        )
+    if command_type == "modify_automation":
+        target = data.get("target")
+        return ModifyAutomationCommand(
+            _string(data.get("automation_id"), "automation_id"),
+            _nullable_string(data.get("title"), "title"),
+            _nullable_integer(data.get("priority"), "priority"),
+            None if target is None else target_from_dict(target),
+            _nullable_integer(data.get("minimum_units"), "minimum_units"),
+            _nullable_integer(data.get("target_count"), "target_count"),
+            owner_id,
+        )
     if command_type == "move":
         return MoveCommand(
             _entity_ids(data.get("entity_ids")), _point(data.get("target"), "target"), owner_id
@@ -306,6 +430,26 @@ def _entity_ids(value: object) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError("entity IDs must be a list of strings")
     return tuple(value)
+
+
+def _string_ids(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be a list of strings")
+    return tuple(value)
+
+
+def _nullable_string(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null")
+    return value
+
+
+def _nullable_integer(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, field)
 
 
 def _point(value: object, field: str) -> Point:

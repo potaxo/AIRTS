@@ -1,9 +1,9 @@
 # AIRTS
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
-automation. Phase 3 adds a deterministic command and automation runtime with validated
-ownership, lifecycle, priorities, conflicts, production, reinforcement, and
-repair-and-return behavior, but no language model yet.
+automation. Phase 4 adds traditional RTS selection, persistent player-defined spatial
+references, geometry editing, and visible automation inspection and parameter editing
+on top of the deterministic Phase 3 runtime. It does not add a language model yet.
 
 The authoritative project scope and architecture are defined in
 [`docs/design.md`](docs/design.md).
@@ -51,7 +51,7 @@ Tick-stamped commands can also be captured and deterministically verified:
 
 | Input | Action |
 | --- | --- |
-| `1` | Entity selection mode; click or drag to select units |
+| `1` | Selection mode; click or drag, and hold `Shift` to toggle additional objects |
 | `2` | Place a point patrol target |
 | `3` | Add line vertices; press `Enter` to finish the route |
 | `4` | Drag a rectangular patrol area |
@@ -60,14 +60,20 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `D` | Create a defend automation from selected units and current target |
 | `P` | Produce three light tanks from exactly one selected factory |
 | `R` | Repair selected units and return them to suspended assignments |
+| `N` | Name or rename exactly one selected region; type the name and press `Enter` |
+| `E` | Edit the selected point, route, or region by redrawing it |
+| `U` | Replace the inspected patrol/defend target with the active spatial target |
+| `[` / `]` | Decrease or increase the inspected automation priority |
 | Right-click | Manually move selected units and detach them from automation |
 | `Space` | Pause or resume simulation time |
 | `Esc` | Clear the current spatial target or draft |
 
-The automation panel shows the tagged template, lifecycle status, and assigned-entity
-count and provides pause/resume and cancel controls. Recent structured events are shown
-beneath it. Reinforcement and fully parameterized schemas are available through the
-shared Python command interface; richer editing controls belong to Phase 4.
+Drawing creates stable point, route, and region IDs. Named regions are persistent and
+must have unique names; overlapping regions are allowed. Click an automation card to
+inspect its provenance, owner, priority, reason, timestamps, and entities. The panel
+also provides pause/resume and cancel controls, and the event view includes validation
+reasons where available. Production target counts and reinforcement minimums are
+editable through the shared Python command interface.
 
 ## Architecture
 
@@ -112,7 +118,7 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
-## Phase 3 limitations and exclusions
+## Phase 4 limitations and exclusions
 
 Production is intentionally cost-free and repair uses fixed-rate healing. Resources,
 production costs, combat damage, attacks, targeting, and economic behavior belong to
@@ -120,6 +126,8 @@ Phase 5. Defend controls positioning only. Visibility does not yet include line-
 occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are
 versioned and reject older incompatible schemas.
 
-Combat, economy, full fog of war, Phase 4 editing features, LM Studio or other AI
+Geometry editing replaces a complete point, route, or region rather than offering
+per-vertex handles. Multi-region selections are grounded and inspectable but are not yet
+interpreted by language. Combat, economy, full fog of war, LM Studio or other AI
 providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
 implemented in this phase.

@@ -31,9 +31,16 @@ from airts.map_model import (
 )
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.simulation import Simulation
+from airts.spatial import (
+    GroundingSelection,
+    SpatialKind,
+    SpatialReference,
+    SpatialStore,
+    spatial_kind,
+)
 from airts.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v2"
+SAVE_SCHEMA = "airts-save-v3"
 
 
 class PersistenceError(ValueError):
@@ -81,6 +88,8 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     _validate_assignment_completeness(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
+    simulation.spatial = _load_spatial(state.get("spatial"), simulation, tick)
+    simulation.selection = _load_selection(state.get("selection"), simulation)
     event_log = EventLog()
     try:
         event_log.restore(_load_events(state.get("events"), tick))
@@ -108,6 +117,77 @@ def load_simulation_data(raw_data: object) -> Simulation:
     if not simulation._movement_blocked.issubset(simulation.entities):
         raise PersistenceError("movement_blocked references an unknown entity")
     return simulation
+
+
+def _load_spatial(raw_data: object, simulation: Simulation, tick: int) -> SpatialStore:
+    data = _mapping(raw_data, "state.spatial")
+    references_data = _mapping(data.get("references"), "state.spatial.references")
+    store = SpatialStore()
+    store.references.clear()
+    names: set[str] = set()
+    for reference_id, raw_reference in references_data.items():
+        reference_data = _mapping(raw_reference, f"spatial reference {reference_id}")
+        if reference_data.get("id") != reference_id:
+            raise PersistenceError("spatial reference key and ID differ")
+        try:
+            kind = SpatialKind(_string(reference_data.get("kind"), "spatial kind"))
+            geometry = target_from_dict(reference_data.get("geometry"))
+        except ValueError as error:
+            raise PersistenceError(f"invalid spatial reference: {error}") from error
+        if spatial_kind(geometry) is not kind:
+            raise PersistenceError("spatial reference kind does not match geometry")
+        points = (geometry.point,) if hasattr(geometry, "point") else geometry.points
+        if any(not simulation.game_map.contains(point) for point in points):
+            raise PersistenceError("spatial reference lies outside the map")
+        name = _nullable_string(reference_data.get("name"), "spatial name")
+        if name is not None:
+            if kind is not SpatialKind.REGION or name.casefold() in names:
+                raise PersistenceError("spatial region names must be unique")
+            names.add(name.casefold())
+        created_tick = _past_tick(reference_data.get("created_tick"), "created_tick", tick)
+        modified_tick = _past_tick(reference_data.get("modified_tick"), "modified_tick", tick)
+        if modified_tick < created_tick:
+            raise PersistenceError("spatial modified tick precedes creation")
+        store.references[reference_id] = SpatialReference(
+            reference_id, kind, geometry, created_tick, modified_tick, name
+        )
+    counters = _mapping(data.get("next_numbers"), "state.spatial.next_numbers")
+    for kind in SpatialKind:
+        store.next_numbers[kind] = _integer(
+            counters.get(kind.value), f"next {kind.value} number", minimum=1
+        )
+        used = [
+            int(item.removeprefix(f"{kind.value}_"))
+            for item in store.references
+            if item.startswith(f"{kind.value}_") and item.removeprefix(f"{kind.value}_").isdigit()
+        ]
+        if used and store.next_numbers[kind] <= max(used):
+            raise PersistenceError("spatial counter would overwrite an existing reference")
+    return store
+
+
+def _load_selection(raw_data: object, simulation: Simulation) -> GroundingSelection:
+    data = _mapping(raw_data, "state.selection")
+    selection = GroundingSelection(
+        tuple(_string_list(data.get("entity_ids"), "selection.entity_ids")),
+        tuple(_string_list(data.get("point_ids"), "selection.point_ids")),
+        tuple(_string_list(data.get("route_ids"), "selection.route_ids")),
+        tuple(_string_list(data.get("region_ids"), "selection.region_ids")),
+    )
+    if not set(selection.entity_ids).issubset(simulation.entities):
+        raise PersistenceError("selection references an unknown entity")
+    for ids, kind in (
+        (selection.point_ids, SpatialKind.POINT),
+        (selection.route_ids, SpatialKind.ROUTE),
+        (selection.region_ids, SpatialKind.REGION),
+    ):
+        if any(
+            reference_id not in simulation.spatial.references
+            or simulation.spatial.references[reference_id].kind is not kind
+            for reference_id in ids
+        ):
+            raise PersistenceError("selection references an invalid spatial object")
+    return selection
 
 
 def _load_entities(raw_data: object, game_map: GameMap) -> dict[str, Entity]:
