@@ -32,7 +32,12 @@ from airts.map_model import EntityKind
         HoldPositionCommand(("unit",)),
         RemoveEntityCommand("unit", "DESTROYED"),
         CreatePatrolCommand(("unit",), PointTarget(Point(4, 4)), priority=4),
-        CreateDefendCommand(("unit",), PolylineTarget((Point(1, 1), Point(5, 1))), priority=3),
+        CreateDefendCommand(
+            ("unit",),
+            PolylineTarget((Point(1, 1), Point(5, 1))),
+            priority=3,
+            gathering_point=True,
+        ),
         CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 3, Point(8, 8)),
         CreateReinforcementCommand(("reserve",), "automation_001", 2),
         CreateRepairAndReturnCommand(("unit",), 0.4, 7),

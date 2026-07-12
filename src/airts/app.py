@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pygame
 
-from airts.automations import AutomationKind, AutomationStatus, ProductionParameters
+from airts.automations import (
+    AutomationKind,
+    AutomationStatus,
+    DefendParameters,
+    ProductionParameters,
+    target_center,
+)
 from airts.commands import (
     AttackCommand,
     CancelAutomationCommand,
@@ -18,7 +24,7 @@ from airts.commands import (
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
-    DeleteRegionCommand,
+    DeleteSpatialReferenceCommand,
     EditSpatialReferenceCommand,
     HoldPositionCommand,
     ModifyAutomationCommand,
@@ -162,7 +168,7 @@ class AirtsApp:
         elif key == pygame.K_h:
             self._hold_selected()
         elif key == pygame.K_DELETE:
-            self._delete_selected_region()
+            self._delete_selected_reference()
         elif key == pygame.K_F5:
             self._save_game()
         elif key == pygame.K_F9:
@@ -512,13 +518,15 @@ class AirtsApp:
         result = self.simulation.execute(HoldPositionCommand(tuple(sorted(self.selected_entities))))
         self.notice = "Units holding position." if result.accepted else result.reason
 
-    def _delete_selected_region(self) -> None:
-        if len(self.selected_regions) != 1:
-            self.notice = "Select exactly one user region to delete."
+    def _delete_selected_reference(self) -> None:
+        selected = self.selected_routes | self.selected_regions
+        if len(selected) != 1:
+            self.notice = "Select exactly one route or region to delete."
             return
-        reference_id = next(iter(self.selected_regions))
-        result = self.simulation.execute(DeleteRegionCommand(reference_id))
+        reference_id = next(iter(selected))
+        result = self.simulation.execute(DeleteSpatialReferenceCommand(reference_id))
         if result.accepted:
+            self.selected_routes.discard(reference_id)
             self.selected_regions.clear()
             self.active_reference_id = None
             self.active_target = None
@@ -577,7 +585,7 @@ class AirtsApp:
                 "patrol": self._create_patrol,
                 "defend": self._create_defend,
                 "produce": self._create_production,
-                "delete": self._delete_selected_region,
+                "delete": self._delete_selected_reference,
                 "save": self._save_game,
                 "load": self._load_game,
                 "new": self._new_game,
@@ -606,6 +614,7 @@ class AirtsApp:
         screen.fill(self.BACKGROUND)
         self._draw_map(screen)
         self._draw_spatial_input(screen)
+        self._draw_assembly_glows(screen)
         self._draw_entities(screen)
         self._draw_projectiles(screen)
         self._draw_command_bar(screen)
@@ -709,6 +718,25 @@ class AirtsApp:
                 round(inspected.kind.profile.attack_range * self.tile_size),
                 1,
             )
+
+    def _draw_assembly_glows(self, screen: pygame.Surface) -> None:
+        glow = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS), pygame.SRCALPHA)
+        drawn = False
+        for automation in self.simulation.live_automations:
+            if automation.kind is not AutomationKind.DEFEND:
+                continue
+            parameters = automation.parameters
+            assert isinstance(parameters, DefendParameters)
+            if not parameters.gathering_point or not automation.entity_ids:
+                continue
+            center = self._screen_point(target_center(parameters.target))
+            radius = max(8, round((parameters.assembly_radius + 0.8) * self.tile_size))
+            pygame.draw.circle(glow, (92, 177, 255, 20), center, radius)
+            pygame.draw.circle(glow, (135, 205, 255, 72), center, radius, 2)
+            pygame.draw.circle(glow, (190, 230, 255, 35), center, max(1, radius - 5), 2)
+            drawn = True
+        if drawn:
+            screen.blit(glow, (0, 0))
 
     def _draw_spatial_input(self, screen: pygame.Surface) -> None:
         for reference in self.simulation.spatial.references.values():
@@ -847,8 +875,8 @@ class AirtsApp:
                 else "Produce Continuously"
             )
             actions.append(("produce", label))
-        if len(self.selected_regions) == 1:
-            actions.append(("delete", "Delete region"))
+        if len(self.selected_routes | self.selected_regions) == 1:
+            actions.append(("delete", "Delete route/region"))
         actions.extend([("save", "Save"), ("load", "Load"), ("new", "New game")])
         self._command_buttons.clear()
         x = 14
@@ -964,8 +992,9 @@ class AirtsApp:
                 summary += f" | queue {queue_ids.index(automation.automation_id) + 1}/{len(queue)}"
                 if parameters.continuous:
                     summary += f" | nonstop {parameters.produced_count}"
-                if parameters.defend_automation_id is not None:
-                    summary += f" | -> {parameters.defend_automation_id}"
+                linked_id = parameters.patrol_automation_id or parameters.defend_automation_id
+                if linked_id is not None:
+                    summary += f" | -> {linked_id}"
             self._small_text(screen, summary, (x, y), (153, 178, 198))
             y += 21
             if automation.status in {

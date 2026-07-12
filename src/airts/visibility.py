@@ -36,14 +36,16 @@ class PlayerVisibility:
         previous_visible = self.visible
         current: set[Cell] = set()
         for position, radius in sources:
+            squared_radius = radius * radius
             minimum_x = max(0, int(position.x - radius))
             maximum_x = min(self.width - 1, ceil(position.x + radius))
             minimum_y = max(0, int(position.y - radius))
             maximum_y = min(self.height - 1, ceil(position.y + radius))
             for y in range(minimum_y, maximum_y + 1):
                 for x in range(minimum_x, maximum_x + 1):
-                    center = Point(x + 0.5, y + 0.5)
-                    if position.distance_to(center) <= radius:
+                    offset_x = position.x - (x + 0.5)
+                    offset_y = position.y - (y + 0.5)
+                    if offset_x * offset_x + offset_y * offset_y <= squared_radius:
                         current.add((x, y))
         self.visible = current
         newly_visible = current.difference(previous_visible)

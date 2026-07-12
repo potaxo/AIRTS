@@ -127,7 +127,7 @@ def test_ambient_enemy_reinforcements_continue_after_save_load(
     assert restored.snapshot() == simulation.snapshot()
 
 
-def test_continuous_production_defense_link_round_trips(
+def test_continuous_production_compact_defense_link_round_trips(
     tmp_path: Path,
 ) -> None:
     simulation = Simulation(load_example_map(), random_seed=13)

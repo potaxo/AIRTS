@@ -20,6 +20,7 @@ from airts.automations import (
     build_defend_stations,
     build_patrol_waypoints,
     patrol_formation_waypoint,
+    target_center,
 )
 from airts.commands import (
     AttackCommand,
@@ -33,6 +34,7 @@ from airts.commands import (
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
+    DeleteSpatialReferenceCommand,
     EditSpatialReferenceCommand,
     HoldPositionCommand,
     ModifyAutomationCommand,
@@ -48,11 +50,11 @@ from airts.commands import (
 from airts.control import ControlAuthority, ControlClaim, claim_precedes
 from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
-from airts.geometry import Point, PointTarget, SpatialTarget
+from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
 from airts.movement import NEIGHBOR_RADIUS, collision_radius, steering_candidates, unit_mass
 from airts.occupancy import OccupancyError, OccupancyGrid
-from airts.pathfinding import PathfindingError, PathResult, find_path
+from airts.pathfinding import Pathfinder, PathfindingError, PathResult, find_path
 from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
 from airts.spatial_index import SpatialIndex
@@ -77,6 +79,7 @@ class Simulation:
     DEFEND_STATION_TOLERANCE = 0.05
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
+    GATHERING_PATH_BUDGET = 4
 
     def __init__(
         self,
@@ -129,6 +132,10 @@ class Simulation:
         self._movement_blocked: set[str] = set()
         self._blocked_ticks: dict[str, int] = {}
         self._push_events_this_tick: set[str] = set()
+        self._building_cells_cache: frozenset[Cell] | None = None
+        self._pathfinder = Pathfinder(game_map)
+        self._gathering_slot_cache: dict[SpatialTarget, tuple[Point, ...]] = {}
+        self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
         self._update_visibility()
 
     @property
@@ -157,14 +164,20 @@ class Simulation:
 
         return self._factory_production_jobs(factory_id)
 
+    @property
+    def navigation_field_build_count(self) -> int:
+        """Expose shared-navigation work for deterministic performance regression tests."""
+
+        return self._pathfinder.field_build_count
+
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
             return self._create_spatial_reference(command)
         if isinstance(command, EditSpatialReferenceCommand):
             return self._edit_spatial_reference(command)
-        if isinstance(command, DeleteRegionCommand):
-            return self._delete_region(command)
+        if isinstance(command, DeleteRegionCommand | DeleteSpatialReferenceCommand):
+            return self._delete_spatial_reference(command)
         if isinstance(command, RenameRegionCommand):
             return self._rename_region(command)
         if isinstance(command, SetSelectionCommand):
@@ -229,6 +242,7 @@ class Simulation:
                     "entity_id",
                 ),
             )
+        removed_entity = self.entities[entity_id]
         current_id = self.assignments.pop(entity_id, None)
         suspended_id = self.suspended_assignments.pop(entity_id, None)
         if current_id is not None:
@@ -251,6 +265,8 @@ class Simulation:
                 self._transition(automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
+        if removed_entity.category is EntityCategory.BUILDING:
+            self._invalidate_navigation_cache()
         if entity_id in self.selection.entity_ids:
             self.selection = GroundingSelection(
                 tuple(item for item in self.selection.entity_ids if item != entity_id),
@@ -399,16 +415,18 @@ class Simulation:
         )
         return self._accept("rename_region", reference_id=reference.reference_id)
 
-    def _delete_region(self, command: DeleteRegionCommand) -> CommandResult:
+    def _delete_spatial_reference(
+        self, command: DeleteRegionCommand | DeleteSpatialReferenceCommand
+    ) -> CommandResult:
         reference = self.spatial.references.get(command.reference_id)
         if reference is None:
             return self._reject_validation(
-                "delete_region",
+                "delete_spatial_reference",
                 ValidationFailure(
                     ValidationPhase.REFERENCE, "UNKNOWN_SPATIAL_REFERENCE", "reference_id"
                 ),
             )
-        if reference.kind is not SpatialKind.REGION:
+        if isinstance(command, DeleteRegionCommand) and reference.kind is not SpatialKind.REGION:
             return self._reject_validation(
                 "delete_region",
                 ValidationFailure(
@@ -419,16 +437,27 @@ class Simulation:
             automation
             for automation in self.automations.values()
             if not automation.status.terminal
-            and isinstance(automation.parameters, PatrolParameters | DefendParameters)
-            and automation.parameters.target == reference.geometry
+            and (
+                (
+                    isinstance(automation.parameters, PatrolParameters | DefendParameters)
+                    and automation.parameters.target == reference.geometry
+                )
+                or (
+                    isinstance(automation.parameters, ProductionParameters)
+                    and (
+                        automation.parameters.patrol_target == reference.geometry
+                        or automation.parameters.defend_target == reference.geometry
+                    )
+                )
+            )
         ]
         for automation in affected:
             self._cancel(automation.automation_id, command.owner_id)
-        self.spatial.delete_region(command.reference_id)
+        self.spatial.delete(command.reference_id)
         self.selection = GroundingSelection(
             self.selection.entity_ids,
             self.selection.point_ids,
-            self.selection.route_ids,
+            tuple(item for item in self.selection.route_ids if item != command.reference_id),
             tuple(item for item in self.selection.region_ids if item != command.reference_id),
         )
         self.events.record(
@@ -437,7 +466,7 @@ class Simulation:
             command.reference_id,
             affected_automation_ids=[item.automation_id for item in affected],
         )
-        reason = "REGION_DELETED"
+        reason = f"{reference.kind.value.upper()}_DELETED"
         if affected:
             reason += ":CANCELED:" + ",".join(item.automation_id for item in affected)
         return CommandResult(True, reason, reference_id=command.reference_id)
@@ -532,7 +561,9 @@ class Simulation:
             if automation.kind is AutomationKind.PATROL:
                 try:
                     waypoints = build_patrol_waypoints(command.target, self.game_map)
-                    self._validate_paths(tuple(automation.entity_ids), waypoints)
+                    self._validate_paths(
+                        tuple(automation.entity_ids), waypoints, shared_destinations=True
+                    )
                 except (ValueError, PathfindingError) as error:
                     return self._reject_validation(
                         "modify_automation",
@@ -623,15 +654,7 @@ class Simulation:
             )
         try:
             destinations = self._allocate_destinations(command.entity_ids, command.target)
-            paths = {
-                entity_id: find_path(
-                    self.game_map,
-                    self.entities[entity_id].position,
-                    destinations[entity_id],
-                    self._blocked_cells_for_mover(entity_id, frozenset(command.entity_ids)),
-                )
-                for entity_id in command.entity_ids
-            }
+            paths = self._plan_group_paths(command.entity_ids, destinations)
         except PathfindingError as error:
             return self._reject_validation(
                 "move",
@@ -653,6 +676,57 @@ class Simulation:
                 UnitState.MOVING,
             )
         return self._accept("move")
+
+    def _plan_group_paths(
+        self,
+        entity_ids: tuple[str, ...],
+        destinations: dict[str, Point],
+    ) -> dict[str, PathResult]:
+        blocked = self._building_cells()
+        if len(entity_ids) <= 32:
+            return {
+                entity_id: find_path(
+                    self.game_map,
+                    self.entities[entity_id].position,
+                    destinations[entity_id],
+                    blocked,
+                )
+                for entity_id in entity_ids
+            }
+        clusters: dict[tuple[int, int], list[str]] = {}
+        for entity_id in entity_ids:
+            cell = self.game_map.cell_for(destinations[entity_id])
+            clusters.setdefault((cell[0] // 5, cell[1] // 5), []).append(entity_id)
+        paths: dict[str, PathResult] = {}
+        for cluster, member_ids in sorted(clusters.items()):
+            center = Point(cluster[0] * 5 + 2.5, cluster[1] * 5 + 2.5)
+            anchor_id = min(
+                member_ids,
+                key=lambda entity_id: (
+                    destinations[entity_id].distance_to(center),
+                    destinations[entity_id].y,
+                    destinations[entity_id].x,
+                    entity_id,
+                ),
+            )
+            anchor = destinations[anchor_id]
+            for entity_id in sorted(member_ids):
+                shared = self._pathfinder.find_path(
+                    self.entities[entity_id].position,
+                    anchor,
+                    blocked,
+                )
+                destination = destinations[entity_id]
+                if destination == anchor:
+                    paths[entity_id] = shared
+                    continue
+                local = find_path(self.game_map, anchor, destination, blocked)
+                paths[entity_id] = PathResult(
+                    shared.cells + local.cells[1:],
+                    shared.waypoints + local.waypoints,
+                    shared.cost + local.cost,
+                )
+        return paths
 
     def _attack(self, command: AttackCommand) -> CommandResult:
         failure = self._validate_entities(
@@ -721,7 +795,7 @@ class Simulation:
             return self._reject_validation("create_patrol", failure)
         try:
             waypoints = build_patrol_waypoints(command.target, self.game_map)
-            self._validate_paths(command.entity_ids, waypoints)
+            self._validate_paths(command.entity_ids, waypoints, shared_destinations=True)
         except (ValueError, PathfindingError) as error:
             return self._reject_validation(
                 "create_patrol",
@@ -752,9 +826,23 @@ class Simulation:
         )
         if failure is not None:
             return self._reject_validation("create_defend", failure)
+        geometry_failure = self._validate_geometry(command.target)
+        if geometry_failure is not None:
+            return self._reject_validation("create_defend", geometry_failure)
         try:
-            stations = build_defend_stations(command.target, command.entity_ids, self.game_map)
-            self._validate_paths(command.entity_ids, tuple(stations.values()))
+            if command.gathering_point:
+                slots = self._gathering_slots(command.target, len(command.entity_ids))
+                reachable = self._gathering_reachable_cache[command.target]
+                if any(
+                    self.game_map.cell_for(self.entities[entity_id].position) not in reachable
+                    for entity_id in command.entity_ids
+                ):
+                    raise PathfindingError("NO_PATH")
+                stations = dict(zip(command.entity_ids, slots, strict=True))
+            else:
+                slots = ()
+                stations = build_defend_stations(command.target, command.entity_ids, self.game_map)
+                self._validate_paths(command.entity_ids, tuple(stations.values()))
         except (ValueError, PathfindingError) as error:
             return self._reject_validation(
                 "create_defend",
@@ -767,7 +855,17 @@ class Simulation:
             command.priority,
             command.original_instruction,
             list(command.entity_ids),
-            DefendParameters(command.target, stations),
+            DefendParameters(
+                command.target,
+                stations,
+                gathering_point=command.gathering_point,
+                deployment_slots=slots,
+                assembly_radius=(
+                    max(point.distance_to(target_center(command.target)) for point in slots)
+                    if slots
+                    else 0.0
+                ),
+            ),
         )
         failure = self._validate_claims(automation, command.entity_ids, replace_existing=True)
         if failure is not None:
@@ -810,13 +908,24 @@ class Simulation:
                 "create_production",
                 ValidationFailure(ValidationPhase.SPATIAL, "TARGET_NOT_PASSABLE", "rally_point"),
             )
-        if command.rally_point is not None and command.defend_target is not None:
+        if command.defend_target is not None and command.patrol_target is not None:
             return self._reject_validation(
                 "create_production",
                 ValidationFailure(
                     ValidationPhase.SCHEMA,
-                    "RALLY_AND_DEFEND_TARGET_CONFLICT",
-                    "defend_target",
+                    "MULTIPLE_PRODUCTION_TARGETS",
+                    "patrol_target",
+                ),
+            )
+        if command.rally_point is not None and (
+            command.defend_target is not None or command.patrol_target is not None
+        ):
+            return self._reject_validation(
+                "create_production",
+                ValidationFailure(
+                    ValidationPhase.SCHEMA,
+                    "RALLY_AND_AUTOMATION_TARGET_CONFLICT",
+                    "rally_point",
                 ),
             )
         if command.defend_target is not None:
@@ -824,11 +933,7 @@ class Simulation:
             if geometry_failure is not None:
                 return self._reject_validation("create_production", geometry_failure)
             try:
-                build_defend_stations(
-                    command.defend_target,
-                    ("produced_unit",),
-                    self.game_map,
-                )
+                self._gathering_slots(command.defend_target, 1)
             except ValueError as error:
                 return self._reject_validation(
                     "create_production",
@@ -838,6 +943,23 @@ class Simulation:
                         "defend_target",
                     ),
                 )
+        if command.patrol_target is not None:
+            geometry_failure = self._validate_geometry(command.patrol_target)
+            if geometry_failure is not None:
+                return self._reject_validation("create_production", geometry_failure)
+            try:
+                build_patrol_waypoints(command.patrol_target, self.game_map)
+            except ValueError as error:
+                return self._reject_validation(
+                    "create_production",
+                    ValidationFailure(
+                        ValidationPhase.SPATIAL,
+                        _reason(error),
+                        "patrol_target",
+                    ),
+                )
+        if command.continuous:
+            self._supersede_continuous_production(command.factory_id)
         build_ticks = 5
         automation = self._new_automation(
             AutomationKind.PRODUCTION,
@@ -854,6 +976,7 @@ class Simulation:
                 command.rally_point,
                 continuous=command.continuous,
                 defend_target=command.defend_target,
+                patrol_target=command.patrol_target,
             ),
         )
         existing_jobs = self._factory_production_jobs(command.factory_id)
@@ -868,6 +991,22 @@ class Simulation:
         factory.state = UnitState.PRODUCING
         self._record_production_started(automation)
         return self._accept("create_production", automation.automation_id)
+
+    def _supersede_continuous_production(self, factory_id: str) -> None:
+        superseded = tuple(
+            automation
+            for automation in self._factory_production_jobs(factory_id)
+            if _production_parameters(automation).continuous
+        )
+        for automation in superseded:
+            self._transition(
+                automation,
+                AutomationStatus.CANCELED,
+                "SUPERSEDED_BY_LATEST_CONTINUOUS_PRODUCTION",
+            )
+            self._release_automation(automation)
+        if superseded:
+            self._start_next_production(factory_id)
 
     def _create_reinforcement(self, command: CreateReinforcementCommand) -> CommandResult:
         priority_failure = validate_priority(command.priority)
@@ -929,15 +1068,6 @@ class Simulation:
         return self._accept("create_reinforcement", automation.automation_id)
 
     def _create_repair(self, command: CreateRepairAndReturnCommand) -> CommandResult:
-        failure = self._validate_automation_common(
-            command.entity_ids,
-            command.owner_id,
-            command.priority,
-            command.title,
-            require_movable=True,
-        )
-        if failure is not None:
-            return self._reject_validation("create_repair_and_return", failure)
         if not 0 < command.health_threshold <= 1:
             return self._reject_validation(
                 "create_repair_and_return",
@@ -950,9 +1080,41 @@ class Simulation:
         rate_failure = validate_positive(command.repair_rate, "repair_rate")
         if rate_failure is not None:
             return self._reject_validation("create_repair_and_return", rate_failure)
+        failure = self._validate_entities(
+            command.entity_ids,
+            command.owner_id,
+            require_movable=True,
+        )
+        if failure is not None:
+            return self._reject_validation("create_repair_and_return", failure)
+        eligible_ids = tuple(
+            entity_id
+            for entity_id in command.entity_ids
+            if self.entities[entity_id].health / self.entities[entity_id].kind.profile.max_health
+            < command.health_threshold
+        )
+        if not eligible_ids:
+            return self._reject_validation(
+                "create_repair_and_return",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY,
+                    "NO_UNITS_BELOW_REPAIR_THRESHOLD",
+                    "entity_ids",
+                    {"health_threshold": command.health_threshold},
+                ),
+            )
+        failure = self._validate_automation_common(
+            eligible_ids,
+            command.owner_id,
+            command.priority,
+            command.title,
+            require_movable=True,
+        )
+        if failure is not None:
+            return self._reject_validation("create_repair_and_return", failure)
         destinations: dict[str, str] = {}
         try:
-            for entity_id in command.entity_ids:
+            for entity_id in eligible_ids:
                 destinations[entity_id] = self._nearest_repair_destination(
                     self.entities[entity_id]
                 )[0]
@@ -967,7 +1129,7 @@ class Simulation:
             command.owner_id,
             command.priority,
             command.original_instruction,
-            list(command.entity_ids),
+            list(eligible_ids),
             RepairParameters(
                 command.health_threshold,
                 command.repair_rate,
@@ -975,19 +1137,20 @@ class Simulation:
                 {
                     entity_id: self.suspended_assignments.get(entity_id)
                     or self.assignments.get(entity_id)
-                    for entity_id in command.entity_ids
+                    for entity_id in eligible_ids
                 },
-                {entity_id: RepairPhase.TRAVELING for entity_id in command.entity_ids},
+                {entity_id: RepairPhase.TRAVELING for entity_id in eligible_ids},
+                {entity_id: self.entities[entity_id].position for entity_id in eligible_ids},
             ),
         )
         failure = self._validate_claims(
-            automation, command.entity_ids, authority=ControlAuthority.EMERGENCY
+            automation, eligible_ids, authority=ControlAuthority.EMERGENCY
         )
         if failure is not None:
             return self._reject_validation("create_repair_and_return", failure)
         self._activate(
             automation,
-            command.entity_ids,
+            eligible_ids,
             authority=ControlAuthority.EMERGENCY,
             suspend=True,
         )
@@ -1141,13 +1304,18 @@ class Simulation:
 
     def _drive_patrol(self, automation: Automation) -> None:
         building_cells = self._building_cells()
+        parameters = _patrol_parameters(automation)
+        formation_indices = (
+            {entity_id: index for index, entity_id in enumerate(sorted(automation.entity_ids))}
+            if isinstance(parameters.target, PolylineTarget)
+            else {}
+        )
         for entity_id in tuple(automation.entity_ids):
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
             if entity.move_target is not None or entity.path:
                 continue
-            parameters = _patrol_parameters(automation)
             waypoint_index = parameters.waypoint_indices[entity_id]
             automation.take_next_waypoint(entity_id)
             target = patrol_formation_waypoint(
@@ -1156,9 +1324,10 @@ class Simulation:
                 entity_id,
                 waypoint_index,
                 self.game_map,
+                formation_indices.get(entity_id),
             )
             try:
-                path = find_path(self.game_map, entity.position, target, building_cells)
+                path = self._pathfinder.find_path(entity.position, target, building_cells)
             except PathfindingError as error:
                 self._transition(automation, AutomationStatus.BLOCKED, str(error))
                 self.events.record(
@@ -1174,6 +1343,9 @@ class Simulation:
     def _drive_defend(self, automation: Automation) -> None:
         parameters = _defend_parameters(automation)
         building_cells = self._building_cells()
+        remaining_paths = (
+            self.GATHERING_PATH_BUDGET if parameters.gathering_point else len(automation.entity_ids)
+        )
         assigned_ids = tuple(
             entity_id
             for entity_id in automation.entity_ids
@@ -1247,11 +1419,18 @@ class Simulation:
                 entity.move_target = None
                 entity.state = UnitState.DEFENDING
                 continue
+            if remaining_paths <= 0:
+                continue
             try:
-                path = find_path(self.game_map, entity.position, station, building_cells)
+                path = (
+                    self._pathfinder.find_path(entity.position, station, building_cells)
+                    if parameters.gathering_point
+                    else find_path(self.game_map, entity.position, station, building_cells)
+                )
             except PathfindingError as error:
                 self._transition(automation, AutomationStatus.BLOCKED, str(error))
                 return
+            remaining_paths -= 1
             self._start_path(entity, station, path, automation.automation_id, UnitState.DEFENDING)
             self.events.record(
                 self.tick,
@@ -1315,6 +1494,8 @@ class Simulation:
         parameters.produced_entity_ids.append(entity_id)
         if parameters.defend_target is not None:
             self._assign_produced_defender(automation, parameters, entity_id)
+        elif parameters.patrol_target is not None:
+            self._assign_produced_patroller(automation, parameters, entity_id)
         self.events.record(
             self.tick,
             EventType.PRODUCTION_COMPLETED,
@@ -1576,15 +1757,56 @@ class Simulation:
                         automation_id=automation.automation_id,
                     )
             elif phase is RepairPhase.RETURNING:
-                self._resume_suspended_assignment(automation, entity_id)
-                parameters.phases[entity_id] = RepairPhase.DONE
+                resume_id = self.suspended_assignments.get(
+                    entity_id
+                ) or parameters.resume_automation_ids.get(entity_id)
+                if resume_id is not None:
+                    self._resume_suspended_assignment(automation, entity_id)
+                    parameters.phases[entity_id] = RepairPhase.DONE
+                    continue
+                return_position = parameters.return_positions[entity_id]
+                if entity.path or entity.move_target is not None:
+                    continue
+                if entity.position.distance_to(return_position) <= 0.05:
+                    self._resume_suspended_assignment(automation, entity_id)
+                    parameters.phases[entity_id] = RepairPhase.DONE
+                    continue
+                try:
+                    path = self._pathfinder.find_path(
+                        entity.position,
+                        return_position,
+                        self._building_cells(),
+                    )
+                except PathfindingError as error:
+                    self._transition(automation, AutomationStatus.BLOCKED, str(error))
+                    return
+                self._start_path(
+                    entity,
+                    return_position,
+                    path,
+                    automation.automation_id,
+                    UnitState.RETURNING,
+                )
         if all(phase is RepairPhase.DONE for phase in parameters.phases.values()):
             self._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
 
     def _drive_combat(self) -> None:
-        entity_index = SpatialIndex(
-            {entity_id: entity.selection_position for entity_id, entity in self.entities.items()}
-        )
+        positions_by_owner: dict[str, dict[str, Point]] = {}
+        for entity_id, entity in self.entities.items():
+            positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = (
+                entity.selection_position
+            )
+        owner_indexes = {
+            owner_id: SpatialIndex(positions) for owner_id, positions in positions_by_owner.items()
+        }
+        hostile_indexes = {
+            owner_id: tuple(
+                owner_indexes[other_id]
+                for other_id in sorted(owner_indexes)
+                if other_id != owner_id
+            )
+            for owner_id in owner_indexes
+        }
         for entity_id in sorted(tuple(self.entities)):
             attacker = self.entities.get(entity_id)
             if attacker is None or attacker.kind.profile.attack_damage <= 0:
@@ -1627,7 +1849,7 @@ class Simulation:
                 if ordered_target is not None
                 and attacker.selection_position.distance_to(ordered_target.selection_position)
                 <= attack_range
-                else self._nearest_enemy_in_range(attacker, entity_index)
+                else self._nearest_enemy_in_range(attacker, hostile_indexes[attacker.owner_id])
             )
             if firing_target is None:
                 continue
@@ -1735,7 +1957,7 @@ class Simulation:
         )
 
     def _nearest_enemy_in_range(
-        self, attacker: Entity, entity_index: SpatialIndex
+        self, attacker: Entity, enemy_indexes: tuple[SpatialIndex, ...]
     ) -> Entity | None:
         attack_range = attacker.kind.profile.attack_range
         candidates = [
@@ -1744,6 +1966,7 @@ class Simulation:
                 entity.entity_id,
                 entity,
             )
+            for entity_index in enemy_indexes
             for entity_id in entity_index.nearby(attacker.selection_position, attack_range)
             if (entity := self.entities[entity_id]).entity_id != attacker.entity_id
             if entity.owner_id != attacker.owner_id
@@ -1815,6 +2038,10 @@ class Simulation:
                 entity, desired_direct_position, unit_index
             )
             direct_was_clamped = direct_position.distance_to(desired_direct_position) > 1e-9
+            if direct_was_clamped and self._settle_at_gathering_outskirts(
+                entity, desired_direct_position, unit_index
+            ):
+                continue
             push_stationary_blocker = direct_was_clamped and self._contact_has_stationary_blocker(
                 entity, desired_direct_position, unit_index
             )
@@ -1872,6 +2099,59 @@ class Simulation:
                     )
         self._resolve_unit_collisions()
         self._track_movement_progress()
+
+    def _settle_at_gathering_outskirts(
+        self,
+        entity: Entity,
+        desired_position: Point,
+        unit_index: SpatialIndex,
+    ) -> bool:
+        automation_id = self.assignments.get(entity.entity_id)
+        automation = self.automations.get(automation_id or "")
+        if automation is None or automation.kind is not AutomationKind.DEFEND:
+            return False
+        parameters = _defend_parameters(automation)
+        if not parameters.gathering_point:
+            return False
+        center = target_center(parameters.target)
+        if entity.position.distance_to(center) > parameters.assembly_radius + 2.0:
+            return False
+        contact_radius = collision_radius(entity.kind) + 0.5
+        blocker_id = next(
+            (
+                other_id
+                for other_id in unit_index.nearby(desired_position, contact_radius)
+                if other_id != entity.entity_id
+                and self.assignments.get(other_id) == automation_id
+                and not self.entities[other_id].path
+                and desired_position.distance_to(self.entities[other_id].position)
+                < collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind)
+            ),
+            None,
+        )
+        if blocker_id is None:
+            return False
+        entity.path.clear()
+        entity.move_target = None
+        entity.state = UnitState.DEFENDING
+        parameters.stations[entity.entity_id] = entity.position
+        parameters.assembly_radius = max(
+            parameters.assembly_radius,
+            entity.position.distance_to(center),
+        )
+        self._movement_blocked.discard(entity.entity_id)
+        self._blocked_ticks.pop(entity.entity_id, None)
+        self._reset_movement_liveness(entity, clear_stop=True)
+        self.events.record(
+            self.tick,
+            EventType.MOVEMENT_COMPLETED,
+            entity.entity_id,
+            assignment=automation_id,
+            reason="GATHERING_OUTSKIRTS_SETTLED",
+            blocker_id=blocker_id,
+            position=[entity.position.x, entity.position.y],
+        )
+        return True
 
     def _track_movement_progress(self) -> None:
         """Temporarily yield orders that are not getting closer to their waypoint."""
@@ -2631,7 +2911,8 @@ class Simulation:
         assert target is not None
         defend = self.automations.get(parameters.defend_automation_id or "")
         if defend is None or defend.status.terminal:
-            stations = build_defend_stations(target, (entity_id,), self.game_map)
+            slots = self._gathering_slots(target, 1)
+            stations = {entity_id: slots[0]}
             defend = self._new_automation(
                 AutomationKind.DEFEND,
                 f"Defend {production.title}",
@@ -2639,7 +2920,13 @@ class Simulation:
                 production.priority,
                 production.original_instruction,
                 [entity_id],
-                DefendParameters(target, stations),
+                DefendParameters(
+                    target,
+                    stations,
+                    gathering_point=True,
+                    deployment_slots=slots,
+                    assembly_radius=slots[0].distance_to(target_center(target)),
+                ),
             )
             self._activate(defend, (entity_id,))
             parameters.defend_automation_id = defend.automation_id
@@ -2647,12 +2934,57 @@ class Simulation:
         if entity_id not in defend.entity_ids:
             defend.entity_ids.append(entity_id)
         defend_parameters = _defend_parameters(defend)
-        defend_parameters.stations[entity_id] = self._next_reinforcement_station(
-            target,
-            tuple(defend_parameters.stations.values()),
-        )
+        if defend_parameters.gathering_point:
+            slot_index = len(defend.entity_ids) - 1
+            slots = self._gathering_slots(target, slot_index + 1)
+            defend_parameters.deployment_slots = slots
+            station = slots[slot_index]
+            defend_parameters.stations[entity_id] = station
+            defend_parameters.assembly_radius = max(
+                defend_parameters.assembly_radius,
+                station.distance_to(target_center(target)),
+            )
+        else:
+            defend_parameters.stations[entity_id] = self._next_reinforcement_station(
+                target,
+                tuple(defend_parameters.stations.values()),
+            )
         self._assign(entity_id, defend)
         self._initialize_runtime_entity(defend, entity_id)
+
+    def _assign_produced_patroller(
+        self,
+        production: Automation,
+        parameters: ProductionParameters,
+        entity_id: str,
+    ) -> None:
+        target = parameters.patrol_target
+        assert target is not None
+        patrol = self.automations.get(parameters.patrol_automation_id or "")
+        if patrol is None or patrol.status.terminal:
+            waypoints = build_patrol_waypoints(target, self.game_map)
+            patrol = self._new_automation(
+                AutomationKind.PATROL,
+                f"Patrol {production.title}",
+                production.owner_id,
+                production.priority,
+                production.original_instruction,
+                [entity_id],
+                PatrolParameters(target, waypoints),
+            )
+            self._activate(patrol, (entity_id,))
+            parameters.patrol_automation_id = patrol.automation_id
+            return
+        if entity_id not in patrol.entity_ids:
+            patrol.entity_ids.append(entity_id)
+        patrol_parameters = _patrol_parameters(patrol)
+        patrol_parameters.waypoint_indices[entity_id] = (
+            0
+            if isinstance(target, PolylineTarget)
+            else (len(patrol.entity_ids) - 1) % len(patrol_parameters.waypoints)
+        )
+        self._assign(entity_id, patrol)
+        self._initialize_runtime_entity(patrol, entity_id)
 
     def _next_reinforcement_station(
         self, target: SpatialTarget, occupied: tuple[Point, ...]
@@ -2697,19 +3029,15 @@ class Simulation:
                 or (required_id is not None and building.entity_id != required_id)
             ):
                 continue
-            for point in self._interaction_points(building):
-                try:
-                    path = find_path(
-                        self.game_map,
-                        entity.position,
-                        point,
-                        self._building_cells(),
-                    )
-                except PathfindingError:
-                    continue
-                candidates.append(
-                    (order[building.kind], path.cost, building.entity_id, point, path)
+            try:
+                point, path = self._pathfinder.find_path_to_any(
+                    entity.position,
+                    self._interaction_points(building),
+                    self._building_cells(),
                 )
+            except PathfindingError:
+                continue
+            candidates.append((order[building.kind], path.cost, building.entity_id, point, path))
         if not candidates:
             raise PathfindingError("NO_REPAIR_DESTINATION")
         _, _, building_id, point, path = min(
@@ -2859,18 +3187,27 @@ class Simulation:
             )
         return automation, None
 
-    def _validate_paths(self, entity_ids: tuple[str, ...], waypoints: tuple[Point, ...]) -> None:
+    def _validate_paths(
+        self,
+        entity_ids: tuple[str, ...],
+        waypoints: tuple[Point, ...],
+        *,
+        shared_destinations: bool = False,
+    ) -> None:
         building_cells = self._building_cells()
         for index, entity_id in enumerate(entity_ids):
-            find_path(
-                self.game_map,
-                self.entities[entity_id].position,
-                waypoints[index % len(waypoints)],
-                building_cells,
-            )
+            start = self.entities[entity_id].position
+            destination = waypoints[index % len(waypoints)]
+            if shared_destinations:
+                self._pathfinder.find_path(start, destination, building_cells)
+            else:
+                find_path(self.game_map, start, destination, building_cells)
         if len(waypoints) > 1:
             for start, end in zip(waypoints, waypoints[1:] + waypoints[:1], strict=True):
-                find_path(self.game_map, start, end, building_cells)
+                if shared_destinations:
+                    self._pathfinder.find_path(start, end, building_cells)
+                else:
+                    find_path(self.game_map, start, end, building_cells)
 
     def _start_path(
         self,
@@ -3034,12 +3371,69 @@ class Simulation:
         return None
 
     def _building_cells(self) -> frozenset[Cell]:
-        return frozenset(
-            cell
-            for entity in self.entities.values()
-            if entity.category is EntityCategory.BUILDING
-            for cell in entity.occupied_cells
-        )
+        if self._building_cells_cache is None:
+            self._building_cells_cache = frozenset(
+                cell
+                for entity in self.entities.values()
+                if entity.category is EntityCategory.BUILDING
+                for cell in entity.occupied_cells
+            )
+        return self._building_cells_cache
+
+    def _gathering_slots(
+        self,
+        target: SpatialTarget,
+        count: int,
+    ) -> tuple[Point, ...]:
+        if count <= 0:
+            return ()
+        cached = self._gathering_slot_cache.get(target)
+        if cached is None:
+            center = target_center(target)
+            blocked = self._building_cells()
+            ordered_cells = sorted(
+                (
+                    (x, y)
+                    for y in range(self.game_map.height)
+                    for x in range(self.game_map.width)
+                    if self.game_map.is_cell_passable((x, y)) and (x, y) not in blocked
+                ),
+                key=lambda cell: (
+                    (cell[0] + 0.5 - center.x) ** 2 + (cell[1] + 0.5 - center.y) ** 2,
+                    cell[1],
+                    cell[0],
+                ),
+            )
+            if not ordered_cells:
+                raise ValueError("gathering point has no passable space")
+            anchor = ordered_cells[0]
+            reachable = {anchor}
+            frontier = deque([anchor])
+            while frontier:
+                cell = frontier.popleft()
+                for neighbor in self._neighbor_cells(cell):
+                    if (
+                        neighbor not in reachable
+                        and self.game_map.contains_cell(neighbor)
+                        and self.game_map.is_cell_passable(neighbor)
+                        and neighbor not in blocked
+                    ):
+                        reachable.add(neighbor)
+                        frontier.append(neighbor)
+            cached = tuple(
+                Point(cell[0] + 0.5, cell[1] + 0.5) for cell in ordered_cells if cell in reachable
+            )
+            self._gathering_slot_cache[target] = cached
+            self._gathering_reachable_cache[target] = frozenset(reachable)
+        if count > len(cached):
+            raise ValueError("gathering point has insufficient physical map space")
+        return cached[:count]
+
+    def _invalidate_navigation_cache(self) -> None:
+        self._building_cells_cache = None
+        self._pathfinder.clear()
+        self._gathering_slot_cache.clear()
+        self._gathering_reachable_cache.clear()
 
     def _cells_at(self, entity: Entity, position: Point) -> frozenset[Cell]:
         width, height = entity.kind.profile.footprint

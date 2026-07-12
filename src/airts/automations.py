@@ -92,6 +92,9 @@ class PatrolParameters:
 class DefendParameters:
     target: SpatialTarget
     stations: dict[str, Point]
+    gathering_point: bool = False
+    deployment_slots: tuple[Point, ...] = ()
+    assembly_radius: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -99,6 +102,9 @@ class DefendParameters:
             "stations": {
                 entity_id: [point.x, point.y] for entity_id, point in sorted(self.stations.items())
             },
+            "gathering_point": self.gathering_point,
+            "deployment_slots": [[point.x, point.y] for point in self.deployment_slots],
+            "assembly_radius": self.assembly_radius,
         }
 
 
@@ -116,6 +122,8 @@ class ProductionParameters:
     continuous: bool = False
     defend_target: SpatialTarget | None = None
     defend_automation_id: str | None = None
+    patrol_target: SpatialTarget | None = None
+    patrol_automation_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +143,10 @@ class ProductionParameters:
                 None if self.defend_target is None else target_to_dict(self.defend_target)
             ),
             "defend_automation_id": self.defend_automation_id,
+            "patrol_target": (
+                None if self.patrol_target is None else target_to_dict(self.patrol_target)
+            ),
+            "patrol_automation_id": self.patrol_automation_id,
         }
 
 
@@ -161,6 +173,7 @@ class RepairParameters:
     destinations: dict[str, str]
     resume_automation_ids: dict[str, str | None]
     phases: dict[str, RepairPhase]
+    return_positions: dict[str, Point] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -169,6 +182,10 @@ class RepairParameters:
             "destinations": dict(sorted(self.destinations.items())),
             "resume_automation_ids": dict(sorted(self.resume_automation_ids.items())),
             "phases": {entity_id: phase.value for entity_id, phase in sorted(self.phases.items())},
+            "return_positions": {
+                entity_id: [point.x, point.y]
+                for entity_id, point in sorted(self.return_positions.items())
+            },
         }
 
 
@@ -276,6 +293,7 @@ class Automation:
             self.parameters.destinations.pop(entity_id, None)
             self.parameters.resume_automation_ids.pop(entity_id, None)
             self.parameters.phases.pop(entity_id, None)
+            self.parameters.return_positions.pop(entity_id, None)
         elif (
             isinstance(self.parameters, EconomyParameters)
             and entity_id in self.parameters.generator_ids
@@ -419,12 +437,24 @@ def build_defend_stations(
     return {entity_id: selected[index] for index, entity_id in enumerate(entity_ids)}
 
 
+def target_center(target: SpatialTarget) -> Point:
+    if isinstance(target, PointTarget):
+        return target.point
+    if isinstance(target, PolygonRegion):
+        return target.centroid
+    return Point(
+        sum(point.x for point in target.points) / len(target.points),
+        sum(point.y for point in target.points) / len(target.points),
+    )
+
+
 def patrol_formation_waypoint(
     parameters: PatrolParameters,
     entity_ids: tuple[str, ...],
     entity_id: str,
     waypoint_index: int,
     game_map: GameMap,
+    slot_index: int | None = None,
 ) -> Point:
     """Give line patrols same-direction formation slots around each route vertex."""
 
@@ -439,9 +469,10 @@ def patrol_formation_waypoint(
         return base
     direction_x /= length
     direction_y /= length
-    ordered_ids = tuple(sorted(entity_ids))
-    slot_index = ordered_ids.index(entity_id)
-    columns = min(5, len(ordered_ids))
+    if slot_index is None:
+        ordered_ids = tuple(sorted(entity_ids))
+        slot_index = ordered_ids.index(entity_id)
+    columns = min(5, len(entity_ids))
     column = slot_index % columns
     row = slot_index // columns
     lateral = (column - (columns - 1) / 2) * 0.9

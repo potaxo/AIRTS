@@ -225,6 +225,57 @@ def test_defend_distributes_units_across_exact_area_stations() -> None:
     )
 
 
+def test_gathering_reinforcement_stops_at_occupied_outskirts_without_pushing_interior() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "gathering_outskirts",
+                "name": "Gathering Outskirts",
+                "width": 12,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "blocker",
+                        "kind": "light_tank",
+                        "position": [5.5, 5.5],
+                    },
+                    {
+                        "id": "incoming",
+                        "kind": "light_tank",
+                        "position": [4.5, 5.5],
+                    },
+                ],
+            }
+        )
+    )
+    result = simulation.execute(
+        CreateDefendCommand(
+            ("blocker", "incoming"),
+            rectangle_region(Point(5, 5), Point(7, 7)),
+            gathering_point=True,
+        )
+    )
+    blocker_position = simulation.entities["blocker"].position
+    incoming_position = simulation.entities["incoming"].position
+
+    simulation.advance(10)
+
+    automation = simulation.automations[result.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+    assert simulation.entities["blocker"].position == blocker_position
+    assert simulation.entities["incoming"].position == incoming_position
+    assert not simulation.entities["incoming"].path
+    assert automation.parameters.stations["incoming"] == incoming_position
+    assert any(
+        event.details.get("reason") == "GATHERING_OUTSKIRTS_SETTLED"
+        for event in simulation.events.query(
+            event_types=frozenset({EventType.MOVEMENT_COMPLETED}),
+            subject_id="incoming",
+        )
+    )
+
+
 def test_nearby_defenders_retaliate_then_return_when_attacker_runs_away() -> None:
     simulation = Simulation(
         load_map_data(
@@ -315,7 +366,7 @@ def test_cost_free_fixed_tick_production_completes_with_deterministic_ids() -> N
     assert "factory" not in simulation.assignments
 
 
-def test_continuous_factory_production_assigns_every_unit_to_area_defense() -> None:
+def test_continuous_factory_production_assigns_units_to_compact_area_defense() -> None:
     simulation = Simulation(_runtime_map())
     simulation.resources["player"] = 10_000
     defend_target = rectangle_region(Point(14, 2), Point(22, 7))
@@ -339,15 +390,107 @@ def test_continuous_factory_production_assigns_every_unit_to_area_defense() -> N
     assert parameters.produced_count == 3
     defend = simulation.automations[parameters.defend_automation_id or ""]
     assert defend.kind is AutomationKind.DEFEND
+    assert isinstance(defend.parameters, DefendParameters)
+    assert defend.parameters.gathering_point
+    assert len(defend.parameters.deployment_slots) == 3
+    assert len(set(defend.parameters.stations.values())) == 3
     assert defend.entity_ids == parameters.produced_entity_ids
     assert all(
         simulation.assignments[entity_id] == defend.automation_id
         for entity_id in parameters.produced_entity_ids
     )
+    assert simulation.navigation_field_build_count <= len(defend.parameters.deployment_slots)
 
     simulation.advance(10)
     assert parameters.produced_count == 5
     assert production.status is AutomationStatus.ACTIVE
+
+    for index, entity_id in enumerate(parameters.produced_entity_ids):
+        entity = simulation.entities[entity_id]
+        simulation.occupancy.move(entity_id, frozenset({(index, 14)}))
+        entity.position = Point(index + 0.5, 14.5)
+        entity.path.clear()
+        entity.move_target = None
+        entity.congestion_stopped = False
+    field_builds = simulation.navigation_field_build_count
+
+    simulation.advance()
+
+    dispatched = [
+        entity_id
+        for entity_id in parameters.produced_entity_ids
+        if simulation.entities[entity_id].path
+    ]
+    assert len(dispatched) == Simulation.GATHERING_PATH_BUDGET
+    assert (
+        simulation.navigation_field_build_count - field_builds <= Simulation.GATHERING_PATH_BUDGET
+    )
+
+
+def test_factory_keeps_only_latest_continuous_production_request() -> None:
+    simulation = Simulation(_runtime_map())
+    simulation.resources["player"] = 10_000
+    first_target = rectangle_region(Point(14, 2), Point(18, 6))
+    second_target = rectangle_region(Point(18, 2), Point(22, 6))
+    first = simulation.execute(
+        CreateProductionCommand(
+            "factory",
+            EntityKind.SCOUT,
+            1,
+            continuous=True,
+            defend_target=first_target,
+        )
+    )
+    simulation.advance(5)
+    first_automation = simulation.automations[first.automation_id or ""]
+    assert isinstance(first_automation.parameters, ProductionParameters)
+    first_defend = simulation.automations[first_automation.parameters.defend_automation_id or ""]
+
+    second = simulation.execute(
+        CreateProductionCommand(
+            "factory",
+            EntityKind.LIGHT_TANK,
+            1,
+            continuous=True,
+            defend_target=second_target,
+        )
+    )
+
+    second_id = second.automation_id or ""
+    assert first_automation.status is AutomationStatus.CANCELED
+    assert first_automation.reason_code == "SUPERSEDED_BY_LATEST_CONTINUOUS_PRODUCTION"
+    assert first_defend.status is AutomationStatus.ACTIVE
+    assert first_defend.entity_ids == ["scout_001"]
+    assert [item.automation_id for item in simulation.production_queue("factory")] == [second_id]
+    assert simulation.assignments["factory"] == second_id
+
+    simulation.advance(5)
+    second_parameters = simulation.automations[second_id].parameters
+    assert isinstance(second_parameters, ProductionParameters)
+    second_defend = simulation.automations[second_parameters.defend_automation_id or ""]
+    assert isinstance(second_defend.parameters, DefendParameters)
+    assert second_defend.parameters.target == second_target
+    assert second_defend.parameters.gathering_point
+    assert second_defend.entity_ids == ["light_tank_002"]
+
+
+def test_replacing_continuous_production_preserves_older_finite_jobs() -> None:
+    simulation = Simulation(_runtime_map())
+    finite = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 2))
+    older = simulation.execute(
+        CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1, continuous=True)
+    )
+    latest = simulation.execute(
+        CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1, continuous=True)
+    )
+
+    assert simulation.automations[older.automation_id or ""].status is AutomationStatus.CANCELED
+    assert [item.automation_id for item in simulation.production_queue("factory")] == [
+        finite.automation_id,
+        latest.automation_id,
+    ]
+    assert simulation.assignments["factory"] == finite.automation_id
+    assert simulation.automations[latest.automation_id or ""].reason_code == "FACTORY_QUEUED"
 
 
 def test_production_waits_when_no_spawn_cell_is_available() -> None:
@@ -578,6 +721,38 @@ def test_canceling_repair_restores_suspended_assignment() -> None:
     assert "unit_01" not in simulation.suspended_assignments
 
 
+def test_repair_only_claims_selected_units_strictly_below_thirty_percent() -> None:
+    simulation = Simulation(_runtime_map())
+    patrol = simulation.execute(
+        CreatePatrolCommand(("unit_01", "unit_02", "unit_03"), PointTarget(Point(12, 3)))
+    )
+    simulation.entities["unit_01"].health = 17  # 28.3% of scout health.
+    simulation.entities["unit_02"].health = 30  # Exactly 30% is not below the threshold.
+    simulation.entities["unit_03"].health = 150
+
+    repair = simulation.execute(CreateRepairAndReturnCommand(("unit_01", "unit_02", "unit_03")))
+
+    automation = simulation.automations[repair.automation_id or ""]
+    assert automation.entity_ids == ["unit_01"]
+    assert simulation.assignments["unit_01"] == automation.automation_id
+    assert simulation.assignments["unit_02"] == patrol.automation_id
+    assert simulation.assignments["unit_03"] == patrol.automation_id
+
+
+def test_unassigned_repaired_unit_returns_to_its_pre_repair_position() -> None:
+    simulation = Simulation(_runtime_map())
+    origin = simulation.entities["unit_01"].position
+    simulation.entities["unit_01"].health = 5
+
+    repair = simulation.execute(CreateRepairAndReturnCommand(("unit_01",), repair_rate=20))
+    simulation.advance(100)
+
+    assert simulation.automations[repair.automation_id or ""].status is AutomationStatus.COMPLETED
+    assert simulation.entities["unit_01"].health == EntityKind.SCOUT.profile.max_health
+    assert simulation.entities["unit_01"].position == origin
+    assert "unit_01" not in simulation.assignments
+
+
 def test_repair_validation_fails_without_supported_friendly_building() -> None:
     game_map = load_map_data(
         {
@@ -590,6 +765,7 @@ def test_repair_validation_fails_without_supported_friendly_building() -> None:
         }
     )
     simulation = Simulation(game_map)
+    simulation.entities["unit"].health = 5
 
     result = simulation.execute(CreateRepairAndReturnCommand(("unit",)))
 

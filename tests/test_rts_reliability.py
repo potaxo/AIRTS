@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pygame
+
 from airts.app import AirtsApp, InputMode
-from airts.automations import AutomationStatus, ProductionParameters
+from airts.automations import AutomationStatus, DefendParameters, ProductionParameters
 from airts.commands import (
+    CreateDefendCommand,
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
+    DeleteSpatialReferenceCommand,
     MoveCommand,
     SetSelectionCommand,
     command_from_dict,
@@ -114,6 +120,23 @@ def test_region_deletion_is_replayable_and_cancels_affected_automation() -> None
     assert command_from_dict(command_to_dict(command)) == command
 
 
+def test_delete_control_removes_selected_route_and_cancels_its_patrol() -> None:
+    simulation = _interaction_simulation()
+    app = AirtsApp(simulation)
+    target = PolylineTarget((Point(7, 7), Point(12, 7)))
+    route = simulation.execute(CreateSpatialReferenceCommand(target))
+    patrol = simulation.execute(CreatePatrolCommand(("unit",), target))
+    app._select_reference(route.reference_id)
+
+    app._delete_selected_reference()
+
+    assert route.reference_id not in simulation.spatial.references
+    assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
+    assert not app.selected_routes
+    command = DeleteSpatialReferenceCommand("route_001")
+    assert command_from_dict(command_to_dict(command)) == command
+
+
 def test_resource_generators_produce_without_an_automation() -> None:
     simulation = _interaction_simulation()
 
@@ -140,6 +163,29 @@ def test_factory_and_area_interaction_creates_continuous_defense_production() ->
     assert isinstance(automation.parameters, ProductionParameters)
     assert automation.parameters.continuous
     assert automation.parameters.defend_target == target
+
+
+def test_gathering_glow_radius_grows_with_the_authoritative_assembly_radius() -> None:
+    simulation = _interaction_simulation()
+    target = rectangle_region(Point(8, 8), Point(12, 12))
+    created = simulation.execute(
+        CreateDefendCommand(("unit", "tank"), target, gathering_point=True)
+    )
+    automation = simulation.automations[created.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+    app = AirtsApp(simulation)
+    screen = pygame.Surface(app.WINDOW_SIZE)
+
+    with patch("airts.app.pygame.draw.circle", wraps=pygame.draw.circle) as draw_circle:
+        app._draw_assembly_glows(screen)
+    initial_radius = max(call.args[3] for call in draw_circle.call_args_list)
+
+    automation.parameters.assembly_radius += 4
+    with patch("airts.app.pygame.draw.circle", wraps=pygame.draw.circle) as draw_circle:
+        app._draw_assembly_glows(screen)
+    expanded_radius = max(call.args[3] for call in draw_circle.call_args_list)
+
+    assert expanded_radius > initial_radius
 
 
 def test_crossing_units_recover_and_are_deterministic() -> None:

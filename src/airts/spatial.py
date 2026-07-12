@@ -86,6 +86,10 @@ class SpatialStore:
         reference = self.get(reference_id)
         if reference.kind is not SpatialKind.REGION:
             raise ValueError("ONLY_REGIONS_CAN_BE_DELETED")
+        return self.delete(reference_id)
+
+    def delete(self, reference_id: str) -> SpatialReference:
+        reference = self.get(reference_id)
         del self.references[reference_id]
         return reference
 

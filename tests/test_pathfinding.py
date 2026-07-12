@@ -4,7 +4,7 @@ import pytest
 
 from airts.geometry import Point
 from airts.map_model import Terrain, load_example_map, load_map_data
-from airts.pathfinding import PathfindingError, find_path
+from airts.pathfinding import Pathfinder, PathfindingError, find_path
 
 
 def test_pathfinding_routes_deterministically_through_a_gap() -> None:
@@ -71,3 +71,20 @@ def test_example_map_cross_river_path_uses_the_bridge() -> None:
     path = find_path(game_map, Point(8.5, 28.5), Point(40.5, 28.5))
 
     assert any(game_map.terrain_at_cell(cell) is Terrain.BRIDGE for cell in path.cells)
+
+
+def test_shared_navigation_field_reuses_one_search_for_many_starts() -> None:
+    game_map = load_example_map()
+    pathfinder = Pathfinder(game_map)
+    goal = Point(40.5, 28.5)
+
+    first_start = Point(8.5, 28.5)
+    second_start = Point(10.5, 26.5)
+    first = pathfinder.find_path(first_start, goal)
+    second = pathfinder.find_path(second_start, goal)
+
+    assert first.cells[-1] == second.cells[-1] == (40, 28)
+    assert first.cost == find_path(game_map, first_start, goal).cost
+    assert second.cost == find_path(game_map, second_start, goal).cost
+    assert pathfinder.field_build_count == 1
+    assert pathfinder.cached_field_count == 1

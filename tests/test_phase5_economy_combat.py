@@ -187,7 +187,7 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     assert "enemy" not in simulation.entities
     assert simulation.events.query(event_types=frozenset({EventType.ENTITY_DESTROYED}))
 
-    simulation.entities["tank"].health = 20
+    simulation.entities["tank"].health = 17
     simulation.advance()
     assert "tank" not in simulation.assignments
     assert not any(

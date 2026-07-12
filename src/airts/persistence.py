@@ -17,7 +17,8 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
-    build_defend_stations,
+    build_patrol_waypoints,
+    target_center,
     transition_is_allowed,
 )
 from airts.commands import command_from_dict, command_to_dict
@@ -105,6 +106,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     simulation.tick = tick
     simulation.entities = _load_entities(state.get("entities"), game_map, tick)
+    simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
     simulation.projectiles = _load_projectiles(state.get("projectiles", {}), simulation)
     simulation.projectile_traces = _load_projectile_traces(
@@ -535,6 +537,17 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
                     or target.parameters.target != automation.parameters.defend_target
                 ):
                     raise PersistenceError("production references an invalid defend automation")
+            patrol_id = automation.parameters.patrol_automation_id
+            if patrol_id is not None:
+                target = automations.get(patrol_id)
+                if (
+                    target is None
+                    or target.kind is not AutomationKind.PATROL
+                    or target.owner_id != automation.owner_id
+                    or not isinstance(target.parameters, PatrolParameters)
+                    or target.parameters.target != automation.parameters.patrol_target
+                ):
+                    raise PersistenceError("production references an invalid patrol automation")
         elif isinstance(automation.parameters, RepairParameters):
             for building_id in automation.parameters.destinations.values():
                 building = simulation.entities.get(building_id)
@@ -589,12 +602,44 @@ def _load_automation_parameters(
         stations_data = _mapping(data.get("stations"), "defend.stations")
         if set(stations_data) != set(entity_ids):
             raise PersistenceError("defend stations must match its entities")
+        gathering_point = _boolean(
+            data.get("gathering_point", data.get("compact_center", False)),
+            "defend.gathering_point",
+        )
+        deployment_slots = _points(data.get("deployment_slots", []), "defend.deployment_slots")
+        stations = {
+            entity_id: _point(stations_data[entity_id], "defend station")
+            for entity_id in entity_ids
+        }
+        center = target_center(target)
+        default_radius = max(
+            (point.distance_to(center) for point in stations.values()),
+            default=0.0,
+        )
+        assembly_radius = _number(
+            data.get("assembly_radius", default_radius),
+            "defend.assembly_radius",
+            minimum=0.0,
+        )
+        if gathering_point:
+            if not deployment_slots or len(set(deployment_slots)) != len(deployment_slots):
+                raise PersistenceError("gathering defense deployment slots are invalid")
+            if any(
+                not simulation.game_map.is_passable(point)
+                or simulation.game_map.cell_for(point) in simulation._building_cells()
+                for point in deployment_slots
+            ):
+                raise PersistenceError("gathering defense uses an impassable deployment slot")
+            if assembly_radius + 1e-9 < default_radius:
+                raise PersistenceError("gathering defense radius excludes a station")
+        elif deployment_slots:
+            raise PersistenceError("normal defend automation cannot have deployment slots")
         return DefendParameters(
             target,
-            {
-                entity_id: _point(stations_data[entity_id], "defend station")
-                for entity_id in entity_ids
-            },
+            stations,
+            gathering_point,
+            deployment_slots,
+            assembly_radius,
         )
     if kind is AutomationKind.PRODUCTION:
         try:
@@ -611,16 +656,18 @@ def _load_automation_parameters(
             raise PersistenceError("production references an invalid factory")
         rally_data = data.get("rally_point")
         defend_data = data.get("defend_target")
+        patrol_data = data.get("patrol_target")
         try:
             defend_target = None if defend_data is None else target_from_dict(defend_data)
             if defend_target is not None:
-                build_defend_stations(
-                    defend_target,
-                    ("produced_unit",),
-                    simulation.game_map,
-                )
+                simulation._gathering_slots(defend_target, 1)
+            patrol_target = None if patrol_data is None else target_from_dict(patrol_data)
+            if patrol_target is not None:
+                build_patrol_waypoints(patrol_target, simulation.game_map)
         except ValueError as error:
-            raise PersistenceError(f"invalid production defend target: {error}") from error
+            raise PersistenceError(f"invalid production automation target: {error}") from error
+        if defend_target is not None and patrol_target is not None:
+            raise PersistenceError("production cannot have defend and patrol targets")
         continuous = _boolean(data.get("continuous", False), "production.continuous")
         target_count = _integer(data.get("target_count"), "production.target_count", minimum=1)
         produced_count = _integer(
@@ -647,6 +694,11 @@ def _load_automation_parameters(
             defend_automation_id=_nullable_string(
                 data.get("defend_automation_id"),
                 "production.defend_automation_id",
+            ),
+            patrol_target=patrol_target,
+            patrol_automation_id=_nullable_string(
+                data.get("patrol_automation_id"),
+                "production.patrol_automation_id",
             ),
         )
     if kind is AutomationKind.REINFORCEMENT:
@@ -684,10 +736,20 @@ def _load_automation_parameters(
         data.get("resume_automation_ids"), "repair.resume_automation_ids"
     )
     phase_data = _mapping(data.get("phases"), "repair.phases")
+    return_data = _mapping(data.get("return_positions", {}), "repair.return_positions")
+    if not return_data:
+        return_data = {
+            entity_id: [
+                simulation.entities[entity_id].position.x,
+                simulation.entities[entity_id].position.y,
+            ]
+            for entity_id in entity_ids
+        }
     if (
         set(destinations) != set(entity_ids)
         or set(resume_ids) != set(entity_ids)
         or set(phase_data) != set(entity_ids)
+        or set(return_data) != set(entity_ids)
     ):
         raise PersistenceError("repair parameter entities do not match automation entities")
     try:
@@ -706,6 +768,10 @@ def _load_automation_parameters(
         destinations=destinations,
         resume_automation_ids=resume_ids,
         phases=phases,
+        return_positions={
+            entity_id: _point(return_data[entity_id], "repair return position")
+            for entity_id in entity_ids
+        },
     )
 
 

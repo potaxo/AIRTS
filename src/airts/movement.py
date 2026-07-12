@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from math import cos, hypot, radians, sin
+from math import cos, hypot, radians, sin, sqrt
 
 from airts.geometry import Point
 from airts.map_model import EntityKind
 
 NEIGHBOR_RADIUS = 2.25
 PREFERRED_SEPARATION = 1.15
+_PASSING_ANGLES = (22.5, 45.0, 67.5, 90.0, -22.5, -45.0, -67.5, -90.0)
+_PASSING_ROTATIONS = tuple((cos(radians(angle)), sin(radians(angle))) for angle in _PASSING_ANGLES)
 
 
 def unit_mass(kind: EntityKind) -> int:
@@ -42,9 +44,7 @@ def steering_candidates(
         return (waypoint,)
     step = min(maximum_step, distance)
     desired = (dx / distance, dy / distance)
-    nearby = tuple(
-        neighbor for neighbor in neighbors if 0 < position.distance_to(neighbor) <= NEIGHBOR_RADIUS
-    )
+    nearby = neighbors
     separation_x = 0.0
     separation_y = 0.0
     for neighbor in nearby:
@@ -64,8 +64,14 @@ def steering_candidates(
             directions.append((blended_x / blended_length, blended_y / blended_length, 1))
     # Every unit prefers a left-hand pass. Opposing headings therefore choose opposite
     # world-space sides, while the explicit ordering keeps equal situations reproducible.
-    for order, angle in enumerate((22.5, 45.0, 67.5, 90.0, -22.5, -45.0, -67.5, -90.0), 2):
-        directions.append((*_rotate(desired, angle), order))
+    for order, (cosine, sine) in enumerate(_PASSING_ROTATIONS, 2):
+        directions.append(
+            (
+                desired[0] * cosine - desired[1] * sine,
+                desired[0] * sine + desired[1] * cosine,
+                order,
+            )
+        )
 
     ranked: list[tuple[float, int, float, float, Point]] = []
     seen: set[tuple[int, int]] = set()
@@ -75,7 +81,15 @@ def steering_candidates(
         if key in seen:
             continue
         seen.add(key)
-        clearance = min((candidate.distance_to(item) for item in nearby), default=NEIGHBOR_RADIUS)
+        squared_clearance = NEIGHBOR_RADIUS * NEIGHBOR_RADIUS
+        for item in nearby:
+            offset_x = candidate.x - item.x
+            offset_y = candidate.y - item.y
+            squared_clearance = min(
+                squared_clearance,
+                offset_x * offset_x + offset_y * offset_y,
+            )
+        clearance = sqrt(squared_clearance)
         separation_penalty = max(0.0, PREFERRED_SEPARATION - clearance) * 8.0
         imminent_penalty = max(0.0, 0.72 - clearance) * 100.0
         route_cost = candidate.distance_to(waypoint)
@@ -83,10 +97,3 @@ def steering_candidates(
         ranked.append((score, order, candidate.y, candidate.x, candidate))
     ranked.sort(key=lambda item: item[:-1])
     return tuple(item[-1] for item in ranked)
-
-
-def _rotate(vector: tuple[float, float], degrees: float) -> tuple[float, float]:
-    angle = radians(degrees)
-    cosine = cos(angle)
-    sine = sin(angle)
-    return vector[0] * cosine - vector[1] * sine, vector[0] * sine + vector[1] * cosine

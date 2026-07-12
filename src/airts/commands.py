@@ -60,6 +60,7 @@ class CreateDefendCommand:
     priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
+    gathering_point: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,7 @@ class CreateProductionCommand:
     original_instruction: str = ""
     continuous: bool = False
     defend_target: SpatialTarget | None = None
+    patrol_target: SpatialTarget | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,7 @@ class CreateReinforcementCommand:
 @dataclass(frozen=True, slots=True)
 class CreateRepairAndReturnCommand:
     entity_ids: tuple[str, ...]
-    health_threshold: float = 1.0
+    health_threshold: float = 0.30
     repair_rate: int = 5
     title: str = "Repair And Return"
     priority: int = 100
@@ -154,6 +156,12 @@ class DeleteRegionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteSpatialReferenceCommand:
+    reference_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class SetSelectionCommand:
     entity_ids: tuple[str, ...] = ()
     point_ids: tuple[str, ...] = ()
@@ -192,6 +200,7 @@ Command = (
     | EditSpatialReferenceCommand
     | RenameRegionCommand
     | DeleteRegionCommand
+    | DeleteSpatialReferenceCommand
     | SetSelectionCommand
     | ModifyAutomationCommand
 )
@@ -230,6 +239,12 @@ def command_to_dict(command: Command) -> dict[str, object]:
     if isinstance(command, DeleteRegionCommand):
         return {
             "type": "delete_region",
+            "reference_id": command.reference_id,
+            "owner_id": command.owner_id,
+        }
+    if isinstance(command, DeleteSpatialReferenceCommand):
+        return {
+            "type": "delete_spatial_reference",
             "reference_id": command.reference_id,
             "owner_id": command.owner_id,
         }
@@ -280,7 +295,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "reason": command.reason,
         }
     if isinstance(command, CreatePatrolCommand | CreateDefendCommand):
-        return {
+        data: dict[str, object] = {
             "type": (
                 "create_patrol" if isinstance(command, CreatePatrolCommand) else "create_defend"
             ),
@@ -291,6 +306,9 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "owner_id": command.owner_id,
             "original_instruction": command.original_instruction,
         }
+        if isinstance(command, CreateDefendCommand):
+            data["gathering_point"] = command.gathering_point
+        return data
     if isinstance(command, CreateProductionCommand):
         return {
             "type": "create_production",
@@ -305,6 +323,9 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "continuous": command.continuous,
             "defend_target": (
                 None if command.defend_target is None else target_to_dict(command.defend_target)
+            ),
+            "patrol_target": (
+                None if command.patrol_target is None else target_to_dict(command.patrol_target)
             ),
             "title": command.title,
             "priority": command.priority,
@@ -379,6 +400,10 @@ def command_from_dict(raw_data: object) -> Command:
         )
     if command_type == "delete_region":
         return DeleteRegionCommand(_string(data.get("reference_id"), "reference_id"), owner_id)
+    if command_type == "delete_spatial_reference":
+        return DeleteSpatialReferenceCommand(
+            _string(data.get("reference_id"), "reference_id"), owner_id
+        )
     if command_type == "set_selection":
         return SetSelectionCommand(
             _string_ids(data.get("entity_ids"), "entity_ids"),
@@ -426,7 +451,12 @@ def command_from_dict(raw_data: object) -> Command:
         common = _automation_common(data, owner_id)
         if command_type == "create_patrol":
             return CreatePatrolCommand(entity_ids, target, *common)
-        return CreateDefendCommand(entity_ids, target, *common)
+        return CreateDefendCommand(
+            entity_ids,
+            target,
+            *common,
+            gathering_point=_boolean(data.get("gathering_point", False), "gathering_point"),
+        )
     if command_type == "create_production":
         try:
             unit_kind = EntityKind(_string(data.get("unit_kind"), "unit_kind"))
@@ -436,6 +466,8 @@ def command_from_dict(raw_data: object) -> Command:
         rally_point = None if rally_data is None else _point(rally_data, "rally_point")
         defend_data = data.get("defend_target")
         defend_target = None if defend_data is None else target_from_dict(defend_data)
+        patrol_data = data.get("patrol_target")
+        patrol_target = None if patrol_data is None else target_from_dict(patrol_data)
         return CreateProductionCommand(
             factory_id=_string(data.get("factory_id"), "factory_id"),
             unit_kind=unit_kind,
@@ -447,6 +479,7 @@ def command_from_dict(raw_data: object) -> Command:
             original_instruction=_optional_string(data.get("original_instruction", "")),
             continuous=_boolean(data.get("continuous", False), "continuous"),
             defend_target=defend_target,
+            patrol_target=patrol_target,
         )
     if command_type == "create_reinforcement":
         return CreateReinforcementCommand(
@@ -461,7 +494,7 @@ def command_from_dict(raw_data: object) -> Command:
     if command_type == "create_repair_and_return":
         return CreateRepairAndReturnCommand(
             entity_ids=_entity_ids(data.get("entity_ids")),
-            health_threshold=_number(data.get("health_threshold", 1.0), "health_threshold"),
+            health_threshold=_number(data.get("health_threshold", 0.30), "health_threshold"),
             repair_rate=_integer(data.get("repair_rate", 5), "repair_rate"),
             title=_string(data.get("title", "Repair And Return"), "title"),
             priority=_integer(data.get("priority", 100), "priority"),

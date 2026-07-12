@@ -1126,9 +1126,21 @@ to opposing endpoint flows. Unit occupancy must defer unit-unit exclusion to phy
 stationary units remain pushable and may yield laterally when forward pressure is obstructed.
 
 A continuous production automation keeps its factory reserved and begins another unit after each
-spawn until explicitly paused or canceled. If it includes a defend area, every produced unit joins
-one linked defend automation for that area without resetting the stations or movement of existing
-defenders.
+spawn until explicitly paused or canceled. If it includes a defense area, every produced unit
+joins one linked military gathering defense without resetting existing defenders. Its unique
+stations are allocated from the selected area's center outward over all reachable map space; there
+is no fixed automation unit cap. The visible gathering glow grows with the occupied radius. New
+deployment routes are budgeted per tick, and an incoming unit blocked by its own settled formation
+accepts its current outskirts position instead of pushing through the motionless interior. A factory
+keeps only its latest unfinished continuous production request: creating a
+new one cancels older continuous requests for that factory, while finite requests retain FIFO
+ordering for future per-type and per-count production controls.
+
+Large groups that share destinations should reuse bounded deterministic navigation fields. Patrol
+and repair routing should not repeat the same full-map search per unit, and large direct-move
+formations may cluster paths through nearby staging anchors before branching to unique final slots.
+The initial implementation remains single-threaded so identical state and commands cannot diverge
+because of worker scheduling.
 
 Examples:
 
@@ -1148,7 +1160,9 @@ It does not execute their individual simulation steps.
 
 # 18. Repair and Resume Behavior
 
-Units may temporarily interrupt their assignment for repair.
+Units may temporarily interrupt their assignment for repair. The conventional `R` interaction
+claims only selected units whose health is strictly below 30%; healthier selected units keep their
+current assignment and must not incur repair-path computation.
 
 The initial repair-destination order is:
 
@@ -1173,8 +1187,9 @@ After repair:
 
 1. AIRTS revalidates the original automation;
 2. if valid, the unit returns to it;
-3. if invalid, the unit remains idle;
-4. the automation records a waiting, blocked, or failure event.
+3. if no original automation exists, the unit returns to its recorded pre-repair position;
+4. if the prior work is invalid and no return can be completed, the unit remains blocked or idle;
+5. the automation records a waiting, blocked, or failure event.
 
 The unit still has only one ac operational state at a time.
 

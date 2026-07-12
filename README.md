@@ -77,13 +77,13 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `4` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
 | `D` | Create a defend automation from selected units and current target |
-| `P` | Continuously produce light tanks from one selected factory; with an active area, send them to defend it |
-| `R` | Repair selected units and return them to suspended assignments |
+| `P` | Continuously produce light tanks from one selected factory; with an active area, grow a military gathering point from its center |
+| `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
 | `S` / `H` | Stop selected units or hold their current position |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
-| `Delete` | Delete one selected user region and explicitly cancel automations using it |
+| `Delete` | Delete one selected route or region and explicitly cancel automations using it |
 | `F5` / `F9` | Save or load `airts-quicksave.json` |
 | `F2` | Reset the bundled/current starting scenario |
 | `U` | Replace the inspected patrol/defend target with the active spatial target |
@@ -125,18 +125,29 @@ wait visibly, and completion or cancellation starts the next job. Pausing preser
 resuming an active or queued job does not create a control conflict. Factories reserve unit
 costs before building and wait visibly when funds are insufficient. A continuous production
 request remains active and starts the next unit after every spawn. When a factory and polygon
-area are selected together, each produced unit joins a persistent defend automation for that
-area. Units take five ticks (0.5 seconds) to build. Resource generators produce 1,000 resources every second; an economy
+area are selected together, each produced unit joins a persistent military gathering defense.
+There is no fixed unit cap: unique reachable stations are allocated center-out across the map, so
+the formation and its translucent glow expand like a snowball. Only four new routes are calculated
+per tick. An incoming unit that meets its own settled formation stops at the outskirts instead of
+pushing through it, leaving the interior motionless. Creating another
+continuous request for the same factory cancels its older unfinished
+continuous request; finite jobs retain FIFO ordering. Units take five ticks (0.5 seconds) to
+build. Resource generators produce 1,000 resources every second; an economy
 automation monitors progress toward a target and exposes it through the normal lifecycle.
 GUI games create seeded, deterministic enemy light or heavy tanks on the right side at the
 configured interval and stop at the configured cap. Defend behavior evenly assigns exact stations, locally rallies nearby defenders
 against the source of incoming fire, limits pursuit, and returns survivors to their stations.
-Reinforcement transfers eligible units to another automation, and repair selects destinations by
-repair-hub/factory/command-center order and valid path cost before restoring the original
-assignment.
+Reinforcement transfers eligible units to another automation. Manual repair filters the selection
+before routing, so only units strictly below 30% health are claimed. It selects destinations by
+repair-hub/factory/command-center order and valid path cost, then restores the original assignment;
+an unassigned unit instead returns to its stored pre-repair position.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
-footprints are hard obstacles. A deterministic local swarm controller ranks short steering
+footprints are hard obstacles. Units sharing patrol, repair, or clustered large-group movement
+destinations reuse deterministic reverse navigation fields instead of running an independent
+full-map search for every unit. The cache is bounded, and large move formations branch through
+nearby staging anchors before reaching their unique final slots. This preserves deterministic
+replay without worker-thread scheduling. A deterministic local swarm controller ranks short steering
 velocities by route progress, unit separation, and a left-hand passing convention. Moving
 units look past contested intermediate waypoints, and separate commands reserve distinct
 destination cells. Group moves fill forward formation slots first so early arrivals do not
