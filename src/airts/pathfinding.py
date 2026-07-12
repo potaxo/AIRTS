@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from heapq import heappop, heappush
 
@@ -159,6 +160,8 @@ def find_path(
     start: Point,
     goal: Point,
     blocked: frozenset[Cell] = frozenset(),
+    *,
+    cell_penalties: Mapping[Cell, float] | None = None,
 ) -> PathResult:
     if not game_map.is_passable(start):
         raise PathfindingError("START_NOT_PASSABLE")
@@ -194,7 +197,10 @@ def find_path(
         for neighbor in _neighbors(current):
             if neighbor in effective_blocked or not game_map.is_cell_passable(neighbor):
                 continue
-            cost = current_cost + game_map.terrain_at_cell(neighbor).movement_cost
+            penalty = 0.0 if cell_penalties is None else cell_penalties.get(neighbor, 0.0)
+            if penalty < 0:
+                raise ValueError("cell penalties cannot be negative")
+            cost = current_cost + game_map.terrain_at_cell(neighbor).movement_cost + penalty
             if cost >= costs.get(neighbor, float("inf")):
                 continue
             costs[neighbor] = cost

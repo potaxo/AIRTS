@@ -32,6 +32,7 @@ from airts.map_model import (
     MapValidationError,
     load_map_data,
 )
+from airts.movement import collision_radius
 from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.simulation import Simulation
@@ -279,8 +280,12 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
         no_progress_ticks = _integer(
             entity.get("no_progress_ticks", 0), "entity.no_progress_ticks", minimum=0
         )
+        route_ticks = _integer(entity.get("route_ticks", 0), "entity.route_ticks", minimum=0)
         congestion_stopped = _boolean(
             entity.get("congestion_stopped", False), "entity.congestion_stopped"
+        )
+        collision_pressure = _integer(
+            entity.get("collision_pressure", 0), "entity.collision_pressure", minimum=0
         )
         pursue_target = _boolean(entity.get("pursue_target", False), "entity.pursue_target")
         last_attacker_id = _nullable_string(
@@ -310,6 +315,8 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
             raise PersistenceError(
                 f"entity {entity_id} cannot have stalled ticks without movement progress"
             )
+        if route_ticks and not path:
+            route_ticks = 0
         if congestion_stopped and not path:
             # Normalize saves created by the short-lived implementation that
             # canceled a blocked order instead of preserving it for retry.
@@ -360,6 +367,8 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
             progress_distance=progress_distance,
             no_progress_ticks=no_progress_ticks,
             congestion_stopped=congestion_stopped,
+            collision_pressure=collision_pressure,
+            route_ticks=route_ticks,
         )
     for loaded_entity in entities.values():
         if (
@@ -660,7 +669,7 @@ def _load_automation_parameters(
         try:
             defend_target = None if defend_data is None else target_from_dict(defend_data)
             if defend_target is not None:
-                simulation._gathering_slots(defend_target, 1)
+                simulation._gathering_slots(defend_target, 1, collision_radius(unit_kind))
             patrol_target = None if patrol_data is None else target_from_dict(patrol_data)
             if patrol_target is not None:
                 build_patrol_waypoints(patrol_target, simulation.game_map)

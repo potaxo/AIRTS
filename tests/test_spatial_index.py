@@ -29,3 +29,15 @@ def test_sparse_armies_do_not_generate_global_pair_comparisons() -> None:
     index = SpatialIndex(positions)
 
     assert index.candidate_pairs(0.93) == ()
+
+
+def test_candidate_pairs_for_skips_pairs_between_inactive_units() -> None:
+    index = SpatialIndex(
+        {
+            "active": Point(1.0, 1.0),
+            "waiting_1": Point(1.5, 1.0),
+            "waiting_2": Point(2.0, 1.0),
+        }
+    )
+
+    assert index.candidate_pairs_for(("active",), 0.75) == (("active", "waiting_1"),)

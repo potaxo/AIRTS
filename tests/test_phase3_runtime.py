@@ -225,7 +225,7 @@ def test_defend_distributes_units_across_exact_area_stations() -> None:
     )
 
 
-def test_gathering_reinforcement_stops_at_occupied_outskirts_without_pushing_interior() -> None:
+def test_gathering_reinforcement_fills_center_before_outer_slots() -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -256,18 +256,17 @@ def test_gathering_reinforcement_stops_at_occupied_outskirts_without_pushing_int
             gathering_point=True,
         )
     )
-    blocker_position = simulation.entities["blocker"].position
-    incoming_position = simulation.entities["incoming"].position
-
     simulation.advance(10)
 
     automation = simulation.automations[result.automation_id or ""]
     assert isinstance(automation.parameters, DefendParameters)
-    assert simulation.entities["blocker"].position == blocker_position
-    assert simulation.entities["incoming"].position == incoming_position
-    assert not simulation.entities["incoming"].path
-    assert automation.parameters.stations["incoming"] == incoming_position
-    assert any(
+    center = Point(6, 6)
+    blocker_station = automation.parameters.stations["blocker"]
+    incoming_station = automation.parameters.stations["incoming"]
+    assert blocker_station == center
+    assert blocker_station.distance_to(center) < incoming_station.distance_to(center)
+    assert simulation.entities["blocker"].position.distance_to(center) < 0.1
+    assert not any(
         event.details.get("reason") == "GATHERING_OUTSKIRTS_SETTLED"
         for event in simulation.events.query(
             event_types=frozenset({EventType.MOVEMENT_COMPLETED}),

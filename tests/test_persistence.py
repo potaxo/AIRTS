@@ -28,6 +28,8 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
         )
     )
     simulation.advance(9)
+    simulation.entities["unit_01"].congestion_stopped = True
+    simulation.entities["unit_01"].collision_pressure = 3
     destination = tmp_path / "state.json"
 
     save_simulation(simulation, destination)
@@ -38,6 +40,7 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
         event.to_dict() for event in simulation.events.events
     ]
     assert restored.command_history == simulation.command_history
+    assert restored.entities["unit_01"].collision_pressure == 3
 
     simulation.advance(25)
     restored.advance(25)

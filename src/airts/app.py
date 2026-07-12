@@ -35,6 +35,7 @@ from airts.commands import (
     SetSelectionCommand,
     StopCommand,
 )
+from airts.entities import Entity
 from airts.geometry import (
     Point,
     PointTarget,
@@ -64,6 +65,8 @@ class AirtsApp:
     WINDOW_SIZE = (MAP_PIXELS + PANEL_WIDTH, MAP_PIXELS + COMMAND_BAR_HEIGHT)
     BACKGROUND = (18, 22, 28)
     PANEL_BACKGROUND = (27, 32, 40)
+    ENTITY_CLICK_RADIUS = 1.5
+    ENEMY_CLICK_RADIUS = 2.5
 
     def __init__(self, simulation: Simulation) -> None:
         self.simulation = simulation
@@ -101,8 +104,13 @@ class AirtsApp:
         return self.MAP_PIXELS / self.simulation.game_map.width
 
     def run(self, max_frames: int | None = None) -> None:
-        pygame.init()
+        display_initialized = False
+        font_initialized = False
         try:
+            pygame.display.init()
+            display_initialized = True
+            pygame.font.init()
+            font_initialized = True
             screen = pygame.display.set_mode(self.WINDOW_SIZE, pygame.RESIZABLE)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
@@ -116,8 +124,11 @@ class AirtsApp:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
+                        break
                     else:
                         self._handle_event(event)
+                if not running:
+                    break
                 if not self.paused:
                     accumulator += elapsed
                     while accumulator >= Simulation.TICK_SECONDS:
@@ -127,7 +138,27 @@ class AirtsApp:
                 pygame.display.flip()
                 frames += 1
         finally:
-            pygame.quit()
+            self._shutdown_pygame(display_initialized, font_initialized)
+
+    def _shutdown_pygame(self, display_initialized: bool, font_initialized: bool) -> None:
+        """Release UI resources in dependency order, including exceptional exits."""
+
+        self._font = None
+        self._small_font = None
+        self._map_surface = None
+        try:
+            if display_initialized:
+                pygame.event.clear()
+        finally:
+            try:
+                if font_initialized:
+                    pygame.font.quit()
+            finally:
+                try:
+                    if display_initialized:
+                        pygame.display.quit()
+                finally:
+                    pygame.quit()
 
     def _handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.KEYDOWN:
@@ -210,10 +241,10 @@ class AirtsApp:
                 self._finish_target(PolylineTarget(tuple(self.line_points)))
                 return
             enemies = sorted(
-                (entity.selection_position.distance_to(point), entity.entity_id)
+                (_entity_hit_distance(entity, point), entity.entity_id)
                 for entity in self.simulation.entities.values()
                 if entity.owner_id != "player"
-                and entity.selection_position.distance_to(point) <= 1.5
+                and _entity_hit_distance(entity, point) <= self.ENEMY_CLICK_RADIUS
             )
             command = (
                 AttackCommand(tuple(sorted(self.selected_entities)), enemies[0][1])
@@ -275,9 +306,14 @@ class AirtsApp:
         if start.distance_to(end) < 0.3:
             candidates = sorted(
                 (
-                    (entity.selection_position.distance_to(end), entity_id)
+                    (_entity_hit_distance(entity, end), entity_id)
                     for entity_id, entity in self.simulation.entities.items()
-                    if entity.selection_position.distance_to(end) <= 1.5
+                    if _entity_hit_distance(entity, end)
+                    <= (
+                        self.ENTITY_CLICK_RADIUS
+                        if entity.owner_id == "player"
+                        else self.ENEMY_CLICK_RADIUS
+                    )
                 )
             )
             clicked = candidates[0][1] if candidates else None
@@ -1108,6 +1144,15 @@ class AirtsApp:
         if current:
             lines.append(current)
         return lines
+
+
+def _entity_hit_distance(entity: Entity, point: Point) -> float:
+    if entity.category is not EntityCategory.BUILDING:
+        return entity.selection_position.distance_to(point)
+    width, height = entity.kind.profile.footprint
+    nearest_x = min(max(point.x, entity.position.x), entity.position.x + width)
+    nearest_y = min(max(point.y, entity.position.y), entity.position.y + height)
+    return point.distance_to(Point(nearest_x, nearest_y))
 
 
 def _distance_to_polyline(point: Point, vertices: tuple[Point, ...]) -> float:

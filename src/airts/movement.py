@@ -9,7 +9,7 @@ from airts.map_model import EntityKind
 
 NEIGHBOR_RADIUS = 2.25
 PREFERRED_SEPARATION = 1.15
-_PASSING_ANGLES = (22.5, 45.0, 67.5, 90.0, -22.5, -45.0, -67.5, -90.0)
+_PASSING_ANGLES = (22.5, -22.5, 45.0, -45.0, 67.5, -67.5, 90.0, -90.0)
 _PASSING_ROTATIONS = tuple((cos(radians(angle)), sin(radians(angle))) for angle in _PASSING_ANGLES)
 
 
@@ -34,6 +34,7 @@ def steering_candidates(
     waypoint: Point,
     maximum_step: float,
     neighbors: tuple[Point, ...],
+    candidate_limit: int | None = None,
 ) -> tuple[Point, ...]:
     """Rank local velocities by path progress, separation, and deterministic turn bias."""
 
@@ -72,6 +73,10 @@ def steering_candidates(
                 order,
             )
         )
+    if candidate_limit is not None:
+        if candidate_limit <= 0:
+            raise ValueError("candidate_limit must be positive")
+        directions = directions[:candidate_limit]
 
     ranked: list[tuple[float, int, float, float, Point]] = []
     seen: set[tuple[int, int]] = set()

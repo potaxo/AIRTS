@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from math import isclose
+from math import ceil, floor, isclose, sqrt
 
 from airts.automations import (
     Automation,
@@ -71,8 +71,10 @@ class Simulation:
     TICKS_PER_SECOND = 10
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
     NO_PROGRESS_YIELD_TICKS = 30
+    DESTINATION_REPATH_TICKS = 50
     MIN_PROGRESS_DISTANCE = 0.02
     CONGESTION_RETRY_TICKS = 5
+    BLOCKED_RECOVERY_BUDGET = 12
     DEFEND_RESPONSE_RADIUS = 4.0
     DEFEND_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
@@ -80,6 +82,9 @@ class Simulation:
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
     GATHERING_PATH_BUDGET = 4
+    STALLED_REPATH_BUDGET = 4
+    COMBAT_PATH_BUDGET = 16
+    MILITARY_OBSTACLE_PATH_PENALTY = 1.5
 
     def __init__(
         self,
@@ -132,9 +137,14 @@ class Simulation:
         self._movement_blocked: set[str] = set()
         self._blocked_ticks: dict[str, int] = {}
         self._push_events_this_tick: set[str] = set()
+        self._stalled_repaths_this_tick = 0
+        self._combat_paths_this_tick = 0
+        self._movement_step_attempt_count = 0
+        self._collision_pair_check_count = 0
+        self._blocked_recoveries_this_tick = 0
         self._building_cells_cache: frozenset[Cell] | None = None
         self._pathfinder = Pathfinder(game_map)
-        self._gathering_slot_cache: dict[SpatialTarget, tuple[Point, ...]] = {}
+        self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
         self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
         self._update_visibility()
 
@@ -169,6 +179,18 @@ class Simulation:
         """Expose shared-navigation work for deterministic performance regression tests."""
 
         return self._pathfinder.field_build_count
+
+    @property
+    def movement_step_attempt_count(self) -> int:
+        """Movement controllers evaluated during the most recent tick."""
+
+        return self._movement_step_attempt_count
+
+    @property
+    def collision_pair_check_count(self) -> int:
+        """Broadphase pairs evaluated during the most recent tick."""
+
+        return self._collision_pair_check_count
 
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
@@ -218,6 +240,11 @@ class Simulation:
         for _ in range(ticks):
             self.tick += 1
             self._push_events_this_tick.clear()
+            self._stalled_repaths_this_tick = 0
+            self._combat_paths_this_tick = 0
+            self._movement_step_attempt_count = 0
+            self._collision_pair_check_count = 0
+            self._blocked_recoveries_this_tick = 0
             self._generate_income()
             self._spawn_ambient_enemy()
             self._drive_automations()
@@ -248,6 +275,7 @@ class Simulation:
         if current_id is not None:
             current = self.automations[current_id]
             current.remove_entity(entity_id)
+            self._refresh_gathering_formation(current)
             if current.kind is AutomationKind.PRODUCTION and not current.status.terminal:
                 self._transition(current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
             else:
@@ -255,6 +283,7 @@ class Simulation:
         if suspended_id is not None:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
+            self._refresh_gathering_formation(suspended)
             self._handle_automation_without_entities(suspended)
         for automation in tuple(self.automations.values()):
             if (
@@ -665,8 +694,8 @@ class Simulation:
                     {"target": [command.target.x, command.target.y]},
                 ),
             )
+        self._manual_override_many(command.entity_ids)
         for entity_id in command.entity_ids:
-            self._manual_override(entity_id)
             self.entities[entity_id].pursue_target = False
             self._start_path(
                 self.entities[entity_id],
@@ -756,8 +785,8 @@ class Simulation:
                         ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"
                     ),
                 )
+        self._manual_override_many(command.entity_ids)
         for entity_id in command.entity_ids:
-            self._manual_override(entity_id)
             entity = self.entities[entity_id]
             entity.path.clear()
             entity.move_target = None
@@ -765,15 +794,14 @@ class Simulation:
             entity.attack_target_id = target.entity_id
             entity.pursue_target = True
             entity.state = UnitState.ATTACKING
-            self._chase_target(entity, target)
         return self._accept("attack")
 
     def _stop(self, command: StopCommand | HoldPositionCommand, *, hold: bool) -> CommandResult:
         failure = self._validate_entities(command.entity_ids, command.owner_id)
         if failure is not None:
             return self._reject_validation("hold_position" if hold else "stop", failure)
+        self._manual_override_many(command.entity_ids)
         for entity_id in command.entity_ids:
-            self._manual_override(entity_id)
             entity = self.entities[entity_id]
             entity.path.clear()
             entity.move_target = None
@@ -831,7 +859,11 @@ class Simulation:
             return self._reject_validation("create_defend", geometry_failure)
         try:
             if command.gathering_point:
-                slots = self._gathering_slots(command.target, len(command.entity_ids))
+                slots = self._gathering_slots(
+                    command.target,
+                    len(command.entity_ids),
+                    max(collision_radius(self.entities[item].kind) for item in command.entity_ids),
+                )
                 reachable = self._gathering_reachable_cache[command.target]
                 if any(
                     self.game_map.cell_for(self.entities[entity_id].position) not in reachable
@@ -933,7 +965,11 @@ class Simulation:
             if geometry_failure is not None:
                 return self._reject_validation("create_production", geometry_failure)
             try:
-                self._gathering_slots(command.defend_target, 1)
+                self._gathering_slots(
+                    command.defend_target,
+                    1,
+                    collision_radius(command.unit_kind),
+                )
             except ValueError as error:
                 return self._reject_validation(
                     "create_production",
@@ -1837,6 +1873,7 @@ class Simulation:
                 attacker.pursue_target
                 and ordered_target is not None
                 and not attacker.path
+                and self._combat_paths_this_tick < self.COMBAT_PATH_BUDGET
                 and self.game_map.cell_for(attacker.position)
                 not in {
                     self.game_map.cell_for(point)
@@ -1844,6 +1881,7 @@ class Simulation:
                 }
             ):
                 self._chase_target(attacker, ordered_target)
+                self._combat_paths_this_tick += 1
             firing_target = (
                 ordered_target
                 if ordered_target is not None
@@ -1977,17 +2015,15 @@ class Simulation:
     def _chase_target(self, attacker: Entity, target: Entity) -> None:
         if attacker.congestion_stopped:
             return
-        paths: list[tuple[float, Point, PathResult]] = []
-        blocked = self._building_cells()
-        for point in self._interaction_points(target):
-            try:
-                path = find_path(self.game_map, attacker.position, point, blocked)
-                paths.append((path.cost, point, path))
-            except PathfindingError:
-                continue
-        if paths:
-            _, point, path = min(paths, key=lambda item: (item[0], item[1].y, item[1].x))
-            self._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
+        try:
+            point, path = self._pathfinder.find_path_to_any(
+                attacker.position,
+                self._interaction_points(target),
+                self._building_cells(),
+            )
+        except PathfindingError:
+            return
+        self._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
 
     def _move_entities(self) -> None:
         movable_ids = frozenset(
@@ -2013,6 +2049,7 @@ class Simulation:
                 entity.congestion_stopped = False
                 entity.no_progress_ticks = self.NO_PROGRESS_YIELD_TICKS - 1
                 entity.progress_distance = entity.position.distance_to(entity.path[0])
+            self._movement_step_attempt_count += 1
             self._consume_reached_intermediate_waypoints(entity)
             self._skip_crowded_waypoints(entity)
             target = entity.path[0]
@@ -2038,10 +2075,6 @@ class Simulation:
                 entity, desired_direct_position, unit_index
             )
             direct_was_clamped = direct_position.distance_to(desired_direct_position) > 1e-9
-            if direct_was_clamped and self._settle_at_gathering_outskirts(
-                entity, desired_direct_position, unit_index
-            ):
-                continue
             push_stationary_blocker = direct_was_clamped and self._contact_has_stationary_blocker(
                 entity, desired_direct_position, unit_index
             )
@@ -2054,7 +2087,11 @@ class Simulation:
                     continue
                 next_position = None
                 for raw_candidate in steering_candidates(
-                    entity.position, target, maximum_step, neighbors
+                    entity.position,
+                    target,
+                    maximum_step,
+                    neighbors,
+                    candidate_limit=4 if len(neighbors) >= 8 else None,
                 ):
                     if (
                         direct_was_clamped
@@ -2097,61 +2134,8 @@ class Simulation:
                         position=[entity.position.x, entity.position.y],
                         assignment=self.assignments.get(entity_id),
                     )
-        self._resolve_unit_collisions()
+        self._resolve_unit_collisions(unit_index)
         self._track_movement_progress()
-
-    def _settle_at_gathering_outskirts(
-        self,
-        entity: Entity,
-        desired_position: Point,
-        unit_index: SpatialIndex,
-    ) -> bool:
-        automation_id = self.assignments.get(entity.entity_id)
-        automation = self.automations.get(automation_id or "")
-        if automation is None or automation.kind is not AutomationKind.DEFEND:
-            return False
-        parameters = _defend_parameters(automation)
-        if not parameters.gathering_point:
-            return False
-        center = target_center(parameters.target)
-        if entity.position.distance_to(center) > parameters.assembly_radius + 2.0:
-            return False
-        contact_radius = collision_radius(entity.kind) + 0.5
-        blocker_id = next(
-            (
-                other_id
-                for other_id in unit_index.nearby(desired_position, contact_radius)
-                if other_id != entity.entity_id
-                and self.assignments.get(other_id) == automation_id
-                and not self.entities[other_id].path
-                and desired_position.distance_to(self.entities[other_id].position)
-                < collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind)
-            ),
-            None,
-        )
-        if blocker_id is None:
-            return False
-        entity.path.clear()
-        entity.move_target = None
-        entity.state = UnitState.DEFENDING
-        parameters.stations[entity.entity_id] = entity.position
-        parameters.assembly_radius = max(
-            parameters.assembly_radius,
-            entity.position.distance_to(center),
-        )
-        self._movement_blocked.discard(entity.entity_id)
-        self._blocked_ticks.pop(entity.entity_id, None)
-        self._reset_movement_liveness(entity, clear_stop=True)
-        self.events.record(
-            self.tick,
-            EventType.MOVEMENT_COMPLETED,
-            entity.entity_id,
-            assignment=automation_id,
-            reason="GATHERING_OUTSKIRTS_SETTLED",
-            blocker_id=blocker_id,
-            position=[entity.position.x, entity.position.y],
-        )
-        return True
 
     def _track_movement_progress(self) -> None:
         """Temporarily yield orders that are not getting closer to their waypoint."""
@@ -2160,6 +2144,16 @@ class Simulation:
             entity = self.entities[entity_id]
             if not entity.path:
                 self._reset_movement_liveness(entity)
+                continue
+            entity.route_ticks += 1
+            if (
+                entity.route_ticks >= self.DESTINATION_REPATH_TICKS
+                and (
+                    entity.collision_pressure > 0
+                    or self._remaining_path_crosses_military_units(entity)
+                )
+                and self._repath_stalled_entity(entity, reason="DESTINATION_DELAY_REPATH")
+            ):
                 continue
             target = entity.path[0]
             distance = entity.position.distance_to(target)
@@ -2181,6 +2175,8 @@ class Simulation:
                 continue
             entity.no_progress_ticks += 1
             if entity.no_progress_ticks < self.NO_PROGRESS_YIELD_TICKS:
+                continue
+            if self._repath_stalled_entity(entity):
                 continue
             entity.congestion_stopped = True
             self._movement_blocked.discard(entity_id)
@@ -2205,8 +2201,58 @@ class Simulation:
         entity.progress_target = None
         entity.progress_distance = None
         entity.no_progress_ticks = 0
+        entity.route_ticks = 0
         if clear_stop:
             entity.congestion_stopped = False
+
+    def _repath_stalled_entity(self, entity: Entity, *, reason: str = "NO_PROGRESS_REPATH") -> bool:
+        destination = entity.move_target
+        if destination is None or self._stalled_repaths_this_tick >= self.STALLED_REPATH_BUDGET:
+            return False
+        try:
+            path = find_path(
+                self.game_map,
+                entity.position,
+                destination,
+                self._building_cells(),
+                cell_penalties=self._military_cell_penalties(entity.entity_id),
+            )
+        except PathfindingError:
+            return False
+        if path.waypoints == tuple(entity.path):
+            entity.route_ticks = 0
+            return False
+        self._stalled_repaths_this_tick += 1
+        entity.path = list(path.waypoints)
+        entity.path_cost = path.cost
+        self._reset_movement_liveness(entity, clear_stop=True)
+        self._movement_blocked.discard(entity.entity_id)
+        self._blocked_ticks.pop(entity.entity_id, None)
+        self.events.record(
+            self.tick,
+            EventType.PATH_COMPUTED,
+            entity.entity_id,
+            reason=reason,
+            obstacle_penalty=self.MILITARY_OBSTACLE_PATH_PENALTY,
+            target=[destination.x, destination.y],
+        )
+        return True
+
+    def _remaining_path_crosses_military_units(self, entity: Entity) -> bool:
+        route_cells = {self.game_map.cell_for(point) for point in entity.path}
+        return any(
+            occupant_id != entity.entity_id and self.entities[occupant_id].is_movable
+            for cell in route_cells
+            for occupant_id in self.occupancy.occupants(cell)
+        )
+
+    def _military_cell_penalties(self, excluding_id: str) -> dict[Cell, float]:
+        return {
+            cell: self.MILITARY_OBSTACLE_PATH_PENALTY
+            for other_id, other in self.entities.items()
+            if other_id != excluding_id and other.is_movable
+            for cell in other.occupied_cells
+        }
 
     def _replan_contested_final_approach(self, entity: Entity, destination: Point) -> bool:
         """Route around units that have already settled between this unit and its slot."""
@@ -2216,7 +2262,8 @@ class Simulation:
                 self.game_map,
                 entity.position,
                 destination,
-                self.occupancy.blocked_cells(frozenset({entity.entity_id})),
+                self._building_cells(),
+                cell_penalties=self._military_cell_penalties(entity.entity_id),
             )
         except PathfindingError:
             return False
@@ -2333,18 +2380,24 @@ class Simulation:
             for other_id in unit_index.nearby(candidate, collision_radius(entity.kind) + 0.5)
         )
 
-    def _resolve_unit_collisions(self) -> None:
+    def _resolve_unit_collisions(self, unit_index: SpatialIndex) -> None:
         unit_ids = tuple(
             entity_id for entity_id, entity in sorted(self.entities.items()) if entity.is_movable
         )
+        active_ids = tuple(
+            entity_id
+            for entity_id in unit_ids
+            if self.entities[entity_id].path and not self.entities[entity_id].congestion_stopped
+        )
+        for entity_id in unit_ids:
+            self.entities[entity_id].collision_pressure = 0
         forces = {
             entity_id: self._unit_drive_force(self.entities[entity_id]) for entity_id in unit_ids
         }
+        force_pairs = unit_index.candidate_pairs_for(active_ids, 0.93)
         for _ in range(2):
-            unit_index = SpatialIndex(
-                {entity_id: self.entities[entity_id].position for entity_id in unit_ids}
-            )
-            for first_id, second_id in unit_index.candidate_pairs(0.93):
+            for first_id, second_id in force_pairs:
+                self._collision_pair_check_count += 1
                 first = self.entities[first_id]
                 second = self.entities[second_id]
                 offset_x = second.position.x - first.position.x
@@ -2353,6 +2406,8 @@ class Simulation:
                 contact_distance = collision_radius(first.kind) + collision_radius(second.kind)
                 if distance > contact_distance + 0.03:
                     continue
+                first.collision_pressure += 1
+                second.collision_pressure += 1
                 if distance <= 1e-9:
                     normal_x = 1.0 if first_id < second_id else -1.0
                     normal_y = 0.0
@@ -2383,6 +2438,7 @@ class Simulation:
                         normal_y,
                         net_pressure,
                         first_id,
+                        unit_index,
                     )
                 elif net_pressure < -1e-9:
                     self._apply_physical_push(
@@ -2391,6 +2447,7 @@ class Simulation:
                         -normal_y,
                         -net_pressure,
                         second_id,
+                        unit_index,
                     )
                 corrected_offset_x = second.position.x - first.position.x
                 corrected_offset_y = second.position.y - first.position.y
@@ -2415,6 +2472,7 @@ class Simulation:
                         -correction_y,
                         overlap * first_share,
                         second_id,
+                        unit_index,
                         correction=True,
                     )
                     self._apply_physical_push(
@@ -2423,17 +2481,26 @@ class Simulation:
                         correction_y,
                         overlap * second_share,
                         first_id,
+                        unit_index,
                         correction=True,
                     )
-        self._separate_overlapping_colliders(unit_ids)
+        active_id_set = frozenset(active_ids)
+        collision_ids = tuple(
+            entity_id
+            for entity_id in unit_ids
+            if entity_id in active_id_set or self.entities[entity_id].collision_pressure > 0
+        )
+        self._separate_overlapping_colliders(collision_ids, unit_index)
 
-    def _separate_overlapping_colliders(self, unit_ids: tuple[str, ...]) -> None:
-        for _ in range(6):
+    def _separate_overlapping_colliders(
+        self,
+        collision_ids: tuple[str, ...],
+        unit_index: SpatialIndex,
+    ) -> None:
+        for _ in range(2):
             changed = False
-            unit_index = SpatialIndex(
-                {entity_id: self.entities[entity_id].position for entity_id in unit_ids}
-            )
-            for first_id, second_id in unit_index.candidate_pairs(0.9):
+            for first_id, second_id in unit_index.candidate_pairs_for(collision_ids, 0.9):
+                self._collision_pair_check_count += 1
                 first = self.entities[first_id]
                 second = self.entities[second_id]
                 offset_x = second.position.x - first.position.x
@@ -2459,6 +2526,7 @@ class Simulation:
                         -normal_y,
                         overlap * first_share,
                         second_id,
+                        unit_index,
                         correction=True,
                     )
                     or changed
@@ -2470,6 +2538,7 @@ class Simulation:
                         normal_y,
                         overlap * second_share,
                         first_id,
+                        unit_index,
                         correction=True,
                     )
                     or changed
@@ -2478,7 +2547,7 @@ class Simulation:
                 return
 
     def _unit_drive_force(self, entity: Entity) -> tuple[float, float]:
-        if not entity.path:
+        if not entity.path or entity.congestion_stopped:
             return 0.0, 0.0
         target = entity.path[0]
         offset_x = target.x - entity.position.x
@@ -2497,12 +2566,14 @@ class Simulation:
         normal_y: float,
         pressure: float,
         pusher_id: str,
+        unit_index: SpatialIndex,
         *,
         correction: bool = False,
     ) -> bool:
         stationary = not entity.path
         scale = 1.0 if correction else (0.35 if stationary else 0.2) / unit_mass(entity.kind)
-        amount = min(0.18 if stationary and not correction else 0.12, pressure * scale)
+        maximum_amount = 0.3 if correction else (0.18 if stationary else 0.12)
+        amount = min(maximum_amount, pressure * scale)
         if amount <= 1e-9:
             return False
         directions = [(normal_x, normal_y)]
@@ -2545,6 +2616,7 @@ class Simulation:
             return False
         previous = entity.position
         entity.position = position
+        unit_index.move(entity.entity_id, position)
         if entity.entity_id not in self._push_events_this_tick:
             self._push_events_this_tick.add(entity.entity_id)
             self.events.record(
@@ -2574,11 +2646,16 @@ class Simulation:
                 evidence=evidence,
             )
             self._movement_blocked.add(entity_id)
-        if (
-            self._final_destination_is_contested(entity)
-            or self._blocked_ticks[entity_id] >= self.TICKS_PER_SECOND
-        ):
-            self._recover_blocked_entity(entity)
+        destination_contested = self._final_destination_is_contested(entity)
+        if not destination_contested and self._blocked_ticks[entity_id] < self.TICKS_PER_SECOND:
+            return
+        if self._blocked_recoveries_this_tick >= self.BLOCKED_RECOVERY_BUDGET:
+            return
+        retry_phase = sum(map(ord, entity_id)) % self.CONGESTION_RETRY_TICKS
+        if not destination_contested and self.tick % self.CONGESTION_RETRY_TICKS != retry_phase:
+            return
+        self._blocked_recoveries_this_tick += 1
+        self._recover_blocked_entity(entity)
 
     def _final_destination_is_contested(self, entity: Entity) -> bool:
         if len(entity.path) != 1:
@@ -2609,7 +2686,8 @@ class Simulation:
                     self.game_map,
                     entity.position,
                     replacement,
-                    self.occupancy.blocked_cells(frozenset({entity.entity_id})),
+                    self._building_cells(),
+                    cell_penalties=self._military_cell_penalties(entity.entity_id),
                 )
             except PathfindingError:
                 pass
@@ -2648,7 +2726,13 @@ class Simulation:
         )
         sidestep = candidates[0]
         try:
-            path = find_path(self.game_map, sidestep, destination, self._building_cells())
+            path = find_path(
+                self.game_map,
+                sidestep,
+                destination,
+                self._building_cells(),
+                cell_penalties=self._military_cell_penalties(entity.entity_id),
+            )
         except PathfindingError:
             return
         entity.path = [sidestep, *path.waypoints]
@@ -2682,8 +2766,34 @@ class Simulation:
             entity_ids=list(entity_ids),
         )
         self._transition(automation, AutomationStatus.VALIDATING, "VALIDATION_STARTED")
-        for entity_id in entity_ids:
-            self._assign(entity_id, automation, authority=authority, suspend=suspend)
+        if suspend:
+            for entity_id in entity_ids:
+                self._assign(entity_id, automation, authority=authority, suspend=True)
+        else:
+            previous_groups: dict[str, set[str]] = {}
+            previous_ids: dict[str, str | None] = {}
+            for entity_id in entity_ids:
+                previous_id = self.assignments.get(entity_id)
+                previous_ids[entity_id] = previous_id
+                if previous_id is not None and previous_id != automation.automation_id:
+                    previous_groups.setdefault(previous_id, set()).add(entity_id)
+            for previous_id, removed_ids in sorted(previous_groups.items()):
+                previous = self.automations[previous_id]
+                previous.remove_entities(frozenset(removed_ids))
+                self._refresh_gathering_formation(previous)
+                self._handle_automation_without_entities(previous)
+            for entity_id in entity_ids:
+                previous_id = previous_ids[entity_id]
+                self.suspended_assignments.pop(entity_id, None)
+                self.assignments[entity_id] = automation.automation_id
+                self.events.record(
+                    self.tick,
+                    EventType.ASSIGNMENT_CHANGED,
+                    entity_id,
+                    previous_automation_id=previous_id,
+                    automation_id=automation.automation_id,
+                    authority=authority.name.lower(),
+                )
         self._transition(automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
         for entity_id in entity_ids:
             self._initialize_runtime_entity(automation, entity_id)
@@ -2747,6 +2857,7 @@ class Simulation:
             else:
                 previous = self.automations[previous_id]
                 previous.remove_entity(entity_id)
+                self._refresh_gathering_formation(previous)
                 self._handle_automation_without_entities(previous)
                 self.suspended_assignments.pop(entity_id, None)
         self.assignments[entity_id] = automation.automation_id
@@ -2759,19 +2870,69 @@ class Simulation:
             authority=authority.name.lower(),
         )
 
+    def _refresh_gathering_formation(self, automation: Automation) -> None:
+        if automation.kind is not AutomationKind.DEFEND:
+            return
+        parameters = _defend_parameters(automation)
+        if not parameters.gathering_point:
+            return
+        if not automation.entity_ids:
+            parameters.stations.clear()
+            parameters.deployment_slots = ()
+            parameters.assembly_radius = 0.0
+            return
+        radius = max(
+            collision_radius(self.entities[entity_id].kind) for entity_id in automation.entity_ids
+        )
+        slots = self._gathering_slots(parameters.target, len(automation.entity_ids), radius)
+        center = target_center(parameters.target)
+        ordered_ids = sorted(
+            automation.entity_ids,
+            key=lambda entity_id: (
+                parameters.stations.get(entity_id, self.entities[entity_id].position).distance_to(
+                    center
+                ),
+                entity_id,
+            ),
+        )
+        previous_stations = parameters.stations
+        parameters.deployment_slots = slots
+        parameters.stations = dict(zip(ordered_ids, slots, strict=True))
+        parameters.assembly_radius = max(point.distance_to(center) for point in slots)
+        for entity_id in ordered_ids:
+            if self.assignments.get(entity_id) != automation.automation_id:
+                continue
+            if previous_stations.get(entity_id) == parameters.stations[entity_id]:
+                continue
+            entity = self.entities[entity_id]
+            entity.path.clear()
+            entity.move_target = None
+            self._reset_movement_liveness(entity, clear_stop=True)
+
     def _manual_override(self, entity_id: str) -> None:
-        automation_id = self.assignments.pop(entity_id, None)
-        suspended_id = self.suspended_assignments.pop(entity_id, None)
-        affected = [item for item in (automation_id, suspended_id) if item is not None]
-        for affected_id in dict.fromkeys(affected):
+        self._manual_override_many((entity_id,))
+
+    def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
+        affected: dict[str, set[str]] = {}
+        previous: dict[str, tuple[str | None, str | None]] = {}
+        for entity_id in entity_ids:
+            automation_id = self.assignments.pop(entity_id, None)
+            suspended_id = self.suspended_assignments.pop(entity_id, None)
+            previous[entity_id] = (automation_id, suspended_id)
+            for affected_id in {item for item in (automation_id, suspended_id) if item is not None}:
+                affected.setdefault(affected_id, set()).add(entity_id)
+        for affected_id, removed_ids in sorted(affected.items()):
             automation = self.automations[affected_id]
             if automation.kind is AutomationKind.PRODUCTION:
                 if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
                     self._transition(automation, AutomationStatus.PAUSED, "FACTORY_MANUAL_OVERRIDE")
             else:
-                automation.remove_entity(entity_id)
+                automation.remove_entities(frozenset(removed_ids))
+                self._refresh_gathering_formation(automation)
                 self._handle_automation_without_entities(automation)
-        if automation_id is not None:
+        for entity_id, (automation_id, suspended_id) in previous.items():
+            if automation_id is None:
+                continue
             self.events.record(
                 self.tick,
                 EventType.MANUAL_OVERRIDE,
@@ -2911,7 +3072,9 @@ class Simulation:
         assert target is not None
         defend = self.automations.get(parameters.defend_automation_id or "")
         if defend is None or defend.status.terminal:
-            slots = self._gathering_slots(target, 1)
+            slots = self._gathering_slots(
+                target, 1, collision_radius(self.entities[entity_id].kind)
+            )
             stations = {entity_id: slots[0]}
             defend = self._new_automation(
                 AutomationKind.DEFEND,
@@ -2936,7 +3099,11 @@ class Simulation:
         defend_parameters = _defend_parameters(defend)
         if defend_parameters.gathering_point:
             slot_index = len(defend.entity_ids) - 1
-            slots = self._gathering_slots(target, slot_index + 1)
+            slots = self._gathering_slots(
+                target,
+                slot_index + 1,
+                max(collision_radius(self.entities[item].kind) for item in defend.entity_ids),
+            )
             defend_parameters.deployment_slots = slots
             station = slots[slot_index]
             defend_parameters.stations[entity_id] = station
@@ -3384,10 +3551,14 @@ class Simulation:
         self,
         target: SpatialTarget,
         count: int,
+        unit_radius: float,
     ) -> tuple[Point, ...]:
         if count <= 0:
             return ()
-        cached = self._gathering_slot_cache.get(target)
+        if unit_radius <= 0:
+            raise ValueError("gathering unit radius must be positive")
+        cache_key = (target, unit_radius)
+        cached = self._gathering_slot_cache.get(cache_key)
         if cached is None:
             center = target_center(target)
             blocked = self._building_cells()
@@ -3420,10 +3591,38 @@ class Simulation:
                     ):
                         reachable.add(neighbor)
                         frontier.append(neighbor)
+            horizontal_spacing = unit_radius * 2 + 1e-6
+            vertical_spacing = sqrt(3) * unit_radius + 1e-6
+            minimum_row = floor(-center.y / vertical_spacing) - 1
+            maximum_row = ceil((self.game_map.height - center.y) / vertical_spacing) + 1
+            candidates: list[Point] = []
+            for row in range(minimum_row, maximum_row + 1):
+                y = center.y + row * vertical_spacing
+                if not 0 <= y < self.game_map.height:
+                    continue
+                row_offset = unit_radius if row % 2 else 0.0
+                minimum_column = floor((-center.x - row_offset) / horizontal_spacing) - 1
+                maximum_column = (
+                    ceil((self.game_map.width - center.x - row_offset) / horizontal_spacing) + 1
+                )
+                for column in range(minimum_column, maximum_column + 1):
+                    x = center.x + row_offset + column * horizontal_spacing
+                    if not 0 <= x < self.game_map.width:
+                        continue
+                    point = Point(x, y)
+                    if self.game_map.cell_for(point) in reachable:
+                        candidates.append(point)
             cached = tuple(
-                Point(cell[0] + 0.5, cell[1] + 0.5) for cell in ordered_cells if cell in reachable
+                sorted(
+                    candidates,
+                    key=lambda point: (
+                        point.distance_to(center),
+                        point.y,
+                        point.x,
+                    ),
+                )
             )
-            self._gathering_slot_cache[target] = cached
+            self._gathering_slot_cache[cache_key] = cached
             self._gathering_reachable_cache[target] = frozenset(reachable)
         if count > len(cached):
             raise ValueError("gathering point has insufficient physical map space")

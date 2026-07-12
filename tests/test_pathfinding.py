@@ -88,3 +88,35 @@ def test_shared_navigation_field_reuses_one_search_for_many_starts() -> None:
     assert second.cost == find_path(game_map, second_start, goal).cost
     assert pathfinder.field_build_count == 1
     assert pathfinder.cached_field_count == 1
+
+
+def test_five_hundred_military_obstacles_are_costly_but_not_an_impassable_wall() -> None:
+    game_map = load_map_data(
+        {
+            "id": "soft_military_wall",
+            "name": "Soft Military Wall",
+            "width": 80,
+            "height": 20,
+            "terrain": {"default": "grass", "rectangles": []},
+            "entities": [
+                {"id": "unit", "kind": "scout", "owner": "player", "position": [2.5, 10.5]}
+            ],
+        }
+    )
+    military_cells = frozenset((x, y) for x in range(20, 45) for y in range(20))
+    start = Point(2.5, 10.5)
+    goal = Point(70.5, 10.5)
+
+    with pytest.raises(PathfindingError, match="NO_PATH"):
+        find_path(game_map, start, goal, military_cells)
+
+    path = find_path(
+        game_map,
+        start,
+        goal,
+        cell_penalties={cell: 1.5 for cell in military_cells},
+    )
+
+    assert len(military_cells) == 500
+    assert path.cells[-1] == (70, 10)
+    assert any(cell in military_cells for cell in path.cells)

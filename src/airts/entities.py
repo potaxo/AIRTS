@@ -43,6 +43,8 @@ class Entity:
     progress_distance: float | None = None
     no_progress_ticks: int = 0
     congestion_stopped: bool = False
+    collision_pressure: int = 0
+    route_ticks: int = 0
 
     @property
     def category(self) -> EntityCategory:
@@ -104,6 +106,8 @@ class Entity:
             "progress_distance": self.progress_distance,
             "no_progress_ticks": self.no_progress_ticks,
             "congestion_stopped": self.congestion_stopped,
+            "collision_pressure": self.collision_pressure,
+            "route_ticks": self.route_ticks,
         }
 
 

@@ -283,22 +283,32 @@ class Automation:
         return waypoint
 
     def remove_entity(self, entity_id: str) -> None:
-        if entity_id in self.entity_ids:
-            self.entity_ids.remove(entity_id)
+        self.remove_entities(frozenset({entity_id}))
+
+    def remove_entities(self, entity_ids: frozenset[str]) -> None:
+        """Detach a group without repeated linear scans of the assignment list."""
+
+        self.entity_ids[:] = [
+            entity_id for entity_id in self.entity_ids if entity_id not in entity_ids
+        ]
         if isinstance(self.parameters, PatrolParameters):
-            self.parameters.waypoint_indices.pop(entity_id, None)
+            for entity_id in entity_ids:
+                self.parameters.waypoint_indices.pop(entity_id, None)
         elif isinstance(self.parameters, DefendParameters):
-            self.parameters.stations.pop(entity_id, None)
+            for entity_id in entity_ids:
+                self.parameters.stations.pop(entity_id, None)
         elif isinstance(self.parameters, RepairParameters):
-            self.parameters.destinations.pop(entity_id, None)
-            self.parameters.resume_automation_ids.pop(entity_id, None)
-            self.parameters.phases.pop(entity_id, None)
-            self.parameters.return_positions.pop(entity_id, None)
-        elif (
-            isinstance(self.parameters, EconomyParameters)
-            and entity_id in self.parameters.generator_ids
-        ):
-            self.parameters.generator_ids.remove(entity_id)
+            for entity_id in entity_ids:
+                self.parameters.destinations.pop(entity_id, None)
+                self.parameters.resume_automation_ids.pop(entity_id, None)
+                self.parameters.phases.pop(entity_id, None)
+                self.parameters.return_positions.pop(entity_id, None)
+        elif isinstance(self.parameters, EconomyParameters):
+            self.parameters.generator_ids[:] = [
+                entity_id
+                for entity_id in self.parameters.generator_ids
+                if entity_id not in entity_ids
+            ]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -415,6 +425,11 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
 def build_defend_stations(
     target: SpatialTarget, entity_ids: tuple[str, ...], game_map: GameMap
 ) -> dict[str, Point]:
+    if isinstance(target, PolylineTarget):
+        line_stations = _evenly_spaced_polyline_points(target.points, len(entity_ids))
+        if any(not game_map.is_passable(point) for point in line_stations):
+            raise ValueError("defend line contains an invalid station")
+        return {entity_id: line_stations[index] for index, entity_id in enumerate(entity_ids)}
     candidates = (
         tuple(
             point
@@ -435,6 +450,37 @@ def build_defend_stations(
     else:
         selected = tuple(candidates[index % len(candidates)] for index in range(len(entity_ids)))
     return {entity_id: selected[index] for index, entity_id in enumerate(entity_ids)}
+
+
+def _evenly_spaced_polyline_points(points: tuple[Point, ...], count: int) -> tuple[Point, ...]:
+    if count <= 0:
+        return ()
+    segments = tuple(zip(points, points[1:], strict=False))
+    lengths = tuple(first.distance_to(second) for first, second in segments)
+    total_length = sum(lengths)
+    if total_length <= 1e-9:
+        return (points[0],) * count
+    stations: list[Point] = []
+    segment_index = 0
+    distance_before = 0.0
+    for index in range(count):
+        requested = total_length / 2 if count == 1 else total_length * index / (count - 1)
+        while (
+            segment_index < len(segments) - 1
+            and requested > distance_before + lengths[segment_index]
+        ):
+            distance_before += lengths[segment_index]
+            segment_index += 1
+        first, second = segments[segment_index]
+        segment_length = lengths[segment_index]
+        fraction = 0.0 if segment_length <= 1e-9 else (requested - distance_before) / segment_length
+        stations.append(
+            Point(
+                first.x + (second.x - first.x) * fraction,
+                first.y + (second.y - first.y) * fraction,
+            )
+        )
+    return tuple(stations)
 
 
 def target_center(target: SpatialTarget) -> Point:

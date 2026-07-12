@@ -1130,15 +1130,24 @@ spawn until explicitly paused or canceled. If it includes a defense area, every 
 joins one linked military gathering defense without resetting existing defenders. Its unique
 stations are allocated from the selected area's center outward over all reachable map space; there
 is no fixed automation unit cap. The visible gathering glow grows with the occupied radius. New
-deployment routes are budgeted per tick, and an incoming unit blocked by its own settled formation
-accepts its current outskirts position instead of pushing through the motionless interior. A factory
-keeps only its latest unfinished continuous production request: creating a
+deployment routes are budgeted per tick. Stations use collision-aware dense packing, preserve
+center-first filling, and are recalculated when assigned force size changes so the visible radius
+contracts as well as expands. Defend-line stations are distributed by distance across the full
+polyline rather than concentrated at its vertices. A factory keeps only its latest unfinished
+continuous production request: creating a
 new one cancels older continuous requests for that factory, while finite requests retain FIFO
 ordering for future per-type and per-count production controls.
 
 Large groups that share destinations should reuse bounded deterministic navigation fields. Patrol
 and repair routing should not repeat the same full-map search per unit, and large direct-move
 formations may cluster paths through nearby staging anchors before branching to unique final slots.
+Military units are finite-cost dynamic path obstacles rather than impassable terrain. Movement
+controllers periodically recalculate delayed routes through or around changing formations, with
+per-tick path budgets preserving responsiveness during mass movement and focus-fire commands.
+Dense movement must retain throughput rather than pausing whole formations. Collision broadphase
+pairs are generated directly from spatial buckets, reused across solver passes where safe, and
+blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
+without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
 because of worker scheduling.
 
@@ -1515,6 +1524,15 @@ When a response returns, it must be validated against the current world state ra
 # 26. User Interface
 
 The initial UI is a debugging and interaction interface, not a polished commercial interface.
+
+An operating-system window-close request must stop event handling before another simulation or
+render pass. The frontend initializes only the Pygame subsystems it uses and releases retained
+graphics objects, pending events, fonts, the display, and global Pygame state in a deterministic
+order on both normal and exceptional exits.
+
+Entity hit testing uses the visible occupied footprint for buildings rather than only their center
+point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
+interaction perimeter so selecting a building does not trigger one full search per attacker.
 
 It should eventually display:
 

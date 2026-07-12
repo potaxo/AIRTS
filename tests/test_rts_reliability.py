@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import pygame
+import pytest
 
 from airts.app import AirtsApp, InputMode
 from airts.automations import AutomationStatus, DefendParameters, ProductionParameters
@@ -216,3 +217,83 @@ def test_dense_patrol_assigns_distributed_motion() -> None:
     assert result.accepted
     assert simulation.entities["unit"].position != simulation.entities["tank"].position
     assert simulation.automations[result.automation_id or ""].status is AutomationStatus.ACTIVE
+
+
+def test_window_close_exits_before_another_tick_or_render_and_releases_resources() -> None:
+    simulation = _interaction_simulation()
+    app = AirtsApp(simulation)
+    lifecycle = Mock()
+    clock = Mock()
+    clock.tick.return_value = 100
+    screen = Mock()
+
+    with (
+        patch("airts.app.pygame.init") as global_init,
+        patch("airts.app.pygame.display.init", side_effect=lifecycle.display_init),
+        patch("airts.app.pygame.font.init", side_effect=lifecycle.font_init),
+        patch("airts.app.pygame.display.set_mode", return_value=screen),
+        patch("airts.app.pygame.display.set_caption"),
+        patch("airts.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.app.pygame.time.Clock", return_value=clock),
+        patch(
+            "airts.app.pygame.event.get",
+            return_value=(pygame.event.Event(pygame.QUIT),),
+        ),
+        patch("airts.app.pygame.event.clear", side_effect=lifecycle.event_clear),
+        patch("airts.app.pygame.font.quit", side_effect=lifecycle.font_quit),
+        patch("airts.app.pygame.display.quit", side_effect=lifecycle.display_quit),
+        patch("airts.app.pygame.quit", side_effect=lifecycle.pygame_quit),
+        patch("airts.app.pygame.display.flip") as flip,
+        patch.object(app, "_draw") as draw,
+    ):
+        app.run()
+
+    global_init.assert_not_called()
+    draw.assert_not_called()
+    flip.assert_not_called()
+    assert simulation.tick == 0
+    assert app._font is None
+    assert app._small_font is None
+    assert app._map_surface is None
+    assert lifecycle.mock_calls == [
+        call.display_init(),
+        call.font_init(),
+        call.event_clear(),
+        call.font_quit(),
+        call.display_quit(),
+        call.pygame_quit(),
+    ]
+
+
+def test_render_failure_still_releases_pygame_resources_in_order() -> None:
+    app = AirtsApp(_interaction_simulation())
+    lifecycle = Mock()
+    clock = Mock()
+    clock.tick.return_value = 0
+
+    with (
+        patch("airts.app.pygame.init"),
+        patch("airts.app.pygame.display.init", side_effect=lifecycle.display_init),
+        patch("airts.app.pygame.font.init", side_effect=lifecycle.font_init),
+        patch("airts.app.pygame.display.set_mode", return_value=Mock()),
+        patch("airts.app.pygame.display.set_caption"),
+        patch("airts.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.app.pygame.time.Clock", return_value=clock),
+        patch("airts.app.pygame.event.get", return_value=()),
+        patch("airts.app.pygame.event.clear", side_effect=lifecycle.event_clear),
+        patch("airts.app.pygame.font.quit", side_effect=lifecycle.font_quit),
+        patch("airts.app.pygame.display.quit", side_effect=lifecycle.display_quit),
+        patch("airts.app.pygame.quit", side_effect=lifecycle.pygame_quit),
+        patch.object(app, "_draw", side_effect=RuntimeError("render failed")),
+    ):
+        with pytest.raises(RuntimeError, match="render failed"):
+            app.run(max_frames=1)
+
+    assert lifecycle.mock_calls == [
+        call.display_init(),
+        call.font_init(),
+        call.event_clear(),
+        call.font_quit(),
+        call.display_quit(),
+        call.pygame_quit(),
+    ]

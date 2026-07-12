@@ -51,12 +51,40 @@ class SpatialIndex:
         )
 
     def candidate_pairs(self, radius: float) -> tuple[tuple[str, str], ...]:
+        return self.candidate_pairs_for(tuple(self._positions), radius)
+
+    def candidate_pairs_for(
+        self, active_ids: tuple[str, ...], radius: float
+    ) -> tuple[tuple[str, str], ...]:
+        """Return nearby pairs where at least one member is active."""
+
+        if radius < 0:
+            raise ValueError("radius cannot be negative")
+        active_set = frozenset(
+            entity_id for entity_id in active_ids if entity_id in self._positions
+        )
         pairs: list[tuple[str, str]] = []
-        for first_id in sorted(self._positions):
-            for second_id in self.nearby(self._positions[first_id], radius):
-                if first_id < second_id:
-                    pairs.append((first_id, second_id))
-        return tuple(pairs)
+        squared_radius = radius * radius
+        for first_id in sorted(active_set):
+            position = self._positions[first_id]
+            minimum_x = floor((position.x - radius) / self.bucket_size)
+            maximum_x = floor((position.x + radius) / self.bucket_size)
+            minimum_y = floor((position.y - radius) / self.bucket_size)
+            maximum_y = floor((position.y + radius) / self.bucket_size)
+            for bucket_y in range(minimum_y, maximum_y + 1):
+                for bucket_x in range(minimum_x, maximum_x + 1):
+                    for second_id in self._buckets.get((bucket_x, bucket_y), ()):
+                        if (
+                            first_id == second_id
+                            or (second_id in active_set and first_id > second_id)
+                            or _squared_distance(position, self._positions[second_id])
+                            > squared_radius
+                        ):
+                            continue
+                        pairs.append(
+                            (first_id, second_id) if first_id < second_id else (second_id, first_id)
+                        )
+        return tuple(sorted(pairs))
 
     def _bucket(self, point: Point) -> tuple[int, int]:
         return floor(point.x / self.bucket_size), floor(point.y / self.bucket_size)
