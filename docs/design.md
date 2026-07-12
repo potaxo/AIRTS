@@ -1138,9 +1138,14 @@ continuous production request: creating a
 new one cancels older continuous requests for that factory, while finite requests retain FIFO
 ordering for future per-type and per-count production controls.
 
-Large groups that share destinations should reuse bounded deterministic navigation fields. Patrol
-and repair routing should not repeat the same full-map search per unit, and large direct-move
-formations may cluster paths through nearby staging anchors before branching to unique final slots.
+Static patrol, defend, repair, production-rally, and combat routes pass through one deterministic
+routing service. It reuses bounded navigation fields for shared destinations and admits automation
+route work through fair per-controller and global per-tick budgets, so a large task cannot monopolize
+a simulation tick or permanently starve another task. Route validation proves group and route
+connectivity with shared fields instead of repeating a full-map search for every formation slot.
+Large direct-move formations may cluster paths through nearby staging anchors before branching to
+unique final slots. Replans whose costs depend on current unit positions remain uncached because
+their obstacle penalties change with the formation.
 Military units are finite-cost dynamic path obstacles rather than impassable terrain. Movement
 controllers periodically recalculate delayed routes through or around changing formations, with
 per-tick path budgets preserving responsiveness during mass movement and focus-fire commands.

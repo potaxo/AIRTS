@@ -54,7 +54,7 @@ from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
 from airts.movement import NEIGHBOR_RADIUS, collision_radius, steering_candidates, unit_mass
 from airts.occupancy import OccupancyError, OccupancyGrid
-from airts.pathfinding import Pathfinder, PathfindingError, PathResult, find_path
+from airts.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.spatial import GroundingSelection, SpatialKind, SpatialStore
 from airts.spatial_index import SpatialIndex
@@ -82,6 +82,8 @@ class Simulation:
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
     GATHERING_PATH_BUDGET = 4
+    AUTOMATION_ROUTE_BUDGET = 16
+    TOTAL_AUTOMATION_ROUTE_BUDGET = 32
     STALLED_REPATH_BUDGET = 4
     COMBAT_PATH_BUDGET = 16
     MILITARY_OBSTACLE_PATH_PENALTY = 1.5
@@ -138,12 +140,15 @@ class Simulation:
         self._blocked_ticks: dict[str, int] = {}
         self._push_events_this_tick: set[str] = set()
         self._stalled_repaths_this_tick = 0
-        self._combat_paths_this_tick = 0
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
         self._blocked_recoveries_this_tick = 0
         self._building_cells_cache: frozenset[Cell] | None = None
-        self._pathfinder = Pathfinder(game_map)
+        self._routes = RoutingService(
+            game_map,
+            automation_budget=self.TOTAL_AUTOMATION_ROUTE_BUDGET,
+            combat_budget=self.COMBAT_PATH_BUDGET,
+        )
         self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
         self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
         self._update_visibility()
@@ -178,7 +183,13 @@ class Simulation:
     def navigation_field_build_count(self) -> int:
         """Expose shared-navigation work for deterministic performance regression tests."""
 
-        return self._pathfinder.field_build_count
+        return self._routes.field_build_count
+
+    @property
+    def automation_route_count(self) -> int:
+        """Automation routes admitted by the shared scheduler this tick."""
+
+        return self._routes.automation_route_count
 
     @property
     def movement_step_attempt_count(self) -> int:
@@ -241,7 +252,7 @@ class Simulation:
             self.tick += 1
             self._push_events_this_tick.clear()
             self._stalled_repaths_this_tick = 0
-            self._combat_paths_this_tick = 0
+            self._routes.begin_tick()
             self._movement_step_attempt_count = 0
             self._collision_pair_check_count = 0
             self._blocked_recoveries_this_tick = 0
@@ -590,9 +601,7 @@ class Simulation:
             if automation.kind is AutomationKind.PATROL:
                 try:
                     waypoints = build_patrol_waypoints(command.target, self.game_map)
-                    self._validate_paths(
-                        tuple(automation.entity_ids), waypoints, shared_destinations=True
-                    )
+                    self._validate_paths(tuple(automation.entity_ids), waypoints)
                 except (ValueError, PathfindingError) as error:
                     return self._reject_validation(
                         "modify_automation",
@@ -714,8 +723,7 @@ class Simulation:
         blocked = self._building_cells()
         if len(entity_ids) <= 32:
             return {
-                entity_id: find_path(
-                    self.game_map,
+                entity_id: self._routes.dynamic_path(
                     self.entities[entity_id].position,
                     destinations[entity_id],
                     blocked,
@@ -740,7 +748,7 @@ class Simulation:
             )
             anchor = destinations[anchor_id]
             for entity_id in sorted(member_ids):
-                shared = self._pathfinder.find_path(
+                shared = self._routes.shared_path(
                     self.entities[entity_id].position,
                     anchor,
                     blocked,
@@ -749,7 +757,7 @@ class Simulation:
                 if destination == anchor:
                     paths[entity_id] = shared
                     continue
-                local = find_path(self.game_map, anchor, destination, blocked)
+                local = self._routes.dynamic_path(anchor, destination, blocked)
                 paths[entity_id] = PathResult(
                     shared.cells + local.cells[1:],
                     shared.waypoints + local.waypoints,
@@ -823,7 +831,7 @@ class Simulation:
             return self._reject_validation("create_patrol", failure)
         try:
             waypoints = build_patrol_waypoints(command.target, self.game_map)
-            self._validate_paths(command.entity_ids, waypoints, shared_destinations=True)
+            self._validate_paths(command.entity_ids, waypoints)
         except (ValueError, PathfindingError) as error:
             return self._reject_validation(
                 "create_patrol",
@@ -1321,10 +1329,16 @@ class Simulation:
         return self._accept("cancel_automation", automation_id)
 
     def _drive_automations(self) -> None:
-        for automation_id in sorted(self.automations):
+        automation_ids = sorted(
+            automation_id
+            for automation_id, automation in self.automations.items()
+            if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
+        )
+        if automation_ids:
+            offset = self.tick % len(automation_ids)
+            automation_ids = automation_ids[offset:] + automation_ids[:offset]
+        for automation_id in automation_ids:
             automation = self.automations[automation_id]
-            if automation.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
-                continue
             if automation.kind is AutomationKind.PATROL:
                 self._drive_patrol(automation)
             elif automation.kind is AutomationKind.DEFEND:
@@ -1338,19 +1352,32 @@ class Simulation:
             else:
                 self._drive_repair(automation)
 
+    def _scheduled_entity_ids(self, automation: Automation) -> tuple[str, ...]:
+        """Rotate deterministic work order so deferred large groups make fair progress."""
+
+        entity_ids = sorted(automation.entity_ids)
+        if not entity_ids:
+            return ()
+        stable_offset = sum(ord(character) for character in automation.automation_id)
+        offset = (self.tick + stable_offset) % len(entity_ids)
+        return tuple(entity_ids[offset:] + entity_ids[:offset])
+
     def _drive_patrol(self, automation: Automation) -> None:
         building_cells = self._building_cells()
         parameters = _patrol_parameters(automation)
+        allowance = self._routes.automation_allowance(self.AUTOMATION_ROUTE_BUDGET)
         formation_indices = (
             {entity_id: index for index, entity_id in enumerate(sorted(automation.entity_ids))}
             if isinstance(parameters.target, PolylineTarget)
             else {}
         )
-        for entity_id in tuple(automation.entity_ids):
+        for entity_id in self._scheduled_entity_ids(automation):
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
             if entity.move_target is not None or entity.path:
+                continue
+            if not allowance.claim():
                 continue
             waypoint_index = parameters.waypoint_indices[entity_id]
             automation.take_next_waypoint(entity_id)
@@ -1363,7 +1390,7 @@ class Simulation:
                 formation_indices.get(entity_id),
             )
             try:
-                path = self._pathfinder.find_path(entity.position, target, building_cells)
+                path = self._routes.shared_path(entity.position, target, building_cells)
             except PathfindingError as error:
                 self._transition(automation, AutomationStatus.BLOCKED, str(error))
                 self.events.record(
@@ -1379,8 +1406,10 @@ class Simulation:
     def _drive_defend(self, automation: Automation) -> None:
         parameters = _defend_parameters(automation)
         building_cells = self._building_cells()
-        remaining_paths = (
-            self.GATHERING_PATH_BUDGET if parameters.gathering_point else len(automation.entity_ids)
+        allowance = self._routes.automation_allowance(
+            self.GATHERING_PATH_BUDGET
+            if parameters.gathering_point
+            else self.AUTOMATION_ROUTE_BUDGET
         )
         assigned_ids = tuple(
             entity_id
@@ -1431,7 +1460,10 @@ class Simulation:
                         attacker_id=attacker.entity_id,
                     )
 
-        for entity_id in assigned_ids:
+        assigned_set = set(assigned_ids)
+        for entity_id in self._scheduled_entity_ids(automation):
+            if entity_id not in assigned_set:
+                continue
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             entity = self.entities[entity_id]
@@ -1455,18 +1487,13 @@ class Simulation:
                 entity.move_target = None
                 entity.state = UnitState.DEFENDING
                 continue
-            if remaining_paths <= 0:
+            if not allowance.claim():
                 continue
             try:
-                path = (
-                    self._pathfinder.find_path(entity.position, station, building_cells)
-                    if parameters.gathering_point
-                    else find_path(self.game_map, entity.position, station, building_cells)
-                )
+                path = self._routes.shared_path(entity.position, station, building_cells)
             except PathfindingError as error:
                 self._transition(automation, AutomationStatus.BLOCKED, str(error))
                 return
-            remaining_paths -= 1
             self._start_path(entity, station, path, automation.automation_id, UnitState.DEFENDING)
             self.events.record(
                 self.tick,
@@ -1732,7 +1759,8 @@ class Simulation:
 
     def _drive_repair(self, automation: Automation) -> None:
         parameters = _repair_parameters(automation)
-        for entity_id in tuple(automation.entity_ids):
+        allowance = self._routes.automation_allowance(self.AUTOMATION_ROUTE_BUDGET)
+        for entity_id in self._scheduled_entity_ids(automation):
             if self.assignments.get(entity_id) != automation.automation_id:
                 continue
             phase = parameters.phases[entity_id]
@@ -1760,6 +1788,8 @@ class Simulation:
                 if self.game_map.cell_for(entity.position) in interaction_cells:
                     parameters.phases[entity_id] = RepairPhase.REPAIRING
                     entity.state = UnitState.REPAIRING
+                    continue
+                if not allowance.claim():
                     continue
                 try:
                     _, point, path = self._nearest_repair_destination(entity, building.entity_id)
@@ -1807,8 +1837,10 @@ class Simulation:
                     self._resume_suspended_assignment(automation, entity_id)
                     parameters.phases[entity_id] = RepairPhase.DONE
                     continue
+                if not allowance.claim():
+                    continue
                 try:
-                    path = self._pathfinder.find_path(
+                    path = self._routes.shared_path(
                         entity.position,
                         return_position,
                         self._building_cells(),
@@ -1873,15 +1905,14 @@ class Simulation:
                 attacker.pursue_target
                 and ordered_target is not None
                 and not attacker.path
-                and self._combat_paths_this_tick < self.COMBAT_PATH_BUDGET
                 and self.game_map.cell_for(attacker.position)
                 not in {
                     self.game_map.cell_for(point)
                     for point in self._interaction_points(ordered_target)
                 }
+                and self._routes.claim_combat_route()
             ):
                 self._chase_target(attacker, ordered_target)
-                self._combat_paths_this_tick += 1
             firing_target = (
                 ordered_target
                 if ordered_target is not None
@@ -2016,7 +2047,7 @@ class Simulation:
         if attacker.congestion_stopped:
             return
         try:
-            point, path = self._pathfinder.find_path_to_any(
+            point, path = self._routes.shared_path_to_any(
                 attacker.position,
                 self._interaction_points(target),
                 self._building_cells(),
@@ -2210,8 +2241,7 @@ class Simulation:
         if destination is None or self._stalled_repaths_this_tick >= self.STALLED_REPATH_BUDGET:
             return False
         try:
-            path = find_path(
-                self.game_map,
+            path = self._routes.dynamic_path(
                 entity.position,
                 destination,
                 self._building_cells(),
@@ -2258,8 +2288,7 @@ class Simulation:
         """Route around units that have already settled between this unit and its slot."""
 
         try:
-            path = find_path(
-                self.game_map,
+            path = self._routes.dynamic_path(
                 entity.position,
                 destination,
                 self._building_cells(),
@@ -2682,8 +2711,7 @@ class Simulation:
         replacement = self._nearest_unreserved_destination(entity, destination)
         if replacement is not None and replacement != destination:
             try:
-                path = find_path(
-                    self.game_map,
+                path = self._routes.dynamic_path(
                     entity.position,
                     replacement,
                     self._building_cells(),
@@ -2726,8 +2754,7 @@ class Simulation:
         )
         sidestep = candidates[0]
         try:
-            path = find_path(
-                self.game_map,
+            path = self._routes.dynamic_path(
                 sidestep,
                 destination,
                 self._building_cells(),
@@ -3036,11 +3063,10 @@ class Simulation:
         self.occupancy.place(entity_id, entity.occupied_cells)
         if parameters.rally_point is not None:
             try:
-                path = find_path(
-                    self.game_map,
+                path = self._routes.shared_path(
                     position,
                     parameters.rally_point,
-                    self.occupancy.blocked_cells(frozenset({entity_id})),
+                    self._building_cells(),
                 )
             except PathfindingError:
                 entity.state = UnitState.IDLE
@@ -3197,7 +3223,7 @@ class Simulation:
             ):
                 continue
             try:
-                point, path = self._pathfinder.find_path_to_any(
+                point, path = self._routes.shared_path_to_any(
                     entity.position,
                     self._interaction_points(building),
                     self._building_cells(),
@@ -3358,23 +3384,17 @@ class Simulation:
         self,
         entity_ids: tuple[str, ...],
         waypoints: tuple[Point, ...],
-        *,
-        shared_destinations: bool = False,
     ) -> None:
         building_cells = self._building_cells()
-        for index, entity_id in enumerate(entity_ids):
-            start = self.entities[entity_id].position
-            destination = waypoints[index % len(waypoints)]
-            if shared_destinations:
-                self._pathfinder.find_path(start, destination, building_cells)
-            else:
-                find_path(self.game_map, start, destination, building_cells)
-        if len(waypoints) > 1:
-            for start, end in zip(waypoints, waypoints[1:] + waypoints[:1], strict=True):
-                if shared_destinations:
-                    self._pathfinder.find_path(start, end, building_cells)
-                else:
-                    find_path(self.game_map, start, end, building_cells)
+        anchor = waypoints[0]
+        for entity_id in entity_ids:
+            self._routes.shared_path(
+                self.entities[entity_id].position,
+                anchor,
+                building_cells,
+            )
+        for waypoint in waypoints[1:]:
+            self._routes.shared_path(waypoint, anchor, building_cells)
 
     def _start_path(
         self,
@@ -3630,7 +3650,7 @@ class Simulation:
 
     def _invalidate_navigation_cache(self) -> None:
         self._building_cells_cache = None
-        self._pathfinder.clear()
+        self._routes.clear()
         self._gathering_slot_cache.clear()
         self._gathering_reachable_cache.clear()
 

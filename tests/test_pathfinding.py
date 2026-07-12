@@ -4,7 +4,7 @@ import pytest
 
 from airts.geometry import Point
 from airts.map_model import Terrain, load_example_map, load_map_data
-from airts.pathfinding import Pathfinder, PathfindingError, find_path
+from airts.pathfinding import Pathfinder, PathfindingError, RoutingService, find_path
 
 
 def test_pathfinding_routes_deterministically_through_a_gap() -> None:
@@ -88,6 +88,43 @@ def test_shared_navigation_field_reuses_one_search_for_many_starts() -> None:
     assert second.cost == find_path(game_map, second_start, goal).cost
     assert pathfinder.field_build_count == 1
     assert pathfinder.cached_field_count == 1
+
+
+def test_routing_service_enforces_local_and_global_tick_budgets() -> None:
+    service = RoutingService(load_example_map(), automation_budget=2, combat_budget=1)
+    first = service.automation_allowance(1)
+    second = service.automation_allowance(2)
+
+    assert first.claim()
+    assert not first.claim()
+    assert second.claim()
+    assert not second.claim()
+    assert service.automation_route_count == 2
+    assert service.claim_combat_route()
+    assert not service.claim_combat_route()
+
+    service.begin_tick()
+
+    assert service.automation_route_count == 0
+    assert service.combat_route_count == 0
+    assert service.automation_allowance(2).claim()
+
+
+def test_routing_service_keeps_dynamic_unit_penalty_routes_out_of_static_cache() -> None:
+    game_map = load_example_map()
+    service = RoutingService(game_map, automation_budget=4, combat_budget=4)
+    goal = Point(40.5, 28.5)
+
+    service.shared_path(Point(8.5, 28.5), goal)
+    service.shared_path(Point(10.5, 26.5), goal)
+    service.dynamic_path(
+        Point(8.5, 28.5),
+        goal,
+        cell_penalties={(20, 28): 1.5},
+    )
+
+    assert service.field_build_count == 1
+    assert service.cached_field_count == 1
 
 
 def test_five_hundred_military_obstacles_are_costly_but_not_an_impassable_wall() -> None:

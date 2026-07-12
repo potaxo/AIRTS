@@ -155,6 +155,106 @@ class Pathfinder:
         return _NavigationField(costs, next_cells, goal_cells)
 
 
+@dataclass(slots=True)
+class RouteAllowance:
+    """Per-controller view of the shared per-tick automation route budget."""
+
+    service: RoutingService
+    limit: int
+    used: int = 0
+
+    def claim(self) -> bool:
+        if self.used >= self.limit or not self.service._claim_automation_route():
+            return False
+        self.used += 1
+        return True
+
+
+class RoutingService:
+    """Centralize cached static routing, dynamic routing, and per-tick work budgets."""
+
+    def __init__(
+        self,
+        game_map: GameMap,
+        *,
+        automation_budget: int,
+        combat_budget: int,
+        maximum_fields: int = 32,
+    ) -> None:
+        if automation_budget <= 0 or combat_budget <= 0:
+            raise ValueError("route budgets must be positive")
+        self.game_map = game_map
+        self.automation_budget = automation_budget
+        self.combat_budget = combat_budget
+        self._shared = Pathfinder(game_map, maximum_fields)
+        self.automation_route_count = 0
+        self.combat_route_count = 0
+
+    @property
+    def field_build_count(self) -> int:
+        return self._shared.field_build_count
+
+    @property
+    def cached_field_count(self) -> int:
+        return self._shared.cached_field_count
+
+    def begin_tick(self) -> None:
+        self.automation_route_count = 0
+        self.combat_route_count = 0
+
+    def automation_allowance(self, limit: int) -> RouteAllowance:
+        if limit <= 0:
+            raise ValueError("route allowance must be positive")
+        return RouteAllowance(self, limit)
+
+    def claim_combat_route(self) -> bool:
+        if self.combat_route_count >= self.combat_budget:
+            return False
+        self.combat_route_count += 1
+        return True
+
+    def shared_path(
+        self,
+        start: Point,
+        goal: Point,
+        blocked: frozenset[Cell] = frozenset(),
+    ) -> PathResult:
+        return self._shared.find_path(start, goal, blocked)
+
+    def shared_path_to_any(
+        self,
+        start: Point,
+        goals: tuple[Point, ...],
+        blocked: frozenset[Cell] = frozenset(),
+    ) -> tuple[Point, PathResult]:
+        return self._shared.find_path_to_any(start, goals, blocked)
+
+    def dynamic_path(
+        self,
+        start: Point,
+        goal: Point,
+        blocked: frozenset[Cell] = frozenset(),
+        *,
+        cell_penalties: Mapping[Cell, float] | None = None,
+    ) -> PathResult:
+        return find_path(
+            self.game_map,
+            start,
+            goal,
+            blocked,
+            cell_penalties=cell_penalties,
+        )
+
+    def clear(self) -> None:
+        self._shared.clear()
+
+    def _claim_automation_route(self) -> bool:
+        if self.automation_route_count >= self.automation_budget:
+            return False
+        self.automation_route_count += 1
+        return True
+
+
 def find_path(
     game_map: GameMap,
     start: Point,

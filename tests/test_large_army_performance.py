@@ -194,6 +194,37 @@ def _head_on_armies(per_group: int = 150) -> tuple[Simulation, tuple[str, ...], 
     return simulation, eastbound, westbound
 
 
+def _large_line_simulation(
+    unit_count: int = 500,
+) -> tuple[Simulation, tuple[str, ...], PolylineTarget]:
+    entity_ids = tuple(f"line_{index:04d}" for index in range(unit_count))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "large_line_automation",
+                "name": "Large Line Automation",
+                "width": 520,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "kind": "light_tank",
+                        "owner": "player",
+                        "position": [index + 10.5, 3.5],
+                    }
+                    for index, entity_id in enumerate(entity_ids)
+                ],
+            }
+        )
+    )
+    return (
+        simulation,
+        entity_ids,
+        PolylineTarget((Point(10.5, 10.5), Point(509.5, 10.5))),
+    )
+
+
 def test_thousand_unit_repair_selection_filters_before_shared_routing() -> None:
     simulation = _large_simulation(1_000, with_repair_hub=True)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
@@ -312,29 +343,8 @@ def test_thousand_unit_gathering_radius_contracts_after_half_are_reassigned() ->
 
 
 def test_five_hundred_unit_line_defense_uses_the_whole_line_evenly() -> None:
-    unit_count = 500
-    entity_ids = tuple(f"unit_{index:04d}" for index in range(unit_count))
-    simulation = Simulation(
-        load_map_data(
-            {
-                "id": "large_line_defense",
-                "name": "Large Line Defense",
-                "width": 520,
-                "height": 16,
-                "terrain": {"default": "grass", "rectangles": []},
-                "entities": [
-                    {
-                        "id": entity_id,
-                        "kind": "light_tank",
-                        "owner": "player",
-                        "position": [index + 10.5, 3.5],
-                    }
-                    for index, entity_id in enumerate(entity_ids)
-                ],
-            }
-        )
-    )
-    target = PolylineTarget((Point(10.5, 10.5), Point(509.5, 10.5)))
+    simulation, entity_ids, target = _large_line_simulation()
+    unit_count = len(entity_ids)
 
     result = simulation.execute(CreateDefendCommand(entity_ids, target))
 
@@ -348,6 +358,49 @@ def test_five_hundred_unit_line_defense_uses_the_whole_line_evenly() -> None:
     assert len(set(stations)) == unit_count
     assert max(gaps) - min(gaps) < 1e-9
     assert sum(1 for station in stations if 200 <= station.x <= 320) >= 120
+
+    simulation.advance()
+
+    assert simulation.automation_route_count == Simulation.AUTOMATION_ROUTE_BUDGET
+    assert sum(bool(simulation.entities[entity_id].path) for entity_id in entity_ids) == (
+        Simulation.AUTOMATION_ROUTE_BUDGET
+    )
+
+
+def test_five_hundred_unit_line_patrol_uses_shared_bounded_route_dispatch() -> None:
+    simulation, entity_ids, target = _large_line_simulation()
+    created = simulation.execute(CreatePatrolCommand(entity_ids, target))
+    fields_before = simulation.navigation_field_build_count
+
+    simulation.advance()
+
+    assert created.accepted
+    assert simulation.automation_route_count == Simulation.AUTOMATION_ROUTE_BUDGET
+    assert sum(bool(simulation.entities[entity_id].path) for entity_id in entity_ids) == (
+        Simulation.AUTOMATION_ROUTE_BUDGET
+    )
+    assert (
+        simulation.navigation_field_build_count - fields_before
+        <= Simulation.AUTOMATION_ROUTE_BUDGET
+    )
+
+
+def test_five_hundred_unit_repair_travel_uses_shared_bounded_route_dispatch() -> None:
+    simulation = _large_simulation(500, with_repair_hub=True)
+    entity_ids = tuple(f"unit_{index:04d}" for index in range(500))
+    for entity_id in entity_ids:
+        simulation.entities[entity_id].health = 17
+    created = simulation.execute(CreateRepairAndReturnCommand(entity_ids))
+    fields_before = simulation.navigation_field_build_count
+
+    simulation.advance()
+
+    assert created.accepted
+    assert simulation.automation_route_count == Simulation.AUTOMATION_ROUTE_BUDGET
+    assert sum(bool(simulation.entities[entity_id].path) for entity_id in entity_ids) == (
+        Simulation.AUTOMATION_ROUTE_BUDGET
+    )
+    assert simulation.navigation_field_build_count - fields_before <= 1
 
 
 def test_delayed_unit_in_five_hundred_unit_army_repaths_and_keeps_progress() -> None:
