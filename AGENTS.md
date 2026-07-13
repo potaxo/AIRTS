@@ -13,15 +13,14 @@ later-phase features unless explicitly requested.
 
 ## Environment
 
-- Develop and validate AIRTS in WSL2 Ubuntu with Python 3.13.
+- Develop and validate AIRTS natively on Windows with Python 3.13 and PowerShell.
 - Use the repository-local `.venv`.
 - Treat `pyproject.toml` as the source of truth for dependencies.
 - Install the project with:
 
-  `.venv/bin/python -m pip install -e ".[dev]"`
+  `.\.venv\Scripts\python -m pip install -e ".[dev]"`
 
-- Do not use global Python, Conda, `sudo`, `apt`, or global `pip` without
-  explicit approval.
+- Do not use global Python, Conda, or global `pip` without explicit approval.
 - Do not install undeclared or speculative dependencies.
 - Explain why a new dependency is necessary before adding it.
 - AIRTS uses `pygame-ce`, not `pygame`. Never install both.
@@ -79,11 +78,11 @@ hierarchies.
 
 Before declaring a coding task complete, run:
 
-- `.venv/bin/ruff check .`
-- `.venv/bin/ruff format --check .`
-- `.venv/bin/mypy src`
-- `.venv/bin/python -m pytest`
-- `.venv/bin/python -m pip check`
+- `.\.venv\Scripts\python -m ruff check .`
+- `.\.venv\Scripts\python -m ruff format --check .`
+- `.\.venv\Scripts\python -m mypy src`
+- `.\.venv\Scripts\python -m pytest`
+- `.\.venv\Scripts\python -m pip check`
 
 When behavior changes, also run the smallest relevant manual or integration
 test.
@@ -93,11 +92,17 @@ cannot run, report the exact failure and what remains unverified.
 
 ## Documentation
 
-Update relevant documentation when setup, dependencies, architecture,
-user-visible behavior, scope, or commands change.
+Update `docs/design.md` whenever architecture, dependencies, scope, user-visible
+behavior, feature capability, performance strategy, or implementation limitations
+change. Record every architecture modification, feature upgrade, optimization, and
+behavioral improvement there, including important tradeoffs and relevant acceptance
+tests.
 
-Keep `docs/design.md`, `README.md`, `AGENTS.md`, and `pyproject.toml`
-consistent without duplicating the full design specification.
+Keep `README.md` focused on concise user and developer setup, runtime, controls, and
+entry points. Keep `docs/design.md`, `README.md`, `AGENTS.md`, and `pyproject.toml`
+consistent without duplicating the full design specification. Do not otherwise modify
+`AGENTS.md` unless a repository instruction is genuinely incorrect, contradictory, or
+missing a rule required to complete the task safely.
 
 ## Completion Report
 

@@ -3,18 +3,42 @@
 **Project name:** AIRTS
 **Document path:** `docs/design.md`
 **Document status:** Current working specification
-**Version:** 0.2
+**Version:** 0.3
 **Primary implementation language:** Python
-**Initial development environment:** WSL2 Ubuntu 24.04
+**Current development environment:** Native Windows with Python 3.13
 **Project type:** Open-source research prototype
+
+## Document ownership and status
+
+This document owns AIRTS product behavior, architecture, scope, milestones, non-goals, and
+implemented technical contracts. Read it as follows:
+
+* Sections 1 through 36 define the research vision, architectural invariants, and roadmap.
+  Statements using *should*, *may*, or *eventually* are target behavior, not claims that the
+  feature is already implemented.
+* Sections 37 through 40 record implemented milestone contracts and their acceptance tests.
+* Section 41 is the concise current implementation baseline and takes precedence when roadmap
+  wording could otherwise be mistaken for current behavior.
+
+All architecture modifications, feature upgrades, optimizations, and behavioral improvements must
+be recorded here with their authoritative owner, important tradeoffs, and relevant acceptance
+evidence. [`README.md`](../README.md) owns the concise user/developer quick start and controls;
+[`AGENTS.md`](../AGENTS.md) owns repository working rules; `pyproject.toml` owns dependencies and
+tool configuration. Keep those files consistent without copying this specification into them.
 
 ---
 
 # 1. Project Overview
 
-AIRTS is a lightweight real-time strategy research environment for studying **human-in-the-loop, language-driven automation**.
+AIRTS is a lightweight real-time strategy research environment for studying **human-in-the-loop,
+language-driven automation**.
 
-The project combines conventional RTS interaction with natural-language control. Players retain direct control through the mouse and keyboard, including selecting units, selecting buildings, drawing regions, defining patrol routes, and issuing ordinary commands. Natural language provides a higher-level mechanism for creating, modifying, and managing persistent strategic behaviors.
+AIRTS is designed to combine conventional RTS interaction with natural-language control. Players
+retain direct control through the mouse and keyboard, including selecting units, selecting
+buildings, drawing regions, defining patrol routes, and issuing ordinary commands. Natural
+language will provide a higher-level mechanism for creating, modifying, and managing persistent
+strategic behaviors. The current build implements direct control and deterministic automations;
+language-model integration remains a later phase described in Section 41.
 
 Example instructions include:
 
@@ -1222,7 +1246,7 @@ After repair:
 4. if the prior work is invalid and no return can be completed, the unit remains blocked or idle;
 5. the automation records a waiting, blocked, or failure event.
 
-The unit still has only one ac operational state at a time.
+The unit still has only one active operational state at a time.
 
 ---
 
@@ -1493,7 +1517,7 @@ The model may generate a readable explanation, but AIRTS supplies the authoritat
 
 ---
 
-# 24. Fog of War and Imation Authority
+# 24. Fog of War and Information Authority
 
 AIRTS must distinguish between:
 
@@ -1569,12 +1593,12 @@ logical `SCALED | RESIZABLE` software framebuffer remains an explicit `--rendere
 for headless CI and compatibility. OpenGL startup failures are diagnostic and never silently fall
 back, because doing so would make performance evidence and renderer identity untrustworthy.
 
-On WSLg, the application prefers native Wayland for OpenGL unless the user explicitly sets
-`SDL_VIDEODRIVER`. SDL Wayland requires intact XKB rules from `xkb-data` and Compose locale data
-from `libx11-data`; package metadata alone is insufficient if their files have been removed.
-Context creation requires OpenGL 3.3 or newer. Physical refresh rate, VSync, WSLg/desktop
-composition, driver behavior, and monitor timing remain outside the deterministic simulation
-contract.
+On Windows, SDL creates the interactive OpenGL context through the native Windows driver stack,
+and ModernGL's standalone verifier uses its native WGL backend. Context creation requires OpenGL
+3.3 or newer. Physical refresh rate, VSync, desktop composition, driver behavior, and monitor
+timing remain outside the deterministic simulation contract.
+
+WSLg remains a compatibility path and prefers Wayland when no SDL video driver is selected.
 
 Entity hit testing uses the visible occupied footprint for buildings rather than only their center
 point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
@@ -1815,7 +1839,7 @@ Too little design:
 
 Too much design:
 specify every class and method before coding
-âve complexity
+→ unnecessary complexity
 → slow progress
 ```
 
@@ -1836,71 +1860,32 @@ It should be updated when implementation reveals that an assumption is incorrect
 
 ---
 
-# 31. Codex Development Strategy
+# 31. Engineering Change Policy
 
-## 31.1 Codex autonomy
+`AGENTS.md` owns contributor workflow and validation instructions. This document owns durable
+technical decisions and must change whenever implementation work changes architecture, behavior,
+scope, dependencies, performance strategy, or a user-visible feature.
 
-Codex should receive broad implementation freedom within bounded milthin a milestone, Codex may:
+Every architecture modification, feature upgrade, optimization, or improvement must record the
+following here, in the relevant section or as a new bounded milestone:
 
-* inspect the repository;
-* propose module boundaries;
-* choose classes and helper functions;
-* choose appropriate internal data structures;
-* implement the milestone;
-* write tests;
-* run validation;
-* diagnose failures;
-* update documentation.
+* the behavior or constraint that changed;
+* the component that remains authoritative;
+* effects on dependency direction, determinism, validation, persistence, or replay;
+* explicit exclusions and remaining limitations;
+* the test or other acceptance evidence that defines the contract.
 
-Codex should not be micromanaged method by method.
-
-## 31.2 Architectural invariants
-
-Codex must preserve these rules:
-
-* the simulation core must not depend on the UI;
-* the simulation core must not depend on LM Studio;
-* the language model must not mutate world state directly;
-* all control sources must use shared command interfaces;
-* exact geometry comes from the player or deterministic game logic;
-* automations are serializable and inspectable;
-* failures do not pass silently;
-* external dependencies must be justified;
-* tests cover important domain behavior;
-* documentation changes together with architecture.
-
-## 31.3 Milestone size
-
-Each Codex task should represent one coherent, reviewable outcome.
-
-A milestone should contain:
-
-* one clear goal;
-* explicit exclusions;
-* defined acceptance criteria;
-* required tests;
-* documentation requirements.
-
-Codex should not be asked to implement the entire AIRTS project in one task.
-
-## 31.4 Planning workflow
-
-For complex milestones:
-
-1. Codex reads `AGENTS.md` and relevant documentation.
-2. Codex inspects the current repository.
-3. Codex proposes an implementation plan.
-4. Unclear assumptions are identified.
-5. Codex implements the bounded milestone.
-6. Codex adds or updates tests.
-7. Codex runs formatting, linting, type checking, and tests.
-8. Codex reviews the final diff.
-9. Codex updates relevant documentation.
-10. Codex reports remaining uncertainty.
+Milestones should remain coherent and reviewable. Do not add later-phase capability merely because
+it is mentioned in the roadmap, and do not turn this document into a class-by-class implementation
+manual.
 
 ---
 
 # 32. Development Phases
+
+These phases describe capability order, not release labels. Phases 0 through 5 and the implemented
+milestones in Sections 37 through 40 form the current baseline. Phases 6 onward remain roadmap
+work unless a task explicitly changes that status.
 
 ## Phase 0 — Design and repository foundation
 
@@ -1911,7 +1896,7 @@ Deliverables:
 * `README.md`;
 * Python project configuration;
 * Git repository;
-* WSL virtual environment;
+* repository-local virtual environment;
 * initial milestone definition.
 
 ## Phase 1 — First playable vertical slice
@@ -1946,7 +1931,7 @@ Explicit exclusions:
 * LM Studio;
 * voice;
 * MCP;
- map editor;
+* map editor;
 * scouting reports;
 * multiple automation templates;
 * multiplayer;
@@ -1975,7 +1960,7 @@ Deliverables:
 * automation lifecycle;
 * ownership rules;
 * manual override;
-* waiting and failutates;
+* waiting and failure states;
 * patrol;
 * defend;
 * production;
@@ -2036,7 +2021,7 @@ Deliverables:
 * selected-entity context;
 * selected-region context;
 * selected-point context;
-* selecline context;
+* selected-line context;
 * multi-region context;
 * grounded reference resolution;
 * automation creation through language;
@@ -2062,7 +2047,7 @@ Deliverables:
 
 Deliverables:
 
-* benchmenarios;
+* benchmark scenarios;
 * deterministic replay;
 * metrics;
 * baseline control modes;
@@ -2092,7 +2077,7 @@ Possible later additions:
 
 ---
 
-# 33. First End-tond Demonstration
+# 33. First End-to-End Demonstration
 
 The first major demonstration should eventually support this scenario:
 
@@ -2166,7 +2151,7 @@ The initial prototype assumes:
 
 * selected geometry accurately expresses the player’s intended location;
 * players understand basic direct-manipulation controls;
-* bridges rein available;
+* bridges remain available;
 * terrain does not change;
 * the simulation is deterministic under a fixed seed;
 * the model receives valid entity and region candidates;
@@ -2206,7 +2191,7 @@ The following questions should not block the first implementation:
 
 11. Should AIRTS later support an asynchronous strategic model that periodically reviews economy or battlefield state?
 
-12. When wouCP provide enough value to justify its additional complexity?
+12. When would MCP provide enough value to justify its additional complexity?
 
 13. Which local model sizes are sufficient for valid structured command generation?
 
@@ -2425,7 +2410,7 @@ by OpenGL. This hybrid keeps the complete interface available without uploading 
 
 * native 3840 x 2160 framebuffer coordinates and a 1.0 pixel scale;
 * OpenGL, double buffering, resizing, and absence of `SCALED` on the default backend;
-* WSLg Wayland preference without overriding an explicit SDL driver;
+* native platform context selection: WGL on Windows and Wayland preference on WSLg;
 * all 4,800 terrain cells, 1,000 scouts, four buildings, selection, and bounded routes;
 * one cached terrain draw, one entity draw, one bounded line draw, and one UI composition draw;
 * diagnostic context failure with no hidden software fallback;
@@ -2441,3 +2426,68 @@ including WGL on Windows, instead of hard-coding EGL; known Mesa software raster
 GDI Generic, and the Microsoft Basic Render Driver are rejected as hardware evidence. It still
 cannot prove that a compositor and physical monitor display 100 distinct refreshes, and it does
 not change the simulation's fixed 10 Hz rate.
+
+---
+
+# 41. Current Implemented Baseline
+
+This section is the current-state index. The milestone details in Sections 37 through 40 remain
+normative. The README contains setup, runtime, and controls; `AGENTS.md` owns validation commands.
+
+## 41.1 Architectural ownership
+
+| Concern | Authoritative implementation |
+| --- | --- |
+| Tagged control inputs and serialization | `src/airts/commands.py` |
+| World state, validation, commands, automation execution, movement, combat, resources, and ticks | `src/airts/simulation.py` |
+| Automation schemas, lifecycle, and deterministic geometry planning | `src/airts/automations.py` |
+| Map, entity profiles, geometry, occupancy, routing, visibility, and spatial references | Focused UI-independent modules under `src/airts/` |
+| Versioned save/load and deterministic command replay | `src/airts/persistence.py` and `src/airts/replay.py` |
+| Input, inspection, panels, and the explicit software renderer | `src/airts/app.py` |
+| Native OpenGL frame construction and submission | `src/airts/opengl_renderer.py` |
+
+The dependency direction remains simulation core outward to adapters. The simulation imports
+neither Pygame nor a model provider. UI actions submit the same command objects used by replay and
+future language adapters; renderer code reads authoritative state but does not advance or mutate
+domain behavior.
+
+## 41.2 Supported behavior
+
+The bundled scenario is a validated 64 x 64 static grid using grass, road, forest, water, rock, and
+bridge terrain. Current entities are scouts, light tanks, heavy tanks, builders, factories, repair
+hubs, command centers, and resource generators.
+
+The runtime currently supports:
+
+* fixed 10 Hz deterministic simulation with a separately paced 100 FPS frontend target;
+* direct move, stop, hold, and explicit attack commands with manual override;
+* point, polyline, rectangle, and freehand grounding; typed selection; region naming; whole-object
+  geometry replacement; and route/region deletion;
+* patrol, defend, production, construction, reinforcement, repair-and-return, and economy
+  automations with inspectable lifecycle, priority, pause, resume, cancellation, and event history;
+* weighted four-direction routing, distinct group destinations, local physical collision and push,
+  opportunistic projectile combat, visibility/exploration state, resource income, production, and
+  builder construction;
+* versioned complete-state saves, deterministic replay verification, JSON Lines event export,
+  configurable deterministic enemy generation, and custom map loading;
+* a native OpenGL 3.3 default renderer and an explicitly selected bounded software renderer.
+
+Starting resources are one integer balance per owner. Each resource generator adds 1,000 resources
+every ten simulation ticks. Ambient enemy generation defaults to one mobile enemy per second with a
+cap of 100 and can be disabled or reconfigured. Save and replay documents preserve those settings
+and reject incompatible schema versions.
+
+Sections 38 through 40 define the three 1,000-unit performance contracts and the limits of the
+evidence each one provides.
+
+## 41.3 Current implementation limitations
+
+Builders do not gather resources, construction cannot be canceled for a refund, and there is no
+technology tree, armor, cover, splash damage, missed shots, or tactical enemy AI. Visibility tracks
+authoritative visible, explored, and unexplored cells but does not yet provide line-of-sight
+occlusion, last-known enemy observations, or a fog overlay.
+
+Geometry editing replaces an entire point, route, or region rather than individual vertices.
+Map-defined semantic regions and multi-region automation semantics are not implemented. LM Studio
+and other language providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor
+remain outside the implemented phase.
