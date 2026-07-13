@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from airts.app import AirtsApp
+from airts.app import AirtsApp, RendererBackend
 from airts.map_model import load_example_map, load_map
 from airts.persistence import load_simulation, save_simulation
 from airts.replay import load_replay, run_replay, save_replay
@@ -29,6 +29,13 @@ def main() -> int:
         "--max-frames",
         type=int,
         help="Exit after this many rendered frames (useful for smoke tests).",
+    )
+    parser.add_argument(
+        "--renderer",
+        choices=tuple(RendererBackend),
+        default=RendererBackend.OPENGL,
+        type=RendererBackend,
+        help="Rendering backend (default: opengl; use software for headless CI).",
     )
     parser.add_argument(
         "--enemy-spawn-seconds",
@@ -67,7 +74,7 @@ def main() -> int:
             enemy_spawn_interval_ticks=spawn_ticks,
             enemy_spawn_cap=arguments.enemy_cap,
         )
-    AirtsApp(simulation).run(arguments.max_frames)
+    AirtsApp(simulation, renderer_backend=arguments.renderer).run(arguments.max_frames)
     if arguments.event_log is not None:
         simulation.events.write_jsonl(arguments.event_log)
     if arguments.save_state is not None:

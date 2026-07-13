@@ -6,7 +6,8 @@ construction, ordered multi-unit factory queues, and continuous production to th
 deterministic Phase 5 economy and combat core. Its verified responsiveness targets include
 1,000 selected ground units executing move, patrol, or defend, plus 1,000 selected scouts
 colliding head-on while the complete 4K software-surface workload renders at 100 frames per
-second. It does not add a language model yet.
+second. The default interactive renderer now targets the same workload at native 4K through an
+explicit OpenGL 3.3 GPU pipeline. It does not add a language model yet.
 Units never retreat automatically because of low health;
 repair-and-return runs only after an explicit player command or automation request.
 
@@ -21,7 +22,8 @@ AIRTS is developed in WSL2 Ubuntu with Python 3.13. From the repository root:
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-The project uses `pygame-ce`; do not install the separate `pygame` package.
+The project uses `pygame-ce` for its window, input, fonts, and explicit software backend, plus
+`moderngl` for the default OpenGL 3.3 renderer. Do not install the separate `pygame` package.
 
 Development plus packaging
 ```bash
@@ -32,6 +34,29 @@ Development plus packaging
 
 ```bash
 .venv/bin/python -m airts
+```
+
+OpenGL is the default and fails with an actionable error if a native OpenGL 3.3 context is not
+available; AIRTS never silently presents the software renderer as GPU rendering. The portable
+software backend remains available explicitly for diagnostics and headless CI:
+
+```bash
+.venv/bin/python -m airts --renderer software
+```
+
+On WSLg, AIRTS prefers native Wayland for OpenGL unless `SDL_VIDEODRIVER` is already set. Working
+`xkb-data` and `libx11-data` installations are required by SDL Wayland. An `XKB context` or missing
+Compose-file startup error means those system data files must be repaired by the machine
+administrator before the OpenGL window can open, for example with
+`sudo apt-get install --reinstall xkb-data libx11-data`, followed by `wsl --shutdown` from Windows.
+If Wayland still reports `Could not get EGL display` and X11 cannot find a matching GLX visual after
+that repair, use native Windows for GPU verification instead of forcing a software OpenGL driver.
+With Python 3.13 installed, PowerShell setup is:
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m airts
 ```
 
 The bundled scenario is a validated 64 × 64 map with opposing forces, support and
@@ -126,17 +151,19 @@ roots in the inner loop. Reverse navigation fields use dense indexed storage, wi
 builder for uniform terrain and weighted Dijkstra for mixed terrain. Large scout formations share
 8 x 8 staging clusters before branching to unique final slots; other unit kinds retain the
 existing 5 x 5 grouping. Visibility unions exact circular sight into per-row bit masks before
-materializing visible cells. The UI caches scaled terrain, per-tick large-scene transforms, unit
-sprites, and representative route transforms, targets 100 FPS, and submits cached unit blits in
-one batch. Large selected groups use a color lift and group outline instead of a second outline and
-full-health bar for every unit; damaged and inspected health bars and normal buildings remain
-visible. Repeated physical corrections are limited to one structured push event per unit per tick.
+materializing visible cells. The default UI uses ModernGL to draw map tiles, grid lines, units,
+buildings, health bars, selection feedback, and representative routes directly into the native
+physical framebuffer. Static terrain is uploaded once; dynamic scene instance buffers are rebuilt
+at most once per simulation tick and submitted in one terrain draw, one entity draw, and one
+bounded line draw. Analytic fragment-shader circles retain smooth native-resolution edges instead
+of scaling low-resolution unit sprites. Large selected groups still use a color lift and group
+outline, and all units remain authoritative and visible.
 
-The runtime keeps a bounded logical Pygame software framebuffer and opens it with
-`SCALED | RESIZABLE`; SDL scales that frame to the physical window and translates mouse input back
-to logical coordinates. This prevents a 4K desktop from multiplying every Python/Pygame draw by
-the physical pixel count. Pygame's Surface drawing remains CPU work; the active SDL backend may
-accelerate presentation, but AIRTS does not require or claim an explicit GPU rendering pipeline.
+Pygame continues to rasterize fonts and infrequent interaction overlays into a cached transparent
+native-resolution texture, which OpenGL composites over the GPU scene. The simulation, command
+planning, input handling, vertex preparation, and font rasterization remain CPU responsibilities;
+OpenGL offloads rasterization and composition, not game logic. The explicit software backend keeps
+the earlier bounded logical `SCALED | RESIZABLE` framebuffer for CI and compatibility.
 
 Every automation follows an explicit lifecycle from proposal and validation through
 active, waiting, paused, blocked, and terminal states. Creating a new patrol or defend
@@ -254,7 +281,7 @@ or entity rendering.
 For a headless graphical startup/render smoke test:
 
 ```bash
-SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
+SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --renderer software --max-frames 3
 ```
 
 The 1,000-unit interaction budget has a dedicated expected-behavior test:
@@ -274,6 +301,18 @@ then measures an end-to-end second containing two 500-scout head-on move command
 authoritative ticks, and 100 complete 3840 x 2160 software-surface draws. All scouts remain
 selected and ordered, collision work must occur, and at least 750 must make progress.
 
+The native-resolution GPU contract and real hardware benchmark are in:
+
+```bash
+.venv/bin/python -m pytest tests/test_opengl_thousand_scout_100fps.py
+```
+
+It verifies native OpenGL/double-buffer flags, WSLg backend selection, complete 1,000-scout scene
+batches, deterministic buffer caching, diagnostic failure semantics, resource release, CPU
+submission cost, actual non-software OpenGL rasterization, and 100 end-to-end 3840 x 2160 frames
+within one second. The standalone verifier lets ModernGL select the native platform context backend,
+including WGL on Windows, and rejects known Linux and Windows software rasterizers.
+
 ## Current limitations and exclusions
 
 Resources are a single integer balance per owner; builders do not gather resources, construction
@@ -290,12 +329,10 @@ interpreted by language. Full fog of war, LM Studio or other AI
 providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
 implemented in this phase.
 
-The 4K 100 FPS acceptance test covers two command submissions, ten authoritative collision-heavy
-simulation ticks, and 100 complete Pygame software-surface draws for 1,000 selected scouts, normal
-buildings, UI panels, and mixed passable terrain. It validates the CPU-side frame construction at
-3840 x 2160, not physical presentation. A real window uses a bounded logical surface and SDL
-scaling, so monitor refresh below 100 Hz, VSync, desktop composition, WSLg, SDL renderer fallback,
-GPU/driver behavior, and machine speed can still prevent 100 displayed refreshes per second.
-`pygame.SCALED` is experimental in pygame-ce, and a backend without a fast renderer may fall back
-to slower scaling. Worst-case 1,000-unit combat and choke-point throughput are also separate
-workloads; the existing dense-choke regression currently covers 500 units.
+The earlier 4K software acceptance test remains a CPU-side regression. The OpenGL contract adds an
+actual non-software context, native 3840 x 2160 framebuffer, GPU completion wait, and rendered-pixel
+check. Even when that work completes at 100 FPS, a monitor below 100 Hz, VSync, desktop composition,
+WSLg, or driver scheduling can prevent 100 distinct displayed refreshes. OpenGL also cannot make
+the deterministic 10 Hz simulation itself sharper or faster; it improves scene rasterization,
+native-resolution edges, and presentation. Worst-case 1,000-unit combat and choke-point throughput
+remain separate workloads; the existing dense-choke regression currently covers 500 units.

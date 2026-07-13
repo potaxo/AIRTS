@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from enum import StrEnum
 from math import hypot
 from pathlib import Path
@@ -49,6 +50,7 @@ from airts.geometry import (
     simplify_freehand,
 )
 from airts.map_model import EntityCategory, EntityKind, Terrain
+from airts.opengl_renderer import OpenGLRenderer, OpenGLRendererError
 from airts.persistence import PersistenceError, load_simulation, save_simulation
 from airts.simulation import Simulation
 from airts.spatial import SpatialKind
@@ -61,9 +63,15 @@ class InputMode(StrEnum):
     FREEHAND = "freehand"
 
 
+class RendererBackend(StrEnum):
+    OPENGL = "opengl"
+    SOFTWARE = "software"
+
+
 class AirtsApp:
     TARGET_RENDER_FPS = 100
     MAX_SELECTED_PATHS = 32
+    OPENGL_DISPLAY_FLAGS = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
     DISPLAY_FLAGS = pygame.RESIZABLE | pygame.SCALED
     MAP_PIXELS = 768
     LEFT_PANEL_WIDTH = 280
@@ -79,8 +87,13 @@ class AirtsApp:
     ENTITY_CLICK_RADIUS = 1.5
     ENEMY_CLICK_RADIUS = 2.5
 
-    def __init__(self, simulation: Simulation) -> None:
+    def __init__(
+        self,
+        simulation: Simulation,
+        renderer_backend: RendererBackend = RendererBackend.OPENGL,
+    ) -> None:
         self.simulation = simulation
+        self.renderer_backend = renderer_backend
         self.mode = InputMode.SELECT
         self.selected_entities: set[str] = set()
         self.selected_points: set[str] = set()
@@ -206,13 +219,38 @@ class AirtsApp:
     def run(self, max_frames: int | None = None) -> None:
         display_initialized = False
         font_initialized = False
+        opengl_renderer: OpenGLRenderer | None = None
         try:
+            if self.renderer_backend is RendererBackend.OPENGL:
+                self._configure_opengl_video_backend()
             pygame.display.init()
             display_initialized = True
             pygame.font.init()
             font_initialized = True
-            screen = pygame.display.set_mode(self.WINDOW_SIZE, self.DISPLAY_FLAGS)
-            self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
+            if self.renderer_backend is RendererBackend.OPENGL:
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
+                pygame.display.gl_set_attribute(
+                    pygame.GL_CONTEXT_PROFILE_MASK,
+                    pygame.GL_CONTEXT_PROFILE_CORE,
+                )
+                pygame.display.gl_set_attribute(pygame.GL_DOUBLEBUFFER, 1)
+                try:
+                    screen = pygame.display.set_mode(
+                        self.WINDOW_SIZE,
+                        self.OPENGL_DISPLAY_FLAGS,
+                    )
+                except pygame.error as error:
+                    raise OpenGLRendererError(
+                        "SDL could not create an OpenGL 3.3 window; verify the GPU driver and "
+                        "WSLg setup, or explicitly use --renderer software for headless CI: "
+                        f"{error}"
+                    ) from error
+                opengl_renderer = OpenGLRenderer.from_active_context()
+                self._scaled_display_active = False
+            else:
+                screen = pygame.display.set_mode(self.WINDOW_SIZE, self.DISPLAY_FLAGS)
+                self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
             self.resize_layout(self.WINDOW_SIZE)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
@@ -237,11 +275,30 @@ class AirtsApp:
                     while accumulator >= Simulation.TICK_SECONDS:
                         self.simulation.advance()
                         accumulator -= Simulation.TICK_SECONDS
-                self._draw(screen)
+                if opengl_renderer is not None:
+                    opengl_renderer.render(
+                        self,
+                        (self.right_panel_rect.right, self.left_panel_rect.bottom),
+                    )
+                else:
+                    self._draw(screen)
                 pygame.display.flip()
                 frames += 1
         finally:
+            if opengl_renderer is not None:
+                opengl_renderer.release()
             self._shutdown_pygame(display_initialized, font_initialized)
+
+    @staticmethod
+    def _configure_opengl_video_backend() -> None:
+        """Prefer native WSLg Wayland for OpenGL unless the user selected an SDL driver."""
+
+        if (
+            "SDL_VIDEODRIVER" not in os.environ
+            and os.environ.get("WSL_DISTRO_NAME")
+            and os.environ.get("WAYLAND_DISPLAY")
+        ):
+            os.environ["SDL_VIDEODRIVER"] = "wayland"
 
     def _shutdown_pygame(self, display_initialized: bool, font_initialized: bool) -> None:
         """Release UI resources in dependency order, including exceptional exits."""
@@ -1019,18 +1076,86 @@ class AirtsApp:
             self._draw_entities(screen)
             self._draw_projectiles(screen)
             screen.set_clip(previous_clip)
-            self._draw_command_bar(screen)
-            self._draw_panel(screen)
-            self._draw_context_panel(screen)
-            if self.settings_open:
-                self._draw_settings_menu(screen)
-            if self.help_open:
-                self._draw_help(screen)
+            self._draw_interface(screen)
         finally:
             self._frame_tile_size = None
             self._frame_map_pixel_size = None
             self._frame_map_origin = None
             self._frame_selected_entities = None
+
+    def _draw_interface(self, screen: pygame.Surface) -> None:
+        self._draw_command_bar(screen)
+        self._draw_panel(screen)
+        self._draw_context_panel(screen)
+        if self.settings_open:
+            self._draw_settings_menu(screen)
+        if self.help_open:
+            self._draw_help(screen)
+
+    def _draw_opengl_overlay(self, screen: pygame.Surface) -> None:
+        """Draw non-base scene feedback and the UI into a GPU-composited texture."""
+
+        self._prune_removed_entities()
+        self._frame_selected_entities = tuple(
+            self.simulation.entities[entity_id] for entity_id in self.selected_entities
+        )
+        try:
+            previous_clip = screen.get_clip()
+            screen.set_clip(self.canvas_rect)
+            self._draw_spatial_input(screen)
+            self._draw_construction(screen)
+            self._draw_assembly_glows(screen)
+            self._draw_projectiles(screen)
+            screen.set_clip(previous_clip)
+            self._draw_interface(screen)
+        finally:
+            self._frame_selected_entities = None
+
+    def _opengl_overlay_key(self) -> tuple[object, ...]:
+        """Identify every state change that requires rebuilding the native UI texture."""
+
+        pointer = (
+            pygame.mouse.get_pos()
+            if self.placement_kind is not None
+            or self.drag_start is not None
+            or self.mode is not InputMode.SELECT
+            else None
+        )
+        return (
+            id(self.simulation),
+            self.simulation.tick,
+            len(self.simulation.command_history),
+            round(self.fps),
+            self.mode,
+            self.paused,
+            self.notice,
+            frozenset(self.selected_entities),
+            frozenset(self.selected_points),
+            frozenset(self.selected_routes),
+            frozenset(self.selected_regions),
+            repr(self.active_target),
+            self.active_reference_id,
+            self.editing_reference_id,
+            self.selected_automation_id,
+            self.inspected_entity_id,
+            self.inspected_kind,
+            self.naming_reference_id,
+            self.naming_buffer,
+            tuple(self.line_points),
+            tuple(self.freehand_points),
+            self.drag_start,
+            self.camera_offset,
+            self.automation_scroll,
+            self.settings_open,
+            self.help_open,
+            self.placement_kind,
+            tuple(self.production_sequence),
+            tuple(self.left_panel_rect),
+            tuple(self.right_panel_rect),
+            tuple(self.canvas_rect),
+            tuple(self.command_bar_rect),
+            pointer,
+        )
 
     def _prune_removed_entities(self) -> None:
         existing = self.simulation.entities.keys()

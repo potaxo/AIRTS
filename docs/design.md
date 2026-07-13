@@ -1552,14 +1552,29 @@ render pass. The frontend initializes only the Pygame subsystems it uses and rel
 graphics objects, pending events, fonts, the display, and global Pygame state in a deterministic
 order on both normal and exceptional exits.
 
-The initial renderer remains a Pygame software-Surface pipeline. Its runtime display is created as
-a bounded logical `WINDOW_SIZE` framebuffer with `SCALED | RESIZABLE`; SDL scales that logical
-frame to the physical window and maps pointer input back to logical coordinates. A 4K desktop must
-therefore not cause AIRTS to allocate and repaint a physical 3840 x 2160 runtime framebuffer on
-every frame. SDL may accelerate final presentation when the active backend supports it, but this
-architecture neither requires nor promises an explicit GPU renderer. Physical refresh rate,
-VSync, WSLg/desktop composition, driver behavior, and SDL fallback remain outside the deterministic
-simulation and CPU-side rendering contract.
+The default renderer uses a Pygame-created, double-buffered OpenGL 3.3 core window and ModernGL.
+It renders directly to the physical framebuffer size: a 3840 x 2160 window therefore receives
+native 4K terrain, analytic antialiased unit circles, buildings, health feedback, selection state,
+and bounded route lines instead of an enlarged low-resolution image. Terrain and grid instances
+are uploaded only when the map transform changes. Entity instances and route vertices are rebuilt
+at most once per simulation tick or relevant UI change and remain resident for intervening render
+frames. The normal scene is submitted as one instanced terrain draw, one instanced entity draw, and
+one bounded line draw.
+
+Pygame font output and infrequent interaction feedback are rasterized into a cached transparent
+native-resolution texture and composited by OpenGL. This does not make the application "GPU only":
+the simulation, commands, input, frame-data preparation, and font rasterization remain CPU work,
+while the GPU owns scene rasterization, antialiasing, and final composition. The legacy bounded
+logical `SCALED | RESIZABLE` software framebuffer remains an explicit `--renderer software` mode
+for headless CI and compatibility. OpenGL startup failures are diagnostic and never silently fall
+back, because doing so would make performance evidence and renderer identity untrustworthy.
+
+On WSLg, the application prefers native Wayland for OpenGL unless the user explicitly sets
+`SDL_VIDEODRIVER`. SDL Wayland requires intact XKB rules from `xkb-data` and Compose locale data
+from `libx11-data`; package metadata alone is insufficient if their files have been removed.
+Context creation requires OpenGL 3.3 or newer. Physical refresh rate, VSync, WSLg/desktop
+composition, driver behavior, and monitor timing remain outside the deterministic simulation
+contract.
 
 Entity hit testing uses the visible occupied footprint for buildings rather than only their center
 point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
@@ -1569,11 +1584,11 @@ unit color and one group outline, omits redundant full-health bars, and draws at
 sampled authoritative routes. Damaged-unit and inspected-unit health bars remain visible. An
 inspected route is retained in the representative set. This is visual level of detail only: every
 selected unit remains selected, simulated, collision-enabled, visible, and owned by its command.
-The static terrain scale is cached until layout changes. For large selections, unit and building
-screen transforms, health-bar geometry, group bounds, and representative route transforms are
-rebuilt at most once per simulation tick or relevant UI-state change; cached unit sprites are
-submitted through a batched blit call on intervening render frames. Normal buildings and damaged
-or inspected health feedback remain part of every complete frame.
+For large selections, unit and building screen transforms, health-bar geometry, group bounds, and
+representative route transforms are rebuilt at most once per simulation tick or relevant UI-state
+change. Normal buildings and damaged or inspected health feedback remain part of every complete
+frame. The explicit software backend retains its scaled-terrain, cached-sprite, and batched-blit
+optimizations as an independent regression and compatibility path.
 
 It should eventually display:
 
@@ -2375,10 +2390,54 @@ static building occupancy, exact bit-mask visibility unions, and larger scout-on
 clusters. These are data-layout and redundant-work reductions; entity movement, collision,
 visibility, selection, buildings, UI panels, and command ownership remain authoritative.
 
-The 3840 x 2160 Surface test verifies CPU-side full-frame construction and is suitable for
+The 3840 x 2160 Surface test verifies CPU-side full-frame construction and remains suitable for
 headless regression testing. It cannot prove that a physical 4K monitor presents 100 distinct
-refreshes per second. The real runtime deliberately renders a smaller logical Surface and asks SDL
-to scale it; backend acceleration is environment-dependent, and `pygame.SCALED` may report that no
-fast renderer is available. An explicit OpenGL renderer can be reconsidered if a future measured
-graphics workload exceeds this contract, but it is not required for this milestone. Worst-case
+refreshes per second. The explicit software runtime still renders a smaller logical Surface and
+asks SDL to scale it; backend acceleration is environment-dependent, and `pygame.SCALED` may report
+that no fast renderer is available. Section 40 adds the separate native OpenGL contract. Worst-case
 1,000-unit combat and dense-choke throughput remain separate workloads.
+
+---
+
+# 40. Native-4K OpenGL Rendering Milestone
+
+The interactive runtime defaults to an explicit OpenGL 3.3 renderer implemented with ModernGL.
+The renderer must use a native physical framebuffer with `OPENGL | DOUBLEBUF | RESIZABLE`; it must
+not use `SCALED` or silently substitute the software backend. OpenGL or dependency failure is an
+actionable startup error. `--renderer software` is the only supported way to request the existing
+software path.
+
+The GPU scene consists of native-pixel instanced rectangles and analytic antialiased circles.
+Every terrain cell and grid line remains present. Every unit and building remains visible, and
+selection tint, group outline, damaged/inspected health bars, and one to 32 representative routes
+remain consistent with the software renderer. Static terrain data is uploaded once per transform;
+dynamic instance and line buffers update at simulation-tick cadence rather than render cadence.
+The GPU performs rasterization and composition. The CPU still performs authoritative simulation,
+collision, commands, input, buffer preparation, and font rasterization.
+
+The existing Pygame interaction UI is preserved as a cached transparent native-resolution texture.
+Spatial editing feedback, construction previews, gathering glow, projectiles, panels, settings, and
+help are rebuilt only when their authoritative or interaction state changes and are then composed
+by OpenGL. This hybrid keeps the complete interface available without uploading or redrawing the
+1,000-unit base scene in software.
+
+`tests/test_opengl_thousand_scout_100fps.py` is the executable contract. It verifies:
+
+* native 3840 x 2160 framebuffer coordinates and a 1.0 pixel scale;
+* OpenGL, double buffering, resizing, and absence of `SCALED` on the default backend;
+* WSLg Wayland preference without overriding an explicit SDL driver;
+* all 4,800 terrain cells, 1,000 scouts, four buildings, selection, and bounded routes;
+* one cached terrain draw, one entity draw, one bounded line draw, and one UI composition draw;
+* diagnostic context failure with no hidden software fallback;
+* deterministic buffer reuse and explicit GPU-resource release;
+* two head-on 500-scout commands, ten collision ticks, 100 native-4K GPU frames, a non-background
+  rendered-pixel check, and a final GPU completion wait within one second;
+* rejection of llvmpipe, softpipe, SwiftShader, or another software rasterizer as hardware proof.
+
+The dependency is `moderngl>=5.12,<6`, which provides OpenGL 3.3 core access and instanced buffer
+submission on Python 3.13. A passing offscreen hardware benchmark proves GPU rasterization and the
+100 FPS work budget on the tested adapter. The verifier uses ModernGL's native platform backend,
+including WGL on Windows, instead of hard-coding EGL; known Mesa software rasterizers, SwiftShader,
+GDI Generic, and the Microsoft Basic Render Driver are rejected as hardware evidence. It still
+cannot prove that a compositor and physical monitor display 100 distinct refreshes, and it does
+not change the simulation's fixed 10 Hz rate.
