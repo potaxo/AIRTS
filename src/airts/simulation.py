@@ -2561,10 +2561,16 @@ class Simulation:
             self._skip_crowded_waypoints(entity)
             target = entity.path[0]
             maximum_step = entity.speed * self.TICK_SECONDS
+            local_query_radius = max(
+                NEIGHBOR_RADIUS,
+                maximum_step + collision_radius(entity.kind) + 0.5,
+            )
+            local_neighbor_ids = unit_index.nearby(entity.position, local_query_radius)
             neighbors = tuple(
                 self.entities[other_id].position
-                for other_id in unit_index.nearby(entity.position, NEIGHBOR_RADIUS)
+                for other_id in local_neighbor_ids
                 if other_id != entity_id
+                and entity.position.distance_to(self.entities[other_id].position) <= NEIGHBOR_RADIUS
             )
             next_position: Point | None
             direct_distance = entity.position.distance_to(target)
@@ -2579,15 +2585,15 @@ class Simulation:
                 )
             )
             direct_position = self._clamp_to_collider_contact(
-                entity, desired_direct_position, unit_index
+                entity, desired_direct_position, local_neighbor_ids
             )
             direct_was_clamped = direct_position.distance_to(desired_direct_position) > 1e-9
             push_stationary_blocker = direct_was_clamped and self._contact_has_stationary_blocker(
-                entity, desired_direct_position, unit_index
+                entity, desired_direct_position, local_neighbor_ids
             )
             if (
                 not direct_was_clamped or push_stationary_blocker
-            ) and self._local_move_is_available(entity, direct_position, unit_index):
+            ) and self._local_move_is_available(entity, direct_position, local_neighbor_ids):
                 next_position = direct_position
             else:
                 if len(entity.path) == 1 and self._replan_contested_final_approach(entity, target):
@@ -2606,8 +2612,10 @@ class Simulation:
                         and raw_candidate.distance_to(desired_direct_position) <= 1e-9
                     ):
                         continue
-                    candidate = self._clamp_to_collider_contact(entity, raw_candidate, unit_index)
-                    if self._local_move_is_available(entity, candidate, unit_index):
+                    candidate = self._clamp_to_collider_contact(
+                        entity, raw_candidate, local_neighbor_ids
+                    )
+                    if self._local_move_is_available(entity, candidate, local_neighbor_ids):
                         next_position = candidate
                         break
             if next_position is None:
@@ -2821,7 +2829,7 @@ class Simulation:
         return any(self.game_map.is_cell_passable(candidate) for candidate in lateral_cells)
 
     def _local_move_is_available(
-        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
     ) -> bool:
         if not self.game_map.is_passable(candidate):
             return False
@@ -2834,11 +2842,11 @@ class Simulation:
             other_id == entity.entity_id
             or candidate.distance_to(self.entities[other_id].position)
             >= collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind) - 1e-6
-            for other_id in unit_index.nearby(candidate, collision_radius(entity.kind) + 0.5)
+            for other_id in local_neighbor_ids
         )
 
     def _clamp_to_collider_contact(
-        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
     ) -> Point:
         direction_x = candidate.x - entity.position.x
         direction_y = candidate.y - entity.position.y
@@ -2846,8 +2854,7 @@ class Simulation:
         if squared_length <= 1e-12:
             return candidate
         maximum_fraction = 1.0
-        query_radius = squared_length**0.5 + collision_radius(entity.kind) + 0.5
-        for other_id in unit_index.nearby(entity.position, query_radius):
+        for other_id in local_neighbor_ids:
             if other_id == entity.entity_id:
                 continue
             other = self.entities[other_id]
@@ -2875,14 +2882,14 @@ class Simulation:
         )
 
     def _contact_has_stationary_blocker(
-        self, entity: Entity, candidate: Point, unit_index: SpatialIndex
+        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
     ) -> bool:
         return any(
             other_id != entity.entity_id
             and not self.entities[other_id].path
             and candidate.distance_to(self.entities[other_id].position)
             < collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind)
-            for other_id in unit_index.nearby(candidate, collision_radius(entity.kind) + 0.5)
+            for other_id in local_neighbor_ids
         )
 
     def _resolve_unit_collisions(self, unit_index: SpatialIndex) -> None:

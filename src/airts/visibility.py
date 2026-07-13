@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from math import ceil
+from math import ceil, floor, sqrt
 
 from airts.entities import Entity
 from airts.geometry import Point
@@ -35,18 +35,36 @@ class PlayerVisibility:
     def update(self, sources: tuple[tuple[Point, float], ...], tick: int) -> tuple[int, int, int]:
         previous_visible = self.visible
         current: set[Cell] = set()
+        row_intervals: list[list[tuple[int, int]]] = [[] for _ in range(self.height)]
         for position, radius in sources:
             squared_radius = radius * radius
-            minimum_x = max(0, int(position.x - radius))
-            maximum_x = min(self.width - 1, ceil(position.x + radius))
             minimum_y = max(0, int(position.y - radius))
             maximum_y = min(self.height - 1, ceil(position.y + radius))
             for y in range(minimum_y, maximum_y + 1):
-                for x in range(minimum_x, maximum_x + 1):
-                    offset_x = position.x - (x + 0.5)
-                    offset_y = position.y - (y + 0.5)
-                    if offset_x * offset_x + offset_y * offset_y <= squared_radius:
-                        current.add((x, y))
+                offset_y = position.y - (y + 0.5)
+                remaining = squared_radius - offset_y * offset_y
+                if remaining < 0:
+                    continue
+                horizontal_radius = sqrt(remaining)
+                minimum_x = max(0, ceil(position.x - horizontal_radius - 0.5))
+                maximum_x = min(
+                    self.width - 1,
+                    floor(position.x + horizontal_radius - 0.5),
+                )
+                if minimum_x <= maximum_x:
+                    row_intervals[y].append((minimum_x, maximum_x))
+        for y, intervals in enumerate(row_intervals):
+            if not intervals:
+                continue
+            intervals.sort()
+            start, end = intervals[0]
+            for next_start, next_end in intervals[1:]:
+                if next_start <= end + 1:
+                    end = max(end, next_end)
+                    continue
+                current.update((x, y) for x in range(start, end + 1))
+                start, end = next_start, next_end
+            current.update((x, y) for x in range(start, end + 1))
         self.visible = current
         newly_visible = current.difference(previous_visible)
         no_longer_visible = previous_visible.difference(current)

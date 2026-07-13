@@ -3,7 +3,9 @@
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
 automation. The current milestone adds a responsive two-sided RTS interface, builder
 construction, ordered multi-unit factory queues, and continuous production to the
-deterministic Phase 5 economy and combat core. It does not add a language model yet.
+deterministic Phase 5 economy and combat core. Its verified responsiveness target is
+1,000 selected ground units executing move, patrol, or defend while the frontend renders
+at 100 frames per second. It does not add a language model yet.
 Units never retreat automatically because of low health;
 repair-and-return runs only after an explicit player command or automation request.
 
@@ -116,9 +118,14 @@ persistence, replay, event, and spatial-index modules are independently testable
 converts user input into the same tagged commands used by tests and future control
 sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
 Local steering, collision broadphase, and nearby targeting use deterministic spatial buckets
-instead of global entity-pair scans. The UI caches static terrain and draws movement paths only
-for selected or inspected units. Repeated physical corrections are limited to one structured
-push event per unit per tick.
+instead of global entity-pair scans; each movement attempt reuses one local-neighbor query for
+steering and collision safety. Reverse navigation fields use dense indexed storage, with a
+layered builder for uniform terrain and weighted Dijkstra for mixed terrain. Visibility unions
+exact per-row sight intervals before materializing visible cells. The UI caches static terrain,
+targets 100 FPS, and bounds large-selection path feedback to 32 deterministic representative
+routes. Large selected groups use a color lift and group outline instead of a second outline and
+full-health bar for every unit; damaged and inspected health bars remain visible. Repeated
+physical corrections are limited to one structured push event per unit per tick.
 
 Every automation follows an explicit lifecycle from proposal and validation through
 active, waiting, paused, blocked, and terminal states. Creating a new patrol or defend
@@ -239,6 +246,12 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
+The 1,000-unit interaction budget has a dedicated expected-behavior test:
+
+```bash
+.venv/bin/python -m pytest tests/test_thousand_unit_100fps.py
+```
+
 ## Current limitations and exclusions
 
 Resources are a single integer balance per owner; builders do not gather resources, construction
@@ -254,3 +267,10 @@ per-vertex handles. Multi-region selections are grounded and inspectable but are
 interpreted by language. Full fog of war, LM Studio or other AI
 providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
 implemented in this phase.
+
+The 100 FPS acceptance test covers command submission, ten authoritative simulation ticks, and
+100 complete Pygame software-surface draws for 1,000 selected units on mixed passable terrain.
+It does not guarantee that every display presents 100 physical refreshes per second: desktop
+composition, VSync, refresh rate, GPU/driver behavior, and machine speed remain outside the
+deterministic simulation contract. Worst-case 1,000-unit combat and choke-point throughput are
+also separate workloads; the existing dense-choke regression currently covers 500 units.

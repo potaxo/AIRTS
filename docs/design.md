@@ -338,7 +338,7 @@ The initial prototype will not include:
 * complex animation;
 * physics-based simulation;
 * very large maps;
-* hundreds of units;
+* unbounded or continent-scale armies beyond the verified 1,000-unit interaction target;
 * many factions;
 * advanced diplomacy;
 * procedural campaign generation;
@@ -1147,6 +1147,10 @@ routing service. It reuses bounded navigation fields for shared destinations and
 route work through fair per-controller and global per-tick budgets, so a large task cannot monopolize
 a simulation tick or permanently starve another task. Route validation proves group and route
 connectivity with shared fields instead of repeating a full-map search for every formation slot.
+Navigation fields store costs, next links, and goal ownership in dense integer-indexed arrays.
+Uniform-cost passable terrain uses deterministic layer expansion without a heap; mixed terrain
+uses deterministic weighted Dijkstra with the same goal and next-cell tie rules. These are
+representation and construction optimizations, not approximations of terrain cost or reachability.
 Large direct-move formations may cluster paths through nearby staging anchors before branching to
 unique final slots. Replans whose costs depend on current unit positions remain uncached because
 their obstacle penalties change with the formation.
@@ -1155,7 +1159,10 @@ controllers periodically recalculate delayed routes through or around changing f
 per-tick path budgets preserving responsiveness during mass movement and focus-fire commands.
 Dense movement must retain throughput rather than pausing whole formations. Collision broadphase
 pairs are generated directly from spatial buckets, reused across solver passes where safe, and
-blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
+each unit's deterministic steering neighborhood is reused by the collision-clamp, local-clearance,
+and stationary-blocker checks for that movement attempt. Visibility retains exact circular sight
+geometry while merging overlapping horizontal intervals before materializing visible cells.
+Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
 without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
 because of worker scheduling.
@@ -1512,7 +1519,7 @@ Provisional values:
 
 ```text
 Simulation: 10 ticks per second
-Rendering:  up to 60 frames per second
+Rendering:  up to 100 frames per second
 ```
 
 The game should support:
@@ -1542,6 +1549,11 @@ order on both normal and exceptional exits.
 Entity hit testing uses the visible occupied footprint for buildings rather than only their center
 point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
 interaction perimeter so selecting a building does not trigger one full search per attacker.
+When more than 128 units are selected, the renderer preserves selection feedback with a brighter
+unit color and one group outline, omits redundant full-health bars, and draws at most 32 evenly
+sampled authoritative routes. Damaged-unit and inspected-unit health bars remain visible. An
+inspected route is retained in the representative set. This is visual level of detail only: every
+selected unit remains selected, simulated, collision-enabled, visible, and owned by its command.
 
 It should eventually display:
 
@@ -2279,3 +2291,39 @@ group command is visible before it is submitted.
 This milestone does not add builder resource gathering, construction refunds,
 command-center construction, technology prerequisites, or multiple factories contributing to one
 production automation.
+
+---
+
+# 38. Thousand-Unit 100 FPS Interaction Milestone
+
+The frontend targets 100 FPS while the authoritative simulation remains fixed at 10 ticks per
+second. The required interaction workload contains 1,000 selected player light tanks on an
+80 x 60 map with grass, road, and forest terrain. Move, patrol, and defend commands must each be
+accepted for the complete selection; the UI must not deselect, hide, suspend, or omit simulation
+work for any unit to meet the budget.
+
+`tests/test_thousand_unit_100fps.py` is the executable expected-behavior contract. For each command
+it measures one interval containing command submission, 100 complete Pygame software-surface draw
+passes, and ten authoritative simulation advances. The interval must complete within one second.
+Afterward, all 1,000 units must still belong to the order, the simulation must have advanced ten
+ticks, and at least 100 units must have changed position. Large-selection route feedback must remain
+visible through one to 32 deterministic representative paths. Timing setup and the initial warm-up
+draw occur outside the measured interval; command planning, movement, automation work, visibility,
+collision, panel drawing, and entity drawing occur inside it.
+
+The milestone uses algorithmic and data-layout changes within the existing Python process:
+
+* dense reverse-navigation fields with uniform and weighted builders;
+* exact scanline interval unions for visibility;
+* one reused spatial-neighbor result per unit movement attempt;
+* cached per-frame map transforms and bounded large-selection visual detail.
+
+The simulation remains single-threaded. Rust or worker threads may be reconsidered only after a
+measured workload exceeds this architecture's budget; neither is required for this target, and
+nondeterministic worker scheduling must never alter authoritative results.
+
+This acceptance contract measures portable core GUI work on a Pygame software surface. Physical
+display presentation also depends on CPU speed, refresh rate, VSync, desktop composition, and
+GPU/driver behavior, so it is not a cross-machine guarantee of 100 displayed refreshes per second.
+The milestone covers move, patrol, and defend responsiveness, not worst-case 1,000-unit combat or
+choke throughput; dense choke behavior has its own 500-unit regression.
