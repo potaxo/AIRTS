@@ -176,5 +176,5 @@ def test_thousand_selected_unit_paths_are_visible_but_bounded() -> None:
     assert 1 <= len(route_calls) <= MAXIMUM_REPRESENTATIVE_PATHS
 
 
-def test_application_render_loop_targets_100fps() -> None:
-    assert AirtsApp.TARGET_RENDER_FPS == TARGET_FPS
+def test_application_render_loop_is_not_clock_capped_at_100fps() -> None:
+    assert AirtsApp.FRAME_RATE_LIMIT == 0

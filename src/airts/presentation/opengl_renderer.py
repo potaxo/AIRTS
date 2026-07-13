@@ -17,7 +17,7 @@ from airts.world.map_model import EntityCategory, EntityKind, Terrain
 type Color = tuple[int, int, int]
 type FloatColor = tuple[float, float, float, float]
 
-SHAPE_FLOATS = 14
+SHAPE_FLOATS = 16
 LINE_FLOATS = 6
 
 _GPU_RESOURCE_ATTRIBUTES = (
@@ -56,6 +56,12 @@ _ENTITY_COLORS: dict[EntityKind, Color] = {
     EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
 }
 
+_PROJECTILE_COLORS: dict[EntityKind, Color] = {
+    EntityKind.SCOUT: (120, 225, 255),
+    EntityKind.LIGHT_TANK: (255, 232, 105),
+    EntityKind.HEAVY_TANK: (255, 135, 70),
+}
+
 
 class OpenGLRenderState(Protocol):
     """The UI-owned state needed to build a GPU frame without importing Pygame."""
@@ -64,6 +70,7 @@ class OpenGLRenderState(Protocol):
     simulation: Simulation
     selected_entities: set[str]
     inspected_entity_id: str | None
+    render_alpha: float
 
     @property
     def tile_size(self) -> float: ...
@@ -72,6 +79,10 @@ class OpenGLRenderState(Protocol):
     def map_origin(self) -> tuple[int, int]: ...
 
     def _representative_path_entity_ids(self) -> tuple[str, ...]: ...
+
+    def previous_entity_position(self, entity_id: str) -> Point: ...
+
+    def previous_projectile_position(self, projectile_id: str) -> Point: ...
 
     @staticmethod
     def _simplified_path(entity: Entity) -> tuple[Point, ...]: ...
@@ -175,7 +186,7 @@ class OpenGLFrameBuilder:
         frame_key: tuple[object, ...] = (
             id(simulation),
             simulation.tick,
-            len(simulation.command_history),
+            simulation.command_count,
             framebuffer_size,
             origin,
             tile_size,
@@ -190,6 +201,16 @@ class OpenGLFrameBuilder:
             self._build_entities(app, origin, tile_size)
         )
         line_buffer, line_vertex_count, path_count = self._build_paths(app, origin, tile_size)
+        (
+            projectile_shape_buffer,
+            projectile_shape_count,
+            projectile_line_buffer,
+            projectile_line_vertex_count,
+        ) = self._build_projectiles(app, origin, tile_size)
+        shape_buffer += projectile_shape_buffer
+        shape_count += projectile_shape_count
+        line_buffer += projectile_line_buffer
+        line_vertex_count += projectile_line_vertex_count
         self._frame_key = frame_key
         self._frame = OpenGLFrame(
             framebuffer_size=framebuffer_size,
@@ -269,6 +290,7 @@ class OpenGLFrameBuilder:
         building_count = 0
         selected_unit_count = 0
         selected_bounds: tuple[float, float, float, float] | None = None
+        previous_selected_bounds: tuple[float, float, float, float] | None = None
 
         for entity_id, entity in simulation.entities.items():
             selected = entity_id in selected_entities
@@ -287,6 +309,7 @@ class OpenGLFrameBuilder:
                     origin_x + (entity.position.x + width / 2) * tile_size,
                     origin_y + (entity.position.y + height / 2) * tile_size,
                 )
+                previous_center = center
                 _append_shape(
                     values,
                     center=center,
@@ -308,13 +331,19 @@ class OpenGLFrameBuilder:
                     )
                 building_count += 1
             else:
+                previous_position = app.previous_entity_position(entity_id)
                 center = (
                     origin_x + entity.position.x * tile_size,
                     origin_y + entity.position.y * tile_size,
                 )
+                previous_center = (
+                    origin_x + previous_position.x * tile_size,
+                    origin_y + previous_position.y * tile_size,
+                )
                 _append_shape(
                     values,
                     center=center,
+                    previous_center=previous_center,
                     half_size=(unit_radius, unit_radius),
                     color=_float_color(color),
                     circle=True,
@@ -325,6 +354,7 @@ class OpenGLFrameBuilder:
                     _append_shape(
                         values,
                         center=center,
+                        previous_center=previous_center,
                         half_size=(unit_radius + 3, unit_radius + 3),
                         color=(0.0, 0.0, 0.0, 0.0),
                         circle=True,
@@ -341,6 +371,16 @@ class OpenGLFrameBuilder:
                         center[1] + unit_radius,
                     )
                     selected_bounds = _union_bounds(selected_bounds, bounds)
+                    previous_bounds = (
+                        previous_center[0] - unit_radius,
+                        previous_center[1] - unit_radius,
+                        previous_center[0] + unit_radius,
+                        previous_center[1] + unit_radius,
+                    )
+                    previous_selected_bounds = _union_bounds(
+                        previous_selected_bounds,
+                        previous_bounds,
+                    )
 
             if (
                 show_full_health_bars
@@ -353,6 +393,7 @@ class OpenGLFrameBuilder:
                 _append_shape(
                     values,
                     center=(center[0], health_y),
+                    previous_center=(previous_center[0], previous_center[1] - 10.5),
                     half_size=(maximum_width / 2, 1.5),
                     color=_float_color((70, 35, 35)),
                     circle=False,
@@ -360,6 +401,10 @@ class OpenGLFrameBuilder:
                 _append_shape(
                     values,
                     center=(center[0] - (maximum_width - health_width) / 2, health_y),
+                    previous_center=(
+                        previous_center[0] - (maximum_width - health_width) / 2,
+                        previous_center[1] - 10.5,
+                    ),
                     half_size=(health_width / 2, 1.5),
                     color=_float_color((74, 218, 111)),
                     circle=False,
@@ -367,9 +412,18 @@ class OpenGLFrameBuilder:
 
         if large_selection and selected_bounds is not None:
             left, top, right, bottom = selected_bounds
+            previous_group_center = (
+                (
+                    (previous_selected_bounds[0] + previous_selected_bounds[2]) / 2,
+                    (previous_selected_bounds[1] + previous_selected_bounds[3]) / 2,
+                )
+                if previous_selected_bounds is not None
+                else ((left + right) / 2, (top + bottom) / 2)
+            )
             _append_shape(
                 values,
                 center=((left + right) / 2, (top + bottom) / 2),
+                previous_center=previous_group_center,
                 half_size=((right - left) / 2 + 3, (bottom - top) / 2 + 3),
                 color=(0.0, 0.0, 0.0, 0.0),
                 circle=False,
@@ -387,11 +441,21 @@ class OpenGLFrameBuilder:
         )
         if inspected is not None and interaction_range > 0 and len(selected_entities) <= 1:
             range_radius = interaction_range * tile_size
+            previous_position = app.previous_entity_position(inspected.entity_id)
+            previous_selection_position = (
+                previous_position
+                if inspected.category is EntityCategory.UNIT
+                else inspected.selection_position
+            )
             _append_shape(
                 values,
                 center=(
                     origin_x + inspected.selection_position.x * tile_size,
                     origin_y + inspected.selection_position.y * tile_size,
+                ),
+                previous_center=(
+                    origin_x + previous_selection_position.x * tile_size,
+                    origin_y + previous_selection_position.y * tile_size,
                 ),
                 half_size=(range_radius, range_radius),
                 color=(0.0, 0.0, 0.0, 0.0),
@@ -440,6 +504,87 @@ class OpenGLFrameBuilder:
                 )
             path_count += 1
         return values.tobytes(), len(values) // LINE_FLOATS, path_count
+
+    @staticmethod
+    def _build_projectiles(
+        app: OpenGLRenderState,
+        origin: tuple[int, int],
+        tile_size: float,
+    ) -> tuple[bytes, int, bytes, int]:
+        """Pack projectile feedback into the normal GPU shape and line batches."""
+
+        shapes = array("f")
+        lines = array("f")
+        simulation = app.simulation
+        origin_x, origin_y = origin
+
+        def append_trajectory(points: tuple[Point, ...] | list[Point], color: FloatColor) -> None:
+            for first, second in zip(points, points[1:], strict=False):
+                _append_line_vertex(
+                    lines,
+                    origin_x + first.x * tile_size,
+                    origin_y + first.y * tile_size,
+                    color,
+                )
+                _append_line_vertex(
+                    lines,
+                    origin_x + second.x * tile_size,
+                    origin_y + second.y * tile_size,
+                    color,
+                )
+
+        for trace in simulation.projectile_traces:
+            append_trajectory(trace.points, _float_color(_PROJECTILE_COLORS[trace.weapon_kind]))
+        for projectile in simulation.projectiles.values():
+            raw_color = _PROJECTILE_COLORS[projectile.weapon_kind]
+            color = _float_color(raw_color)
+            append_trajectory(projectile.trajectory, color)
+            destination_color = _float_color(
+                (raw_color[0] // 2, raw_color[1] // 2, raw_color[2] // 2)
+            )
+            _append_line_vertex(
+                lines,
+                origin_x + projectile.position.x * tile_size,
+                origin_y + projectile.position.y * tile_size,
+                destination_color,
+            )
+            _append_line_vertex(
+                lines,
+                origin_x + projectile.destination.x * tile_size,
+                origin_y + projectile.destination.y * tile_size,
+                destination_color,
+            )
+            center = (
+                origin_x + projectile.position.x * tile_size,
+                origin_y + projectile.position.y * tile_size,
+            )
+            previous_position = app.previous_projectile_position(projectile.projectile_id)
+            previous_center = (
+                origin_x + previous_position.x * tile_size,
+                origin_y + previous_position.y * tile_size,
+            )
+            _append_shape(
+                shapes,
+                center=center,
+                previous_center=previous_center,
+                half_size=(3.0, 3.0),
+                color=_float_color((255, 255, 255)),
+                circle=True,
+            )
+            _append_shape(
+                shapes,
+                center=center,
+                previous_center=previous_center,
+                half_size=(2.0, 2.0),
+                color=color,
+                circle=True,
+            )
+        return (
+            shapes.tobytes(),
+            len(shapes) // SHAPE_FLOATS,
+            lines.tobytes(),
+            len(lines) // LINE_FLOATS,
+        )
 
 
 class OpenGLRendererError(RuntimeError):
@@ -512,9 +657,10 @@ class OpenGLRenderer:
                     ),
                 ).tobytes()
             )
-            instance_format = "2f 2f 4f 2f 4f /i"
+            instance_format = "2f 2f 2f 4f 2f 4f /i"
             instance_attributes = (
                 "in_center",
+                "in_previous_center",
                 "in_half_size",
                 "in_color",
                 "in_shape_outline",
@@ -609,6 +755,10 @@ class OpenGLRenderer:
             self._context.viewport = (0, 0, width, height)
             self._context.clear(18 / 255, 22 / 255, 28 / 255, 1.0)
             self._shape_program["viewport_size"].value = framebuffer_size
+            self._shape_program["interpolation_alpha"].value = max(
+                0.0,
+                min(1.0, app.render_alpha),
+            )
             self._line_program["viewport_size"].value = framebuffer_size
             self._upload_frame(frame)
             if frame.terrain_shape_count:
@@ -732,13 +882,17 @@ def _append_shape(
     half_size: tuple[float, float],
     color: FloatColor,
     circle: bool,
+    previous_center: tuple[float, float] | None = None,
     outline_width: float = 0.0,
     outline_color: FloatColor = (0.0, 0.0, 0.0, 0.0),
 ) -> None:
+    previous = center if previous_center is None else previous_center
     values.extend(
         (
             center[0],
             center[1],
+            previous[0],
+            previous[1],
             half_size[0],
             half_size[1],
             *color,
@@ -775,8 +929,10 @@ def _union_bounds(
 _SHAPE_VERTEX_SHADER = """
 #version 330
 uniform vec2 viewport_size;
+uniform float interpolation_alpha;
 in vec2 in_corner;
 in vec2 in_center;
+in vec2 in_previous_center;
 in vec2 in_half_size;
 in vec4 in_color;
 in vec2 in_shape_outline;
@@ -789,7 +945,8 @@ flat out float outline_width;
 flat out vec4 outline_color;
 
 void main() {
-    vec2 pixel_position = in_center + in_corner * in_half_size;
+    vec2 center = mix(in_previous_center, in_center, interpolation_alpha);
+    vec2 pixel_position = center + in_corner * in_half_size;
     vec2 normalized = vec2(
         pixel_position.x * 2.0 / viewport_size.x - 1.0,
         1.0 - pixel_position.y * 2.0 / viewport_size.y

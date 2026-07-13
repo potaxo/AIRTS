@@ -6,8 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pygame
+import pytest
 
-from airts.app import AirtsApp
+from airts.app import AirtsApp, PresentationProfiler
 from airts.automations import (
     AutomationStatus,
     ConstructionParameters,
@@ -488,6 +489,44 @@ def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
     pygame.font.quit()
 
 
+def test_settings_menu_requests_a_higher_explicit_resolution() -> None:
+    app = AirtsApp(_simulation())
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface((1280, 720))
+    app.resize_layout(surface.get_size())
+    app.settings_open = True
+    app._draw(surface)
+    buttons = {action: rectangle for rectangle, action in app._settings_buttons}
+
+    app._handle_mouse_down(1, buttons["resolution_higher"].center)
+
+    assert app._pending_window_size == app.WINDOW_SIZE
+    assert not app.settings_open
+    assert "1428 x 872" in app.notice
+    pygame.font.quit()
+
+
+def test_presentation_profiler_reports_present_wait_and_frame_pacing() -> None:
+    profiler = PresentationProfiler()
+    metrics = profiler.metrics
+    for frame in range(100):
+        metrics = profiler.record(
+            presented_at=frame * 0.005,
+            frame_ms=5.0,
+            render_ms=1.5,
+            present_ms=2.5,
+            simulation_ms=0.4 if frame % 10 == 0 else 0.0,
+        )
+
+    assert metrics.fps == pytest.approx(200.0)
+    assert metrics.frame_p95_ms == 5.0
+    assert metrics.render_p95_ms == 1.5
+    assert metrics.present_p95_ms == 2.5
+    assert metrics.simulation_p95_ms == 0.4
+
+
 def test_multiple_builders_share_one_job_and_reduce_construction_time() -> None:
     single = _simulation()
     single_result = single.execute(
@@ -579,7 +618,7 @@ def test_info_panel_displays_current_fps() -> None:
         app._draw_panel(surface)
 
     rendered = [call.args[1] for call in small_text.call_args_list]
-    assert any("FPS   59" in line for line in rendered)
+    assert any("Submit FPS   59" in line for line in rendered)
     pygame.font.quit()
 
 

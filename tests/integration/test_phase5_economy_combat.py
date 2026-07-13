@@ -250,7 +250,7 @@ def test_projectile_finishes_at_last_target_position_after_target_is_destroyed(
     assert restored.snapshot() == simulation.snapshot()
 
 
-def test_explicit_attack_moves_and_fires_without_canceling_locomotion() -> None:
+def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -290,11 +290,14 @@ def test_explicit_attack_moves_and_fires_without_canceling_locomotion() -> None:
     firing_position = attacker.position
 
     assert firing_position != initial
-    assert attacker.path
-    assert attacker.move_target is not None
+    assert not attacker.path
+    assert attacker.move_target is None
+    assert firing_position.distance_to(simulation.entities["target"].position) <= (
+        attacker.kind.profile.attack_range
+    )
     simulation.advance()
-    assert attacker.position != firing_position
-    assert attacker.path
+    assert attacker.position == firing_position
+    assert not attacker.path
 
 
 def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range() -> None:

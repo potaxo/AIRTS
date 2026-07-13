@@ -43,3 +43,16 @@ def test_candidate_pairs_for_skips_pairs_between_inactive_units() -> None:
     )
 
     assert index.candidate_pairs_for(("active",), 0.75) == (("active", "waiting_1"),)
+
+
+def test_nearest_uses_distance_then_stable_id_without_sorting_a_result_set() -> None:
+    index = SpatialIndex(
+        {
+            "charlie": Point(3.0, 1.0),
+            "bravo": Point(1.0, 2.0),
+            "alpha": Point(2.0, 1.0),
+        }
+    )
+
+    assert index.nearest(Point(1.0, 1.0), 1.1) == "alpha"
+    assert index.nearest(Point(1.0, 1.0), 0.5) is None

@@ -34,6 +34,11 @@ OpenGL 3.3 is the default renderer. For diagnostics or systems where OpenGL is n
 OpenGL startup failures are reported and do not silently fall back. Use `--renderer software`
 explicitly when that backend is intended.
 
+The OpenGL frontend is not capped by the application clock and does not request VSync. Open
+`Settings` to choose a window-resolution preset and inspect rolling p95 frame, render, present-wait,
+and simulation timing. `Submit FPS` counts completed application swaps; physical display cadence
+still depends on the monitor, driver, and Windows compositor.
+
 Common workflows:
 
 ```powershell

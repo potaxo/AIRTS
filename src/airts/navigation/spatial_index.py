@@ -45,10 +45,34 @@ class SpatialIndex:
             for bucket_x in range(minimum_x, maximum_x + 1):
                 candidates.extend(self._buckets.get((bucket_x, bucket_y), ()))
         return tuple(
-            entity_id
-            for entity_id in sorted(candidates)
-            if _squared_distance(point, self._positions[entity_id]) <= squared_radius
+            sorted(
+                entity_id
+                for entity_id in candidates
+                if _squared_distance(point, self._positions[entity_id]) <= squared_radius
+            )
         )
+
+    def nearest(self, point: Point, radius: float) -> str | None:
+        """Return the nearest in-range ID with deterministic ID tie-breaking."""
+
+        if radius < 0:
+            raise ValueError("radius cannot be negative")
+        minimum_x = floor((point.x - radius) / self.bucket_size)
+        maximum_x = floor((point.x + radius) / self.bucket_size)
+        minimum_y = floor((point.y - radius) / self.bucket_size)
+        maximum_y = floor((point.y + radius) / self.bucket_size)
+        squared_radius = radius * radius
+        nearest_key: tuple[float, str] | None = None
+        for bucket_y in range(minimum_y, maximum_y + 1):
+            for bucket_x in range(minimum_x, maximum_x + 1):
+                for entity_id in self._buckets.get((bucket_x, bucket_y), ()):
+                    distance = _squared_distance(point, self._positions[entity_id])
+                    candidate = (distance, entity_id)
+                    if distance <= squared_radius and (
+                        nearest_key is None or candidate < nearest_key
+                    ):
+                        nearest_key = candidate
+        return nearest_key[1] if nearest_key is not None else None
 
     def candidate_pairs(self, radius: float) -> tuple[tuple[str, str], ...]:
         return self.candidate_pairs_for(tuple(self._positions), radius)

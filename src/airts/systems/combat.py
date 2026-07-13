@@ -51,18 +51,37 @@ def drive_combat(simulation: Simulation) -> None:
             ordered_target = None
             attacker.attack_target_id = None
         attack_range = attacker.kind.profile.attack_range
+        ordered_target_distance = (
+            attacker.selection_position.distance_to(ordered_target.selection_position)
+            if ordered_target is not None
+            else None
+        )
         if (
             ordered_target is not None
             and not attacker.pursue_target
-            and attacker.selection_position.distance_to(ordered_target.selection_position)
-            > attack_range
+            and ordered_target_distance is not None
+            and ordered_target_distance > attack_range
         ):
             ordered_target = None
             attacker.attack_target_id = None
+            ordered_target_distance = None
+        if (
+            attacker.pursue_target
+            and ordered_target is not None
+            and ordered_target_distance is not None
+            and ordered_target_distance <= attack_range
+            and (attacker.path or attacker.move_target is not None)
+        ):
+            attacker.path.clear()
+            attacker.move_target = None
+            simulation._reset_movement_liveness(attacker, clear_stop=True)
+            attacker.state = UnitState.ATTACKING
         if (
             attacker.pursue_target
             and ordered_target is not None
             and not attacker.path
+            and ordered_target_distance is not None
+            and ordered_target_distance > attack_range
             and simulation.game_map.cell_for(attacker.position)
             not in {
                 simulation.game_map.cell_for(point)
@@ -74,8 +93,8 @@ def drive_combat(simulation: Simulation) -> None:
         firing_target = (
             ordered_target
             if ordered_target is not None
-            and attacker.selection_position.distance_to(ordered_target.selection_position)
-            <= attack_range
+            and ordered_target_distance is not None
+            and ordered_target_distance <= attack_range
             else nearest_enemy_in_range(simulation, attacker, hostile_indexes[attacker.owner_id])
         )
         if firing_target is None:
@@ -204,19 +223,31 @@ def nearest_enemy_in_range(
     """Return the nearest in-range hostile with stable ID tie-breaking."""
 
     attack_range = attacker.kind.profile.attack_range
-    candidates = [
-        (
-            attacker.selection_position.distance_to(entity.selection_position),
-            entity.entity_id,
-            entity,
-        )
+    candidate_ids = tuple(
+        entity_id
         for entity_index in enemy_indexes
-        for entity_id in entity_index.nearby(attacker.selection_position, attack_range)
-        if (entity := simulation.entities[entity_id]).entity_id != attacker.entity_id
-        if entity.owner_id != attacker.owner_id
-        and attacker.selection_position.distance_to(entity.selection_position) <= attack_range
-    ]
-    return min(candidates)[2] if candidates else None
+        if (entity_id := entity_index.nearest(attacker.selection_position, attack_range))
+        is not None
+    )
+    if not candidate_ids:
+        return None
+    nearest_id = min(
+        candidate_ids,
+        key=lambda entity_id: (
+            _squared_distance(
+                attacker.selection_position,
+                simulation.entities[entity_id].selection_position,
+            ),
+            entity_id,
+        ),
+    )
+    return simulation.entities[nearest_id]
+
+
+def _squared_distance(first: Point, second: Point) -> float:
+    offset_x = first.x - second.x
+    offset_y = first.y - second.y
+    return offset_x * offset_x + offset_y * offset_y
 
 
 def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> None:

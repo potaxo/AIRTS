@@ -38,7 +38,7 @@ Provisional values:
 
 ```text
 Simulation: 10 ticks per second
-Rendering:  up to 100 frames per second
+Rendering:  uncapped submission; 100 FPS acceptance budget
 ```
 
 The game should support:
@@ -69,23 +69,36 @@ The default renderer uses a Pygame-created, double-buffered OpenGL 3.3 core wind
 It renders directly to the physical framebuffer size: a 3840 x 2160 window therefore receives
 native 4K terrain, analytic antialiased unit circles, buildings, health feedback, selection state,
 and bounded route lines instead of an enlarged low-resolution image. Terrain and grid instances
-are uploaded only when the map transform changes. Entity instances and route vertices are rebuilt
-at most once per simulation tick or relevant UI change and remain resident for intervening render
-frames. The normal scene is submitted as one instanced terrain draw, one instanced entity draw, and
-one bounded line draw.
+are uploaded only when the map transform changes. Entity instances carry previous and current
+authoritative centers and route vertices are rebuilt at most once per simulation tick or relevant
+UI change. Those buffers remain resident for intervening render frames. A vertex-shader uniform
+interpolates unit, health, selection, range, and projectile centers between fixed ticks without a
+per-render CPU rebuild or simulation mutation. Interpolation adds up to one fixed tick of visual
+latency and never feeds presentation state back into geometry, combat, replay, or commands. The
+normal scene is submitted as one instanced terrain draw, one instanced entity draw, and one bounded
+line draw.
 
 Pygame font output and infrequent interaction feedback are rasterized into a cached transparent
-native-resolution texture and composited by OpenGL. This does not make the application "GPU only":
-the simulation, commands, input, frame-data preparation, and font rasterization remain CPU work,
-while the GPU owns scene rasterization, antialiasing, and final composition. The legacy bounded
+native-resolution texture and composited by OpenGL. Per-frame FPS samples do not invalidate this
+full-frame texture; status-only refreshes are coalesced to one update per three simulation ticks.
+Explicit interaction changes remain immediate. Projectile bodies, trajectories, and retained
+traces are packed into the native GPU shape and line batches, so combat feedback updates with the
+world frame without software rasterization or a full RGBA overlay upload. This does not make the
+application "GPU only": the simulation, commands, input, frame-data preparation, and font
+rasterization remain CPU work, while the GPU owns scene rasterization, antialiasing, projectile
+feedback, and final composition. The legacy bounded
 logical `SCALED | RESIZABLE` software framebuffer remains an explicit `--renderer software` mode
 for headless CI and compatibility. OpenGL startup failures are diagnostic and never silently fall
 back, because doing so would make performance evidence and renderer identity untrustworthy.
 
 On Windows, SDL creates the interactive OpenGL context through the native Windows driver stack,
 and ModernGL's standalone verifier uses its native WGL backend. Context creation requires OpenGL
-3.3 or newer. Physical refresh rate, VSync, desktop composition, driver behavior, and monitor
-timing remain outside the deterministic simulation contract.
+3.3 or newer. The application clock is uncapped and the OpenGL window explicitly requests VSync
+off. Settings expose 1280 x 720 through 3840 x 2160 presets and rolling p95 frame, renderer,
+simulation, and buffer-swap wait measurements. The swap wait includes work that SDL cannot
+separate into GPU, driver, and compositor stages, while `Submit FPS` counts application swaps rather
+than frames actually displayed. Physical refresh rate, driver overrides, desktop composition, and
+monitor timing remain outside the deterministic simulation contract.
 
 WSLg remains a compatibility path and prefers Wayland when no SDL video driver is selected.
 
@@ -313,4 +326,3 @@ Possible measures include:
 * perceived responsiveness.
 
 ---
-

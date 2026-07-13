@@ -82,7 +82,7 @@ class Simulation:
     DESTINATION_REPATH_TICKS = 50
     MIN_PROGRESS_DISTANCE = 0.02
     CONGESTION_RETRY_TICKS = 5
-    BLOCKED_RECOVERY_BUDGET = 12
+    BLOCKED_RECOVERY_BUDGET = 4
     DEFEND_RESPONSE_RADIUS = 4.0
     DEFEND_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
@@ -167,6 +167,12 @@ class Simulation:
     @property
     def command_history(self) -> tuple[dict[str, object], ...]:
         return tuple(self._command_history)
+
+    @property
+    def command_count(self) -> int:
+        """Return the history size without copying the replayable command records."""
+
+        return len(self._command_history)
 
     @property
     def live_automations(self) -> tuple[Automation, ...]:
@@ -1114,8 +1120,12 @@ class Simulation:
                     ):
                         reachable.add(neighbor)
                         frontier.append(neighbor)
-            horizontal_spacing = unit_radius * 2 + 1e-6
-            vertical_spacing = sqrt(3) * unit_radius + 1e-6
+            # Keep settled formations outside the solver's 0.03 contact-pressure margin. Exact
+            # diameter packing makes a stationary 1,000-unit formation pay dense collision work
+            # forever even though every destination is unique.
+            packing_radius = unit_radius + 0.02
+            horizontal_spacing = packing_radius * 2
+            vertical_spacing = sqrt(3) * packing_radius
             minimum_row = floor(-center.y / vertical_spacing) - 1
             maximum_row = ceil((self.game_map.height - center.y) / vertical_spacing) + 1
             candidates: list[Point] = []

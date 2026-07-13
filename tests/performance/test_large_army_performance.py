@@ -405,7 +405,7 @@ def test_five_hundred_unit_repair_travel_uses_shared_bounded_route_dispatch() ->
     assert simulation.navigation_field_build_count - fields_before <= 1
 
 
-def test_delayed_unit_in_five_hundred_unit_army_repaths_and_keeps_progress() -> None:
+def test_delayed_unit_in_five_hundred_unit_army_avoids_repath_storm_and_keeps_progress() -> None:
     blockers = [
         {
             "id": f"blocker_{index:03d}",
@@ -443,9 +443,10 @@ def test_delayed_unit_in_five_hundred_unit_army_repaths_and_keeps_progress() -> 
     repaths = simulation.events.query(
         event_types=frozenset({EventType.PATH_COMPUTED}), subject_id="mover"
     )
-    assert any(event.details.get("reason") == "DESTINATION_DELAY_REPATH" for event in repaths), [
-        event.to_dict() for event in repaths
-    ]
+    delayed_repaths = tuple(
+        event for event in repaths if event.details.get("reason") == "DESTINATION_DELAY_REPATH"
+    )
+    assert len(delayed_repaths) <= 2
     assert simulation.entities["mover"].position.x > 20
     assert not simulation.entities["mover"].congestion_stopped
 

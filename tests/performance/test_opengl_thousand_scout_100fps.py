@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from array import array
 from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -14,7 +15,12 @@ from airts.app import AirtsApp
 from airts.commands import MoveCommand
 from airts.geometry import Point
 from airts.map_model import load_map_data
-from airts.opengl_renderer import OpenGLFrameBuilder, OpenGLRenderer, OpenGLRendererError
+from airts.opengl_renderer import (
+    SHAPE_FLOATS,
+    OpenGLFrameBuilder,
+    OpenGLRenderer,
+    OpenGLRendererError,
+)
 from airts.simulation import Simulation
 
 DISPLAY_SIZE = (3840, 2160)
@@ -168,12 +174,14 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer() -> None:
     ):
         app.run(max_frames=1)
 
-    set_mode.assert_called_once_with(app.WINDOW_SIZE, app.OPENGL_DISPLAY_FLAGS)
+    set_mode.assert_called_once_with(app.WINDOW_SIZE, app.OPENGL_DISPLAY_FLAGS, vsync=0)
     assert gl_set_attribute.call_count == 4
     renderer.render.assert_called_once_with(app, app.WINDOW_SIZE)
     renderer.release.assert_called_once_with()
     software_draw.assert_not_called()
     flip.assert_called_once_with()
+    clock.tick.assert_called_once_with(0)
+    assert app.FRAME_RATE_LIMIT == 0
 
 
 def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back() -> None:
@@ -292,6 +300,51 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert all(resource.release.called for resource in (*vertex_arrays, *buffers, *programs))
 
 
+def test_fps_sampling_does_not_invalidate_the_full_native_overlay() -> None:
+    """Clock noise must not upload a 4K RGBA surface when no visible state changed."""
+
+    simulation, eastbound, _ = _head_on_scout_simulation()
+    app = _native_four_k_app(simulation, eastbound)
+    app.fps = 96.0
+    initial_key = app._opengl_overlay_key()
+
+    app.fps = 104.0
+
+    assert app._opengl_overlay_key() == initial_key
+
+
+def test_native_overlay_status_refreshes_in_bounded_tick_buckets() -> None:
+    """CPU-rendered status text is coalesced while GPU world batches update every tick."""
+
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "overlay_refresh",
+                "name": "Overlay Refresh",
+                "width": 4,
+                "height": 4,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "scout",
+                        "kind": "scout",
+                        "owner": "player",
+                        "position": [1.5, 1.5],
+                    }
+                ],
+            }
+        )
+    )
+    app = _native_four_k_app(simulation, ())
+    initial_key = app._opengl_overlay_key()
+
+    simulation.advance(AirtsApp.OPENGL_OVERLAY_REFRESH_TICKS - 1)
+    assert app._opengl_overlay_key() == initial_key
+
+    simulation.advance()
+    assert app._opengl_overlay_key() != initial_key
+
+
 def test_opengl_renderer_releases_partial_resources_when_initialization_fails() -> None:
     """A shader or vertex-array failure must not strand already-created GPU objects."""
 
@@ -382,6 +435,122 @@ def test_opengl_normal_scene_preserves_full_health_bars_and_outer_selection_outl
     assert frame.building_count == 1
     assert frame.selected_unit_count == 1
     assert frame.shape_count == 10  # 3 entities + 6 health rectangles + 1 outer outline
+
+
+def test_opengl_frame_batches_live_projectile_feedback_on_the_gpu() -> None:
+    """OpenGL must not route active combat effects through the CPU overlay texture."""
+
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "opengl_projectile_scene",
+                "name": "OpenGL Projectile Scene",
+                "width": 12,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "player_scout",
+                        "kind": "scout",
+                        "owner": "player",
+                        "position": [3.5, 3.5],
+                    },
+                    {
+                        "id": "enemy_scout",
+                        "kind": "scout",
+                        "owner": "enemy",
+                        "position": [6.5, 3.5],
+                    },
+                ],
+            }
+        )
+    )
+    app = _native_four_k_app(simulation, ("player_scout",))
+    builder = OpenGLFrameBuilder()
+    initial = builder.build(app, DISPLAY_SIZE)
+
+    simulation.advance()
+    active_combat = builder.build(app, DISPLAY_SIZE)
+
+    assert simulation.projectiles
+    assert active_combat.shape_count == initial.shape_count + 2 * len(simulation.projectiles)
+    assert active_combat.line_vertex_count > initial.line_vertex_count
+
+
+def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> None:
+    """A 100+ FPS frontend must present distinct positions between 10 Hz simulation ticks."""
+
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "gpu_interpolation",
+                "name": "GPU Interpolation",
+                "width": 20,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "scout",
+                        "kind": "scout",
+                        "owner": "player",
+                        "position": [2.5, 5.5],
+                    }
+                ],
+            }
+        )
+    )
+    app = _native_four_k_app(simulation, ("scout",))
+    assert simulation.execute(MoveCommand(("scout",), Point(17.5, 5.5))).accepted
+    app._advance_presentation_tick()
+    app.render_alpha = 0.5
+    builder = OpenGLFrameBuilder()
+    first = builder.build(app, DISPLAY_SIZE)
+    second = builder.build(app, DISPLAY_SIZE)
+    values = array("f")
+    values.frombytes(first.shape_buffer)
+    current_center = tuple(values[0:2])
+    previous_center = tuple(values[2:4])
+
+    assert first is second
+    assert len(values) % SHAPE_FLOATS == 0
+    assert current_center != previous_center
+    midpoint = tuple(
+        previous + (current - previous) * app.render_alpha
+        for previous, current in zip(previous_center, current_center, strict=True)
+    )
+    assert midpoint != previous_center
+    assert midpoint != current_center
+
+    module = SimpleNamespace(
+        BLEND=1,
+        SRC_ALPHA=2,
+        ONE_MINUS_SRC_ALPHA=3,
+        TRIANGLE_STRIP=4,
+        LINES=5,
+        LINEAR=6,
+    )
+    context = MagicMock()
+    programs = [MagicMock() for _ in range(3)]
+    uniforms = [{}, {}, {}]
+    for program, program_uniforms in zip(programs, uniforms, strict=True):
+        program.__getitem__.side_effect = lambda key, values=program_uniforms: values.setdefault(
+            key, SimpleNamespace(value=None)
+        )
+    context.program.side_effect = programs
+    context.buffer.side_effect = [MagicMock() for _ in range(5)]
+    context.vertex_array.side_effect = [MagicMock() for _ in range(4)]
+    context.texture.return_value = MagicMock()
+    renderer = OpenGLRenderer(module, context)
+    try:
+        with patch.object(app, "_draw_opengl_overlay"):
+            rendered = renderer.render(app, DISPLAY_SIZE)
+            app.render_alpha = 0.9
+            rerendered = renderer.render(app, DISPLAY_SIZE)
+    finally:
+        renderer.release()
+
+    assert rendered is rerendered
+    assert uniforms[0]["interpolation_alpha"].value == pytest.approx(0.9)
 
 
 def test_native_4k_opengl_submission_cpu_work_fits_the_100fps_interval() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import floor
 from typing import TYPE_CHECKING
 
 from airts.automations import (
@@ -33,7 +34,7 @@ from airts.commands import (
 )
 from airts.control import ControlAuthority
 from airts.events import EventType
-from airts.geometry import Point, PolygonRegion, PolylineTarget
+from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.navigation.movement import collision_radius
 from airts.navigation.pathfinding import PathfindingError, PathResult
 from airts.validation import (
@@ -96,9 +97,13 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
             indices = {entity_id: 0 for entity_id in automation.entity_ids}
             new_parameters = PatrolParameters(command.target, waypoints, indices)
         elif automation.kind is AutomationKind.DEFEND:
+            existing_defend = defend_parameters(automation)
             try:
-                stations = build_defend_stations(
-                    command.target, tuple(automation.entity_ids), simulation.game_map
+                stations, slots, _ = _allocate_defend_stations(
+                    simulation,
+                    command.target,
+                    tuple(automation.entity_ids),
+                    gathering_point=existing_defend.gathering_point,
                 )
                 simulation._validate_paths(tuple(automation.entity_ids), tuple(stations.values()))
             except (ValueError, PathfindingError) as error:
@@ -106,7 +111,17 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                     "modify_automation",
                     ValidationFailure(ValidationPhase.PATH, reason(error), "target"),
                 )
-            new_parameters = DefendParameters(command.target, stations)
+            new_parameters = DefendParameters(
+                command.target,
+                stations,
+                gathering_point=existing_defend.gathering_point,
+                deployment_slots=slots,
+                assembly_radius=(
+                    max(point.distance_to(target_center(command.target)) for point in slots)
+                    if slots
+                    else 0.0
+                ),
+            )
         elif automation.kind is AutomationKind.PRODUCTION:
             parameters = production_parameters(automation)
             if not parameters.continuous:
@@ -406,14 +421,13 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
     if geometry_failure is not None:
         return simulation._reject_validation("create_defend", geometry_failure)
     try:
-        if command.gathering_point:
-            slots = simulation._gathering_slots(
-                command.target,
-                len(command.entity_ids),
-                max(
-                    collision_radius(simulation.entities[item].kind) for item in command.entity_ids
-                ),
-            )
+        stations, slots, expanded = _allocate_defend_stations(
+            simulation,
+            command.target,
+            command.entity_ids,
+            gathering_point=command.gathering_point,
+        )
+        if expanded:
             reachable = simulation._gathering_reachable_cache[command.target]
             if any(
                 simulation.game_map.cell_for(simulation.entities[entity_id].position)
@@ -421,12 +435,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
                 for entity_id in command.entity_ids
             ):
                 raise PathfindingError("NO_PATH")
-            stations = dict(zip(command.entity_ids, slots, strict=True))
         else:
-            slots = ()
-            stations = build_defend_stations(
-                command.target, command.entity_ids, simulation.game_map
-            )
             simulation._validate_paths(command.entity_ids, tuple(stations.values()))
     except (ValueError, PathfindingError) as error:
         return simulation._reject_validation(
@@ -457,6 +466,51 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
         return simulation._reject_validation("create_defend", failure)
     simulation._activate(automation, command.entity_ids)
     return simulation._accept("create_defend", automation.automation_id)
+
+
+def _allocate_defend_stations(
+    simulation: Simulation,
+    target: SpatialTarget,
+    entity_ids: tuple[str, ...],
+    *,
+    gathering_point: bool,
+) -> tuple[dict[str, Point], tuple[Point, ...], bool]:
+    """Expand an undersized defend target into deterministic collision-safe holding slots."""
+
+    radius = max(collision_radius(simulation.entities[item].kind) for item in entity_ids)
+    if not gathering_point:
+        stations = build_defend_stations(target, entity_ids, simulation.game_map)
+        if _stations_have_clearance(tuple(stations.values()), radius * 2):
+            return stations, (), False
+    slots = simulation._gathering_slots(target, len(entity_ids), radius)
+    ordered_ids = sorted(
+        entity_ids,
+        key=lambda entity_id: (
+            simulation.entities[entity_id].position.y,
+            simulation.entities[entity_id].position.x,
+            entity_id,
+        ),
+    )
+    ordered_slots = sorted(slots, key=lambda point: (point.y, point.x))
+    return dict(zip(ordered_ids, ordered_slots, strict=True)), slots, True
+
+
+def _stations_have_clearance(stations: tuple[Point, ...], minimum_spacing: float) -> bool:
+    bucket_size = minimum_spacing
+    buckets: dict[tuple[int, int], list[Point]] = {}
+    squared_spacing = (minimum_spacing - 1e-6) ** 2
+    for station in stations:
+        bucket_x = floor(station.x / bucket_size)
+        bucket_y = floor(station.y / bucket_size)
+        for neighbor_y in range(bucket_y - 1, bucket_y + 2):
+            for neighbor_x in range(bucket_x - 1, bucket_x + 2):
+                if any(
+                    (station.x - other.x) ** 2 + (station.y - other.y) ** 2 < squared_spacing
+                    for other in buckets.get((neighbor_x, neighbor_y), ())
+                ):
+                    return False
+        buckets.setdefault((bucket_x, bucket_y), []).append(station)
+    return True
 
 
 def create_reinforcement(
@@ -741,6 +795,12 @@ def fail_movement(simulation: Simulation, entity: Entity, reason: str, position:
 def production_parameters(automation: Automation) -> ProductionParameters:
     if not isinstance(automation.parameters, ProductionParameters):
         raise TypeError("automation does not have production parameters")
+    return automation.parameters
+
+
+def defend_parameters(automation: Automation) -> DefendParameters:
+    if not isinstance(automation.parameters, DefendParameters):
+        raise TypeError("automation does not have defend parameters")
     return automation.parameters
 
 

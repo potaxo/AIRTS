@@ -15,7 +15,7 @@ from airts.navigation.movement import (
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import Entity
-from airts.world.map_model import Cell
+from airts.world.map_model import Cell, EntityKind
 from airts.world.occupancy import OccupancyError
 
 if TYPE_CHECKING:
@@ -193,10 +193,17 @@ def track_movement_progress(simulation: Simulation) -> None:
             simulation._reset_movement_liveness(entity)
             continue
         entity.route_ticks += 1
+        repath_phase = sum(map(ord, entity_id)) % simulation.DESTINATION_REPATH_TICKS
         if (
             entity.route_ticks >= simulation.DESTINATION_REPATH_TICKS
             and (
-                entity.collision_pressure > 0
+                entity.kind is EntityKind.BUILDER
+                or (entity.route_ticks - simulation.DESTINATION_REPATH_TICKS)
+                % simulation.DESTINATION_REPATH_TICKS
+                == repath_phase
+            )
+            and (
+                (entity.kind is EntityKind.BUILDER and entity.collision_pressure > 0)
                 or simulation._remaining_path_crosses_military_units(entity)
             )
             and simulation._repath_stalled_entity(entity, reason="DESTINATION_DELAY_REPATH")
@@ -223,7 +230,10 @@ def track_movement_progress(simulation: Simulation) -> None:
         entity.no_progress_ticks += 1
         if entity.no_progress_ticks < simulation.NO_PROGRESS_YIELD_TICKS:
             continue
-        if simulation._repath_stalled_entity(entity):
+        if (
+            entity.kind is EntityKind.BUILDER
+            or simulation._remaining_path_crosses_military_units(entity)
+        ) and simulation._repath_stalled_entity(entity):
             continue
         entity.congestion_stopped = True
         simulation._movement_blocked.discard(entity_id)
@@ -290,9 +300,13 @@ def repath_stalled_entity(
 
 
 def remaining_path_crosses_military_units(simulation: Simulation, entity: Entity) -> bool:
+    """Return whether a route crosses a settled unit that local steering cannot carry along."""
+
     route_cells = {simulation.game_map.cell_for(point) for point in entity.path}
     return any(
-        occupant_id != entity.entity_id and simulation.entities[occupant_id].is_movable
+        occupant_id != entity.entity_id
+        and simulation.entities[occupant_id].is_movable
+        and not simulation.entities[occupant_id].path
         for cell in route_cells
         for occupant_id in simulation.occupancy.occupants(cell)
     )
@@ -312,6 +326,8 @@ def replan_contested_final_approach(
 ) -> bool:
     """Route around units that have already settled between this unit and its slot."""
 
+    if simulation._stalled_repaths_this_tick >= simulation.STALLED_REPATH_BUDGET:
+        return False
     try:
         path = simulation._routes.dynamic_path(
             entity.position,
@@ -323,8 +339,10 @@ def replan_contested_final_approach(
         return False
     if len(path.waypoints) <= 1:
         return False
+    simulation._stalled_repaths_this_tick += 1
     entity.path = list(path.waypoints)
     entity.path_cost = path.cost
+    simulation._reset_movement_liveness(entity, clear_stop=True)
     simulation.events.record(
         simulation.tick,
         EventType.PATH_COMPUTED,
@@ -467,7 +485,13 @@ def resolve_unit_collisions(simulation: Simulation, unit_index: SpatialIndex) ->
         for entity_id in unit_ids
     }
     force_pairs = unit_index.candidate_pairs_for(active_ids, 0.93)
-    for _ in range(2):
+    force_passes = (
+        1
+        if unit_ids
+        and all(simulation.entities[entity_id].kind is EntityKind.SCOUT for entity_id in unit_ids)
+        else 2
+    )
+    for _ in range(force_passes):
         for first_id, second_id in force_pairs:
             simulation._collision_pair_check_count += 1
             first = simulation.entities[first_id]
@@ -568,8 +592,18 @@ def separate_overlapping_colliders(
     unit_index: SpatialIndex,
 ) -> None:
     # A third bounded relaxation pass prevents dense moving fronts from preserving a deeply
-    # overlapped pair after pressure propagates through neighboring units.
-    for _ in range(3):
+    # overlapped heavy or mixed pair after pressure propagates through neighboring units. Scouts
+    # can separate their full radius in one correction, so two passes avoid redundant work in the
+    # 1,000-scout convergence case without weakening the mixed-mass contract.
+    relaxation_passes = (
+        2
+        if collision_ids
+        and all(
+            simulation.entities[entity_id].kind is EntityKind.SCOUT for entity_id in collision_ids
+        )
+        else 3
+    )
+    for _ in range(relaxation_passes):
         changed = False
         for first_id, second_id in unit_index.candidate_pairs_for(collision_ids, 0.9):
             simulation._collision_pair_check_count += 1
@@ -721,18 +755,17 @@ def record_movement_blocked(simulation: Simulation, entity: Entity, evidence: st
             evidence=evidence,
         )
         simulation._movement_blocked.add(entity_id)
-    destination_contested = simulation._final_destination_is_contested(entity)
-    if (
-        not destination_contested
-        and simulation._blocked_ticks[entity_id] < simulation.TICKS_PER_SECOND
-    ):
+    if simulation._blocked_ticks[entity_id] < simulation.TICKS_PER_SECOND:
         return
     if simulation._blocked_recoveries_this_tick >= simulation.BLOCKED_RECOVERY_BUDGET:
         return
     retry_phase = sum(map(ord, entity_id)) % simulation.CONGESTION_RETRY_TICKS
+    if simulation.tick % simulation.CONGESTION_RETRY_TICKS != retry_phase:
+        return
     if (
-        not destination_contested
-        and simulation.tick % simulation.CONGESTION_RETRY_TICKS != retry_phase
+        entity.kind is not EntityKind.BUILDER
+        and not simulation._final_destination_is_contested(entity)
+        and not simulation._remaining_path_crosses_military_units(entity)
     ):
         return
     simulation._blocked_recoveries_this_tick += 1
@@ -744,6 +777,10 @@ def final_destination_is_contested(simulation: Simulation, entity: Entity) -> bo
         return False
     destination = entity.path[0]
     destination_cell = simulation.game_map.cell_for(destination)
+    nearby_cells = (destination_cell, *simulation._neighbor_cells(destination_cell))
+    nearby_ids = {
+        occupant_id for cell in nearby_cells for occupant_id in simulation.occupancy.occupants(cell)
+    }
     return any(
         other_id != entity.entity_id
         and other.is_movable
@@ -752,7 +789,8 @@ def final_destination_is_contested(simulation: Simulation, entity: Entity) -> bo
             destination_cell in other.occupied_cells
             or destination.distance_to(other.position) < 0.62
         )
-        for other_id, other in simulation.entities.items()
+        for other_id in nearby_ids
+        for other in (simulation.entities[other_id],)
     )
 
 

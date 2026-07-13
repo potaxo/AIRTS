@@ -236,12 +236,20 @@ broadphase indexing so per-tick work depends primarily on nearby entities rather
 possible entity pair. Automatically generated forces must have configurable rates and active
 population caps to prevent unbounded scenario growth.
 
-Weapon firing and locomotion are independent controller concerns. Entering firing range must not
-clear a valid move, patrol, defend, pursue, or return path; all armed units should opportunistically
-fire at enemies in range regardless of their current movement automation. Line patrol groups should traverse route
-vertices in the same direction with deterministic formation spacing rather than assigning members
-to opposing endpoint flows. Unit occupancy must defer unit-unit exclusion to physical colliders;
-stationary units remain pushable and may yield laterally when forward pressure is obstructed.
+Defend retaliation follows the same rule: each attacked assigned unit queries a deterministic
+spatial index for responders inside the response radius. It must not scan every assigned defender
+for every victim, because a mass engagement would otherwise become quadratic while producing the
+same local response set.
+
+Weapon firing and locomotion are independent controller concerns. Opportunistic fire must not clear
+a valid move, patrol, defend, or return path. An explicit pursue order is different: once the ordered
+target is inside weapon range, its adjacency path is complete and must be cleared so a mass focus
+command forms a firing envelope instead of converging on four neighboring cells. All armed units
+still opportunistically fire at enemies in range regardless of their current movement automation.
+Large patrol groups traverse route vertices in the same direction with deterministic collision-safe
+formation spacing rather than assigning members to opposing flows. Unit occupancy must defer
+unit-unit exclusion to physical colliders; stationary units remain pushable and may yield laterally
+when forward pressure is obstructed.
 
 Projectile simulation is independent of presentation scale. Every launched projectile stores its
 current position and last known target destination. It tracks a live hostile target, but target
@@ -274,22 +282,33 @@ unique final slots. Scout formations use 8 x 8 staging clusters at the verified 
 other unit kinds retain 5 x 5 clusters so heavier formations do not regress dense-choke behavior.
 Replans whose costs depend on current unit positions remain uncached because their obstacle
 penalties change with the formation.
-Military units are finite-cost dynamic path obstacles rather than impassable terrain. Movement
-controllers periodically recalculate delayed routes through or around changing formations, with
-per-tick path budgets preserving responsiveness during mass movement and focus-fire commands.
+Settled military units are finite-cost dynamic path obstacles rather than impassable terrain.
+Movement controllers periodically recalculate delayed routes around settled blockers, with stable
+per-entity phases and per-tick path budgets preserving responsiveness. Moving queue members are not
+fed back into per-agent A*: the shared static field supplies global direction while deterministic
+local steering, collision response, and bounded yielding carry the flow through unavoidable chokes.
+Blocked recovery follows the same rule and does not search for an alternate route merely because a
+moving bridge queue occupies the next cells.
 Dense movement must retain throughput rather than pausing whole formations. Collision broadphase
 pairs are generated directly from spatial buckets, reused across solver passes where safe, and
 each unit's deterministic steering neighborhood is converted once into compact collider records
 reused by the collision-clamp, local-clearance, and stationary-blocker checks for that movement
 attempt. Overlap correction uses at most three deterministic relaxation passes; the third pass
 prevents pressure propagated through a dense moving front from leaving a deeply collapsed pair
-while preserving the 6,000-pair-check budget in the 500-unit choke regression. Static building
+while preserving the 6,000-pair-check budget in the 500-unit choke regression.
+Homogeneous scout crowds use one drive-pressure pass and two overlap passes because a scout can
+separate its full radius in one correction; mixed or heavier forces retain two and three passes,
+respectively, under the physical-collision and heavy-choke regressions. Static building
 cells are materialized once per movement tick, and local comparisons use squared distances.
-Contested final-approach rerouting is reserved for actual stationary blockers;
+Contested final-approach rerouting is reserved for actual stationary blockers and shares the same
+stalled-route budget;
 moving head-on traffic continues through physical steering rather than triggering a path search
 per unit. Visibility retains exact circular sight geometry while unioning occupied cells into
 per-row integer bit masks before materializing visible cells.
-Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
+When an ordinary defend target cannot physically contain its assigned force, it automatically uses
+the same reachable hex-packed deployment slots as a gathering defense instead of repeating a few
+station coordinates. Tiny point and area patrols move one spaced formation through the patrol cycle
+in phase. Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
 without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
 because of worker scheduling.

@@ -279,13 +279,8 @@ class Automation:
                 AutomationTransition(self.created_tick, None, self.status, self.reason_code)
             )
         if isinstance(self.parameters, PatrolParameters):
-            for index, entity_id in enumerate(self.entity_ids):
-                self.parameters.waypoint_indices.setdefault(
-                    entity_id,
-                    0
-                    if isinstance(self.parameters.target, PolylineTarget)
-                    else index % len(self.parameters.waypoints),
-                )
+            for entity_id in self.entity_ids:
+                self.parameters.waypoint_indices.setdefault(entity_id, 0)
 
     @property
     def template(self) -> str:

@@ -73,11 +73,13 @@ and a right selection/action rail. Mixed selections first show every selected en
 player chooses one kind to deselect other kinds before its statistics and valid controls appear;
 a single-kind selection opens those details immediately. Double-clicking a friendly entity selects
 all friendly entities of that kind currently inside the canvas. Escape returns to selection mode
-and clears entity, geometry, placement, and inspection state. Save, load, and new game
-are grouped under a settings button, while the full control reference is hidden from the normal
+and clears entity, geometry, placement, and inspection state. Save, load, new game, resolution
+presets, and rolling frame/present/simulation timing are grouped under a settings button, while the
+full control reference is hidden from the normal
 status surface. Middle-drag pans the canvas through shared map/screen transforms, and the resizable
 window recalculates rail, canvas, command-bar, font, and map scaling from its current dimensions.
-The left rail shows current FPS. Building placement previews its snapped footprint in green when
+The left rail labels the measured application submission rate as `Submit FPS`; it is not a claim
+about monitor refreshes. Building placement previews its snapped footprint in green when
 valid and red when blocked; accepted construction jobs remain visible with completion progress.
 Single-kind detail titles and applicable action labels show the selected count so the scope of a
 group command is visible before it is submitted.
@@ -89,4 +91,3 @@ command-center construction, technology prerequisites, or multiple factories con
 production automation.
 
 ---
-

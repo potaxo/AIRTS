@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+from collections import deque
+from dataclasses import dataclass
 from enum import StrEnum
-from math import hypot
+from math import ceil, hypot
 from pathlib import Path
+from time import perf_counter
 
 import pygame
 
@@ -68,8 +71,84 @@ class RendererBackend(StrEnum):
     SOFTWARE = "software"
 
 
+@dataclass(frozen=True, slots=True)
+class PresentationMetrics:
+    """Rolling measurements for the application-to-compositor presentation path."""
+
+    fps: float = 0.0
+    frame_p95_ms: float = 0.0
+    render_p95_ms: float = 0.0
+    present_p95_ms: float = 0.0
+    simulation_p95_ms: float = 0.0
+
+
+class PresentationProfiler:
+    """Measure frame pacing without adding another limiter or profiler dependency."""
+
+    SAMPLE_SECONDS = 2.0
+    MAX_SAMPLE_COUNT = 20_000
+    REFRESH_SECONDS = 0.25
+
+    def __init__(self) -> None:
+        self._presented_at: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._frame_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._render_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._present_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._simulation_samples: deque[tuple[float, float]] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._last_refresh = 0.0
+        self.metrics = PresentationMetrics()
+
+    def record(
+        self,
+        *,
+        presented_at: float,
+        frame_ms: float,
+        render_ms: float,
+        present_ms: float,
+        simulation_ms: float,
+    ) -> PresentationMetrics:
+        self._presented_at.append(presented_at)
+        self._frame_ms.append(frame_ms)
+        self._render_ms.append(render_ms)
+        self._present_ms.append(present_ms)
+        if simulation_ms > 0.0:
+            self._simulation_samples.append((presented_at, simulation_ms))
+        while (
+            len(self._presented_at) > 1
+            and presented_at - self._presented_at[0] > self.SAMPLE_SECONDS
+        ):
+            self._presented_at.popleft()
+            self._frame_ms.popleft()
+            self._render_ms.popleft()
+            self._present_ms.popleft()
+        while (
+            self._simulation_samples
+            and presented_at - self._simulation_samples[0][0] > self.SAMPLE_SECONDS
+        ):
+            self._simulation_samples.popleft()
+        if presented_at - self._last_refresh < self.REFRESH_SECONDS:
+            return self.metrics
+        self._last_refresh = presented_at
+        elapsed = (
+            self._presented_at[-1] - self._presented_at[0] if len(self._presented_at) > 1 else 0.0
+        )
+        fps = (len(self._presented_at) - 1) / elapsed if elapsed > 0.0 else 0.0
+        self.metrics = PresentationMetrics(
+            fps=fps,
+            frame_p95_ms=_percentile(self._frame_ms, 0.95),
+            render_p95_ms=_percentile(self._render_ms, 0.95),
+            present_p95_ms=_percentile(self._present_ms, 0.95),
+            simulation_p95_ms=_percentile(
+                deque(value for _, value in self._simulation_samples),
+                0.95,
+            ),
+        )
+        return self.metrics
+
+
 class AirtsApp:
-    TARGET_RENDER_FPS = 100
+    FRAME_RATE_LIMIT = 0
+    OPENGL_OVERLAY_REFRESH_TICKS = 3
     MAX_SELECTED_PATHS = 32
     OPENGL_DISPLAY_FLAGS = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
     DISPLAY_FLAGS = pygame.RESIZABLE | pygame.SCALED
@@ -81,6 +160,14 @@ class AirtsApp:
     WINDOW_SIZE = (
         LEFT_PANEL_WIDTH + MAP_PIXELS + RIGHT_PANEL_WIDTH,
         MAP_PIXELS + COMMAND_BAR_HEIGHT,
+    )
+    RESOLUTION_PRESETS = (
+        (1280, 720),
+        WINDOW_SIZE,
+        (1600, 900),
+        (1920, 1080),
+        (2560, 1440),
+        (3840, 2160),
     )
     BACKGROUND = (18, 22, 28)
     PANEL_BACKGROUND = (27, 32, 40)
@@ -118,6 +205,12 @@ class AirtsApp:
         self.production_sequence: list[tuple[EntityKind, int]] = []
         self.paused = False
         self.fps = 0.0
+        self.presentation_metrics = PresentationMetrics()
+        self.render_alpha = 1.0
+        self._previous_entity_positions: dict[str, Point] = {}
+        self._previous_projectile_positions: dict[str, Point] = {}
+        self.window_size = self.WINDOW_SIZE
+        self._pending_window_size: tuple[int, int] | None = None
         self.notice = "Select units, draw a target, then press A to patrol."
         self._automation_buttons: list[tuple[pygame.Rect, str, str]] = []
         self._command_buttons: list[tuple[pygame.Rect, str]] = []
@@ -151,6 +244,7 @@ class AirtsApp:
         self._frame_tile_size: float | None = None
         self._frame_map_pixel_size: tuple[int, int] | None = None
         self._frame_map_origin: tuple[int, int] | None = None
+        self._reset_presentation_history()
         self.resize_layout(self.WINDOW_SIZE)
 
     @property
@@ -184,6 +278,7 @@ class AirtsApp:
     def resize_layout(self, size: tuple[int, int]) -> None:
         width = max(760, size[0])
         height = max(520, size[1])
+        self.window_size = (width, height)
         self.ui_scale = max(
             0.8, min(1.45, min(width / self.WINDOW_SIZE[0], height / self.WINDOW_SIZE[1]))
         )
@@ -201,6 +296,56 @@ class AirtsApp:
         if self._font is not None and pygame.font.get_init():
             self._font = pygame.font.Font(None, round(24 * self.ui_scale))
             self._small_font = pygame.font.Font(None, round(19 * self.ui_scale))
+
+    def _reset_presentation_history(self) -> None:
+        """Make the current authoritative state both interpolation endpoints."""
+
+        self._previous_entity_positions = {
+            entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
+        }
+        self._previous_projectile_positions = {
+            projectile_id: projectile.position
+            for projectile_id, projectile in self.simulation.projectiles.items()
+        }
+        self.render_alpha = 1.0
+
+    def _advance_presentation_tick(self) -> None:
+        """Capture the previous state before advancing the authoritative simulation."""
+
+        self._previous_entity_positions = {
+            entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
+        }
+        self._previous_projectile_positions = {
+            projectile_id: projectile.position
+            for projectile_id, projectile in self.simulation.projectiles.items()
+        }
+        self.simulation.advance()
+
+    def previous_entity_position(self, entity_id: str) -> Point:
+        entity = self.simulation.entities[entity_id]
+        return self._previous_entity_positions.get(entity_id, entity.position)
+
+    def previous_projectile_position(self, projectile_id: str) -> Point:
+        projectile = self.simulation.projectiles[projectile_id]
+        return self._previous_projectile_positions.get(projectile_id, projectile.position)
+
+    def _request_resolution_step(self, direction: int) -> None:
+        current = self._pending_window_size or self.window_size
+        nearest = min(
+            range(len(self.RESOLUTION_PRESETS)),
+            key=lambda index: (
+                abs(self.RESOLUTION_PRESETS[index][0] - current[0])
+                + abs(self.RESOLUTION_PRESETS[index][1] - current[1])
+            ),
+        )
+        target_index = max(0, min(len(self.RESOLUTION_PRESETS) - 1, nearest + direction))
+        target = self.RESOLUTION_PRESETS[target_index]
+        if target == current:
+            self.notice = f"Resolution is already {target[0]} x {target[1]}."
+            return
+        self._pending_window_size = target
+        self.settings_open = False
+        self.notice = f"Changing resolution to {target[0]} x {target[1]}."
 
     def pan_camera(self, dx: float, dy: float) -> None:
         limit = min(self.map_pixel_size) * 0.45
@@ -237,8 +382,9 @@ class AirtsApp:
                 pygame.display.gl_set_attribute(pygame.GL_DOUBLEBUFFER, 1)
                 try:
                     screen = pygame.display.set_mode(
-                        self.WINDOW_SIZE,
+                        self.window_size,
                         self.OPENGL_DISPLAY_FLAGS,
+                        vsync=0,
                     )
                 except pygame.error as error:
                     raise OpenGLRendererError(
@@ -249,19 +395,24 @@ class AirtsApp:
                 opengl_renderer = OpenGLRenderer.from_active_context()
                 self._scaled_display_active = False
             else:
-                screen = pygame.display.set_mode(self.WINDOW_SIZE, self.DISPLAY_FLAGS)
+                screen = pygame.display.set_mode(self.window_size, self.DISPLAY_FLAGS)
                 self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
-            self.resize_layout(self.WINDOW_SIZE)
+            self.resize_layout(self.window_size)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
+            profiler = PresentationProfiler()
             accumulator = 0.0
             running = True
             frames = 0
+            last_presented_at = perf_counter()
+            previous_loop_at = last_presented_at
             while running and (max_frames is None or frames < max_frames):
-                elapsed = min(clock.tick(self.TARGET_RENDER_FPS) / 1000.0, 0.25)
-                self.fps = clock.get_fps()
+                clock.tick(self.FRAME_RATE_LIMIT)
+                loop_started_at = perf_counter()
+                elapsed = min(loop_started_at - previous_loop_at, 0.25)
+                previous_loop_at = loop_started_at
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
@@ -270,11 +421,36 @@ class AirtsApp:
                         self._handle_event(event)
                 if not running:
                     break
+                if self._pending_window_size is not None:
+                    target_size = self._pending_window_size
+                    self._pending_window_size = None
+                    if opengl_renderer is not None:
+                        opengl_renderer.release()
+                        opengl_renderer = None
+                        screen = pygame.display.set_mode(
+                            target_size,
+                            self.OPENGL_DISPLAY_FLAGS,
+                            vsync=0,
+                        )
+                        opengl_renderer = OpenGLRenderer.from_active_context()
+                    else:
+                        screen = pygame.display.set_mode(target_size, self.DISPLAY_FLAGS)
+                    self.resize_layout(target_size)
                 if not self.paused:
                     accumulator += elapsed
+                    simulation_started = perf_counter()
                     while accumulator >= Simulation.TICK_SECONDS:
-                        self.simulation.advance()
+                        self._advance_presentation_tick()
                         accumulator -= Simulation.TICK_SECONDS
+                    simulation_ms = (perf_counter() - simulation_started) * 1000.0
+                    self.render_alpha = max(
+                        0.0,
+                        min(1.0, accumulator / Simulation.TICK_SECONDS),
+                    )
+                else:
+                    simulation_ms = 0.0
+                    self.render_alpha = 1.0
+                render_started = perf_counter()
                 if opengl_renderer is not None:
                     opengl_renderer.render(
                         self,
@@ -282,7 +458,21 @@ class AirtsApp:
                     )
                 else:
                     self._draw(screen)
+                render_ms = (perf_counter() - render_started) * 1000.0
+                present_started = perf_counter()
                 pygame.display.flip()
+                presented_at = perf_counter()
+                present_ms = (presented_at - present_started) * 1000.0
+                frame_ms = (presented_at - last_presented_at) * 1000.0
+                last_presented_at = presented_at
+                self.presentation_metrics = profiler.record(
+                    presented_at=presented_at,
+                    frame_ms=frame_ms,
+                    render_ms=render_ms,
+                    present_ms=present_ms,
+                    simulation_ms=simulation_ms,
+                )
+                self.fps = self.presentation_metrics.fps
                 frames += 1
         finally:
             if opengl_renderer is not None:
@@ -897,6 +1087,7 @@ class AirtsApp:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
+        self._reset_presentation_history()
         self._clear_selection_state()
         self.notice = f"Loaded {self.quick_save_path}."
 
@@ -911,6 +1102,7 @@ class AirtsApp:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
+        self._reset_presentation_history()
         self._clear_selection_state()
         self.notice = "New game started."
 
@@ -1019,6 +1211,12 @@ class AirtsApp:
         for rectangle, action in self._settings_buttons:
             if not rectangle.collidepoint(position):
                 continue
+            if action == "resolution_lower":
+                self._request_resolution_step(-1)
+                return True
+            if action == "resolution_higher":
+                self._request_resolution_step(1)
+                return True
             {"save": self._save_game, "load": self._load_game, "new": self._new_game}[action]()
             self.settings_open = False
             return True
@@ -1105,7 +1303,6 @@ class AirtsApp:
             self._draw_spatial_input(screen)
             self._draw_construction(screen)
             self._draw_assembly_glows(screen)
-            self._draw_projectiles(screen)
             screen.set_clip(previous_clip)
             self._draw_interface(screen)
         finally:
@@ -1123,9 +1320,8 @@ class AirtsApp:
         )
         return (
             id(self.simulation),
-            self.simulation.tick,
-            len(self.simulation.command_history),
-            round(self.fps),
+            self.simulation.tick // self.OPENGL_OVERLAY_REFRESH_TICKS,
+            self.simulation.command_count,
             self.mode,
             self.paused,
             self.notice,
@@ -1575,7 +1771,7 @@ class AirtsApp:
         key: tuple[object, ...] = (
             id(self.simulation),
             self.simulation.tick,
-            len(self.simulation.command_history),
+            self.simulation.command_count,
             self.map_origin,
             self.tile_size,
             frozenset(self.selected_entities),
@@ -1779,7 +1975,7 @@ class AirtsApp:
         y += 28
         self._small_text(
             screen,
-            f"Tick {self.simulation.tick} | FPS {self.fps:4.0f} | "
+            f"Tick {self.simulation.tick} | Submit FPS {self.fps:4.0f} | "
             f"{self.mode.value} | {'PAUSED' if self.paused else 'RUNNING'}",
             (x, y),
             (166, 191, 215),
@@ -2038,14 +2234,45 @@ class AirtsApp:
 
     def _draw_settings_menu(self, screen: pygame.Surface) -> None:
         x = self.command_bar_rect.x + 14
-        y = self.command_bar_rect.y - 106
+        y = self.command_bar_rect.y - 208
         self._settings_buttons.clear()
-        pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 160, 100), border_radius=4)
+        pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 202), border_radius=4)
+        self._small_text(
+            screen,
+            f"Resolution {self.window_size[0]} x {self.window_size[1]}",
+            (x + 10, y + 8),
+            (225, 232, 238),
+        )
+        lower = pygame.Rect(x + 8, y + 30, 120, 24)
+        higher = pygame.Rect(x + 140, y + 30, 120, 24)
+        self._button(screen, lower, "Lower")
+        self._button(screen, higher, "Higher")
+        self._settings_buttons.extend(((lower, "resolution_lower"), (higher, "resolution_higher")))
+        metrics = self.presentation_metrics
+        self._small_text(
+            screen,
+            f"Frame p95 {metrics.frame_p95_ms:5.1f} ms  Present {metrics.present_p95_ms:5.1f} ms",
+            (x + 10, y + 62),
+            (166, 191, 215),
+        )
+        self._small_text(
+            screen,
+            f"Render {metrics.render_p95_ms:5.1f} ms  Sim {metrics.simulation_p95_ms:5.1f} ms",
+            (x + 10, y + 82),
+            (166, 191, 215),
+        )
+        self._small_text(
+            screen,
+            "Frame cap off; VSync not requested",
+            (x + 10, y + 102),
+            (111, 221, 151),
+        )
+        y += 122
         for action, label in (("save", "Save"), ("load", "Load"), ("new", "New game")):
-            rectangle = pygame.Rect(x + 8, y + 7, 144, 24)
+            rectangle = pygame.Rect(x + 8, y, 252, 24)
             self._button(screen, rectangle, label)
             self._settings_buttons.append((rectangle, action))
-            y += 30
+            y += 26
 
     def _draw_help(self, screen: pygame.Surface) -> None:
         rectangle = pygame.Rect(
@@ -2145,6 +2372,14 @@ class AirtsApp:
         if current:
             lines.append(current)
         return lines
+
+
+def _percentile(values: deque[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, ceil(fraction * len(ordered)) - 1))
+    return ordered[index]
 
 
 def _entity_hit_distance(entity: Entity, point: Point) -> float:

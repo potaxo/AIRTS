@@ -394,26 +394,30 @@ hubs, command centers, and resource generators.
 
 The runtime currently supports:
 
-* fixed 10 Hz deterministic simulation with a separately paced 100 FPS frontend target;
+* fixed 10 Hz deterministic simulation with an uncapped, GPU-interpolated frontend and a tested
+  100 FPS 1,000-unit work budget;
 * direct move, stop, hold, and explicit attack commands with manual override;
 * point, polyline, rectangle, and freehand grounding; typed selection; region naming; whole-object
   geometry replacement; and route/region deletion;
 * patrol, defend, production, construction, reinforcement, repair-and-return, and economy
   automations with inspectable lifecycle, priority, pause, resume, cancellation, and event history;
-* weighted four-direction routing, distinct group destinations, local physical collision and push,
-  opportunistic projectile combat, visibility/exploration state, resource income, production, and
-  builder construction;
+* weighted four-direction routing, collision-safe overflow and patrol formations, saturation-aware
+  route recovery, local physical collision and push, opportunistic projectile combat,
+  visibility/exploration state, resource income, production, and builder construction;
 * versioned complete-state saves, deterministic replay verification, JSON Lines event export,
   configurable deterministic enemy generation, and custom map loading;
-* a native OpenGL 3.3 default renderer and an explicitly selected bounded software renderer.
+* a native OpenGL 3.3 default renderer with GPU-batched projectile feedback, fixed-tick position
+  interpolation, selectable window resolution, uncapped submission, and bounded UI-texture
+  refreshes, plus an explicitly selected bounded software renderer.
 
 Starting resources are one integer balance per owner. Each resource generator adds 1,000 resources
 every ten simulation ticks. Ambient enemy generation defaults to one mobile enemy per second with a
 cap of 100 and can be disabled or reconfigured. Save and replay documents preserve those settings
 and reject incompatible schema versions.
 
-The [performance milestone document](milestones/performance.md) defines the three 1,000-unit
-contracts and the limits of the evidence each one provides.
+The [performance milestone document](milestones/performance.md) defines five 1,000-unit contract
+groups, including a sustained genuine 500-vs-500 mixed-unit battle and saturated focus, tiny-area,
+and bridge queues, and the limits of the evidence each one provides.
 
 ## 41.3 Current implementation limitations
 
