@@ -11,11 +11,13 @@ from airts.commands import (
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
+    RemoveEntityCommand,
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget
 from airts.map_model import EntityKind, load_map_data
 from airts.persistence import load_simulation, save_simulation
+from airts.projectiles import Projectile
 from airts.replay import load_replay, run_replay, save_replay
 from airts.simulation import Simulation
 
@@ -201,6 +203,49 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
     assert requested.accepted
     assert assigned.kind is AutomationKind.REPAIR_AND_RETURN
     assert assigned.title == "Repair And Return"
+
+
+def test_projectile_finishes_at_last_target_position_after_target_is_destroyed(
+    tmp_path: Path,
+) -> None:
+    simulation = _phase5_simulation()
+    destination = simulation.entities["enemy"].selection_position
+    projectile = Projectile(
+        projectile_id="projectile_orphan",
+        source_entity_id="tank",
+        target_entity_id="enemy",
+        owner_id="player",
+        weapon_kind=EntityKind.LIGHT_TANK,
+        position=Point(2.5, 2.5),
+        destination=destination,
+        damage=EntityKind.LIGHT_TANK.profile.attack_damage,
+        speed=5.0,
+    )
+    simulation.projectiles[projectile.projectile_id] = projectile
+    assert simulation.execute(RemoveEntityCommand("enemy", "TEST_DESTROYED")).accepted
+
+    simulation.advance()
+
+    assert projectile.projectile_id in simulation.projectiles
+    assert projectile.position != destination
+
+    save_path = tmp_path / "orphan-projectile.json"
+    save_simulation(simulation, save_path)
+    restored = load_simulation(save_path)
+    restored_projectile = restored.projectiles[projectile.projectile_id]
+    assert restored_projectile.destination == destination
+
+    simulation.advance(3)
+    restored.advance(3)
+
+    assert projectile.projectile_id not in simulation.projectiles
+    trace = next(
+        item
+        for item in simulation.projectile_traces
+        if item.projectile_id == projectile.projectile_id
+    )
+    assert trace.points[-1] == destination
+    assert restored.snapshot() == simulation.snapshot()
 
 
 def test_explicit_attack_moves_and_fires_without_canceling_locomotion() -> None:

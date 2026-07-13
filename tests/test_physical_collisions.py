@@ -6,7 +6,7 @@ from airts.entities import UnitState
 from airts.events import EventType
 from airts.geometry import Point, PolylineTarget
 from airts.map_model import EntityKind, load_map_data
-from airts.movement import collision_radius
+from airts.movement import collision_radius, unit_mass
 from airts.simulation import Simulation
 
 
@@ -187,3 +187,8 @@ def test_continuous_physical_pushing_is_deterministic() -> None:
     assert [event.to_dict() for event in first.events.events] == [
         event.to_dict() for event in second.events.events
     ]
+
+
+def test_builder_uses_mobile_collision_profile() -> None:
+    assert unit_mass(EntityKind.BUILDER) == unit_mass(EntityKind.SCOUT)
+    assert collision_radius(EntityKind.SCOUT) <= collision_radius(EntityKind.BUILDER) < 0.4

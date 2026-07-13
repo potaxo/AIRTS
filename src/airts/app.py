@@ -11,6 +11,7 @@ import pygame
 from airts.automations import (
     AutomationKind,
     AutomationStatus,
+    ConstructionParameters,
     DefendParameters,
     ProductionParameters,
     target_center,
@@ -18,9 +19,11 @@ from airts.automations import (
 from airts.commands import (
     AttackCommand,
     CancelAutomationCommand,
+    CreateConstructionCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
     CreatePatrolCommand,
+    CreateProductionBatchCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
@@ -60,9 +63,14 @@ class InputMode(StrEnum):
 
 class AirtsApp:
     MAP_PIXELS = 768
-    PANEL_WIDTH = 400
+    LEFT_PANEL_WIDTH = 280
+    RIGHT_PANEL_WIDTH = 380
+    PANEL_WIDTH = RIGHT_PANEL_WIDTH
     COMMAND_BAR_HEIGHT = 104
-    WINDOW_SIZE = (MAP_PIXELS + PANEL_WIDTH, MAP_PIXELS + COMMAND_BAR_HEIGHT)
+    WINDOW_SIZE = (
+        LEFT_PANEL_WIDTH + MAP_PIXELS + RIGHT_PANEL_WIDTH,
+        MAP_PIXELS + COMMAND_BAR_HEIGHT,
+    )
     BACKGROUND = (18, 22, 28)
     PANEL_BACKGROUND = (27, 32, 40)
     ENTITY_CLICK_RADIUS = 1.5
@@ -85,10 +93,22 @@ class AirtsApp:
         self.line_points: list[Point] = []
         self.freehand_points: list[Point] = []
         self.drag_start: Point | None = None
+        self.camera_offset = Point(0, 0)
+        self._camera_drag_position: tuple[int, int] | None = None
+        self.automation_scroll = 0
+        self.settings_open = False
+        self.help_open = False
+        self.placement_kind: EntityKind | None = None
+        self.production_sequence: list[tuple[EntityKind, int]] = []
         self.paused = False
+        self.fps = 0.0
         self.notice = "Select units, draw a target, then press A to patrol."
         self._automation_buttons: list[tuple[pygame.Rect, str, str]] = []
         self._command_buttons: list[tuple[pygame.Rect, str]] = []
+        self._settings_buttons: list[tuple[pygame.Rect, str]] = []
+        self._type_buttons: list[tuple[pygame.Rect, EntityKind]] = []
+        self.inspected_kind: EntityKind | None = None
+        self._last_entity_click: tuple[str, int] | None = None
         self._initial_map = simulation.game_map
         self._initial_seed = simulation.random_seed
         self._initial_ambient_enemy_spawns = simulation.ambient_enemy_spawns
@@ -98,10 +118,64 @@ class AirtsApp:
         self._font: pygame.font.Font | None = None
         self._small_font: pygame.font.Font | None = None
         self._map_surface: pygame.Surface | None = None
+        self.resize_layout(self.WINDOW_SIZE)
 
     @property
     def tile_size(self) -> float:
-        return self.MAP_PIXELS / self.simulation.game_map.width
+        return min(
+            self.canvas_rect.width / self.simulation.game_map.width,
+            self.canvas_rect.height / self.simulation.game_map.height,
+        )
+
+    @property
+    def map_pixel_size(self) -> tuple[int, int]:
+        return (
+            round(self.simulation.game_map.width * self.tile_size),
+            round(self.simulation.game_map.height * self.tile_size),
+        )
+
+    @property
+    def map_origin(self) -> tuple[int, int]:
+        width, height = self.map_pixel_size
+        return (
+            self.canvas_rect.centerx - width // 2 + round(self.camera_offset.x),
+            self.canvas_rect.centery - height // 2 + round(self.camera_offset.y),
+        )
+
+    def resize_layout(self, size: tuple[int, int]) -> None:
+        width = max(760, size[0])
+        height = max(520, size[1])
+        self.ui_scale = max(
+            0.8, min(1.45, min(width / self.WINDOW_SIZE[0], height / self.WINDOW_SIZE[1]))
+        )
+        left_width = max(200, round(self.LEFT_PANEL_WIDTH * self.ui_scale))
+        right_width = max(280, round(self.RIGHT_PANEL_WIDTH * self.ui_scale))
+        command_height = max(82, round(self.COMMAND_BAR_HEIGHT * self.ui_scale))
+        center_width = max(280, width - left_width - right_width)
+        self.left_panel_rect = pygame.Rect(0, 0, left_width, height)
+        self.right_panel_rect = pygame.Rect(width - right_width, 0, right_width, height)
+        self.canvas_rect = pygame.Rect(left_width, 0, center_width, height - command_height)
+        self.command_bar_rect = pygame.Rect(
+            left_width, height - command_height, center_width, command_height
+        )
+        self.camera_offset = Point(0, 0)
+        if self._font is not None and pygame.font.get_init():
+            self._font = pygame.font.Font(None, round(24 * self.ui_scale))
+            self._small_font = pygame.font.Font(None, round(19 * self.ui_scale))
+
+    def pan_camera(self, dx: float, dy: float) -> None:
+        limit = min(self.map_pixel_size) * 0.45
+        self.camera_offset = Point(
+            max(-limit, min(limit, self.camera_offset.x + dx)),
+            max(-limit, min(limit, self.camera_offset.y + dy)),
+        )
+
+    def scroll_automations(self, delta: int, *, visible_rows: int, total_rows: int) -> None:
+        maximum = max(0, total_rows - visible_rows)
+        self.automation_scroll = max(0, min(maximum, self.automation_scroll + delta))
+
+    def _in_canvas(self, position: tuple[int, int]) -> bool:
+        return self.canvas_rect.collidepoint(position)
 
     def run(self, max_frames: int | None = None) -> None:
         display_initialized = False
@@ -112,6 +186,7 @@ class AirtsApp:
             pygame.font.init()
             font_initialized = True
             screen = pygame.display.set_mode(self.WINDOW_SIZE, pygame.RESIZABLE)
+            self.resize_layout(self.WINDOW_SIZE)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
@@ -121,6 +196,7 @@ class AirtsApp:
             frames = 0
             while running and (max_frames is None or frames < max_frames):
                 elapsed = min(clock.tick(60) / 1000.0, 0.25)
+                self.fps = clock.get_fps()
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
@@ -172,6 +248,15 @@ class AirtsApp:
             self._handle_mouse_motion(event.pos, event.buttons)
         elif event.type == pygame.MOUSEBUTTONUP:
             self._handle_mouse_up(event.button, event.pos)
+        elif event.type == pygame.MOUSEWHEEL:
+            mouse = pygame.mouse.get_pos()
+            if self.left_panel_rect.collidepoint(mouse):
+                self.scroll_automations(
+                    -event.y, visible_rows=7, total_rows=len(self.simulation.live_automations)
+                )
+        elif event.type in {pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED}:
+            size = event.size if hasattr(event, "size") else (event.x, event.y)
+            self.resize_layout(tuple(size))
 
     def _handle_key(self, key: int) -> None:
         mode_keys = {
@@ -220,19 +305,72 @@ class AirtsApp:
             self.notice = "Simulation paused." if self.paused else "Simulation resumed."
         elif key == pygame.K_ESCAPE:
             self._clear_draft()
-            self.active_target = None
-            self.notice = "Spatial target cleared."
+            self._clear_selection_state()
+            self.mode = InputMode.SELECT
+            self.placement_kind = None
+            self.settings_open = False
+            self.help_open = False
+            self._commit_selection()
+            self.notice = "Selection and active tools cleared."
 
     def _handle_mouse_down(self, button: int, position: tuple[int, int]) -> None:
-        if position[0] >= self.MAP_PIXELS:
+        # Direct headless interaction tests use historical canvas-local pixels.
+        if self._font is None and position[0] < self.canvas_rect.width:
+            origin_x, origin_y = self.map_origin
+            position = (position[0] + origin_x, position[1] + origin_y)
+        if button == 1 and self.settings_open:
+            if self._handle_settings_click(position):
+                return
+            self.settings_open = False
+            return
+        if button == 2 and self._in_canvas(position):
+            self._camera_drag_position = position
+            return
+        if self.left_panel_rect.collidepoint(position) or self.right_panel_rect.collidepoint(
+            position
+        ):
             if button == 1:
                 self._handle_panel_click(position)
             return
-        if position[1] >= self.MAP_PIXELS:
+        if self.command_bar_rect.collidepoint(position):
             if button == 1:
                 self._handle_command_click(position)
             return
         point = self._map_point(position)
+        if button == 3 and self.placement_kind is not None:
+            self.placement_kind = None
+            self.notice = "Building placement closed. Queued construction is unchanged."
+            return
+        if button == 1 and self.placement_kind is not None:
+            builders = [
+                entity_id
+                for entity_id in sorted(self.selected_entities)
+                if self.simulation.entities[entity_id].kind is EntityKind.BUILDER
+            ]
+            if not builders:
+                self.notice = "Select one or more builders."
+                return
+            snapped = Point(float(int(point.x)), float(int(point.y)))
+            try:
+                queued = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+            except pygame.error:
+                queued = False
+            result = self.simulation.execute(
+                CreateConstructionCommand(
+                    builders[0],
+                    self.placement_kind,
+                    snapped,
+                    builder_ids=tuple(builders),
+                    queued=queued,
+                )
+            )
+            if result.accepted:
+                self.notice = "Construction queued." if queued else "Construction started."
+            else:
+                self.notice = result.reason
+            if result.accepted and not queued:
+                self.placement_kind = None
+            return
         if button == 3:
             if self.mode is InputMode.LINE:
                 if len(self.line_points) < 2:
@@ -267,18 +405,31 @@ class AirtsApp:
     def _handle_mouse_motion(
         self, position: tuple[int, int], buttons: tuple[bool, bool, bool]
     ) -> None:
+        if self._font is None and position[0] < self.canvas_rect.width:
+            origin_x, origin_y = self.map_origin
+            position = (position[0] + origin_x, position[1] + origin_y)
         if (
             self.mode is InputMode.FREEHAND
             and buttons[0]
-            and position[0] < self.MAP_PIXELS
+            and self._in_canvas(position)
             and self.freehand_points
         ):
             point = self._map_point(position)
             if point.distance_to(self.freehand_points[-1]) >= 0.2:
                 self.freehand_points.append(point)
+        if self._camera_drag_position is not None and buttons[1]:
+            previous = self._camera_drag_position
+            self.pan_camera(position[0] - previous[0], position[1] - previous[1])
+            self._camera_drag_position = position
 
     def _handle_mouse_up(self, button: int, position: tuple[int, int]) -> None:
-        if button != 1 or position[0] >= self.MAP_PIXELS:
+        if self._font is None and position[0] < self.canvas_rect.width:
+            origin_x, origin_y = self.map_origin
+            position = (position[0] + origin_x, position[1] + origin_y)
+        if button == 2:
+            self._camera_drag_position = None
+            return
+        if button != 1 or not self._in_canvas(position):
             return
         point = self._map_point(position)
         if self.mode is InputMode.FREEHAND and self.freehand_points:
@@ -325,6 +476,17 @@ class AirtsApp:
                 self.notice = f"Inspecting enemy {clicked}; commands disabled."
                 return
             found = {clicked} if clicked is not None else set()
+            if clicked is not None:
+                click_tick = pygame.time.get_ticks()
+                if (
+                    self._last_entity_click is not None
+                    and self._last_entity_click[0] == clicked
+                    and click_tick - self._last_entity_click[1] <= 400
+                ):
+                    self._select_all_visible_kind(self.simulation.entities[clicked].kind)
+                    self._last_entity_click = None
+                    return
+                self._last_entity_click = (clicked, click_tick)
             if not found:
                 found_points = {
                     reference.reference_id
@@ -376,7 +538,7 @@ class AirtsApp:
         else:
             self.selected_entities = found
         self.inspected_entity_id = next(iter(found)) if len(found) == 1 else None
-        self._commit_selection()
+        self._selection_changed()
         self.notice = f"Selected {len(self.selected_entities)} unit(s)."
 
     def _finish_target(self, target: SpatialTarget) -> None:
@@ -417,6 +579,41 @@ class AirtsApp:
                 tuple(sorted(self.selected_regions)),
             )
         )
+
+    def _selection_changed(self) -> None:
+        kinds = {
+            self.simulation.entities[entity_id].kind
+            for entity_id in self.selected_entities
+            if entity_id in self.simulation.entities
+        }
+        self.inspected_kind = next(iter(kinds)) if len(kinds) == 1 else None
+        self._commit_selection()
+
+    def _filter_selection_to_kind(self, kind: EntityKind) -> None:
+        self.selected_entities = {
+            entity_id
+            for entity_id in self.selected_entities
+            if self.simulation.entities[entity_id].kind is kind
+        }
+        self.inspected_entity_id = (
+            next(iter(self.selected_entities)) if len(self.selected_entities) == 1 else None
+        )
+        self._selection_changed()
+        self.notice = f"Selected {len(self.selected_entities)} {kind.value} unit(s)."
+
+    def _select_all_visible_kind(self, kind: EntityKind) -> None:
+        self.selected_entities = {
+            entity_id
+            for entity_id, entity in self.simulation.entities.items()
+            if entity.owner_id == "player"
+            and entity.kind is kind
+            and self.canvas_rect.collidepoint(self._screen_point(entity.selection_position))
+        }
+        self.inspected_entity_id = (
+            next(iter(self.selected_entities)) if len(self.selected_entities) == 1 else None
+        )
+        self._selection_changed()
+        self.notice = f"Selected all visible {kind.value} units."
 
     def _name_selected_region(self) -> None:
         if len(self.selected_regions) != 1:
@@ -493,34 +690,41 @@ class AirtsApp:
             self.selected_automation_id = result.automation_id
 
     def _create_production(self) -> None:
-        factories = [
+        factories = self._selected_factory_ids()
+        if not factories:
+            self.notice = "Select one or more factories for production."
+            return
+        if not isinstance(self.active_target, PolygonRegion | PolylineTarget):
+            self.notice = "Select a defense line or area before using Produce + Defend."
+            return
+        loops = tuple(self.simulation.continuous_production(factory_id) for factory_id in factories)
+        if any(loop is None for loop in loops):
+            self.notice = "Start a Loop on every selected factory before Produce + Defend."
+            return
+        results = [
+            self.simulation.execute(
+                ModifyAutomationCommand(loop.automation_id, target=self.active_target)
+            )
+            for loop in loops
+            if loop is not None
+        ]
+        accepted = sum(result.accepted for result in results)
+        if accepted == len(factories):
+            self.notice = f"Production defense assigned to {accepted} factories."
+            self.selected_automation_id = next(
+                loop.automation_id for loop in reversed(loops) if loop is not None
+            )
+        else:
+            failure = next(result.reason for result in results if not result.accepted)
+            self.notice = f"Updated {accepted}/{len(factories)} factories: {failure}"
+
+    def _selected_factory_ids(self) -> tuple[str, ...]:
+        return tuple(
             entity_id
             for entity_id in sorted(self.selected_entities)
-            if self.simulation.entities[entity_id].kind is EntityKind.FACTORY
-        ]
-        if len(factories) != 1:
-            self.notice = "Select exactly one factory for production."
-            return
-        rally_point = (
-            self.active_target.point if isinstance(self.active_target, PointTarget) else None
+            if self.simulation.entities[entity_id].owner_id == "player"
+            and self.simulation.entities[entity_id].kind is EntityKind.FACTORY
         )
-        defend_target = (
-            self.active_target if isinstance(self.active_target, PolygonRegion) else None
-        )
-        result = self.simulation.execute(
-            CreateProductionCommand(
-                factories[0],
-                EntityKind.LIGHT_TANK,
-                1,
-                rally_point,
-                title="Continuous Tank Reinforcements",
-                continuous=True,
-                defend_target=defend_target,
-            )
-        )
-        self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
-        if result.accepted:
-            self.selected_automation_id = result.automation_id
 
     def _create_repair(self) -> None:
         units = tuple(
@@ -537,7 +741,8 @@ class AirtsApp:
         generators = tuple(
             entity_id
             for entity_id in sorted(self.selected_entities)
-            if self.simulation.entities[entity_id].kind is EntityKind.RESOURCE_GENERATOR
+            if self.simulation.entities[entity_id].owner_id == "player"
+            and self.simulation.entities[entity_id].kind is EntityKind.RESOURCE_GENERATOR
         )
         result = self.simulation.execute(
             CreateEconomyCommand(generators, self.simulation.resources.get("player", 0) + 100)
@@ -610,17 +815,91 @@ class AirtsApp:
         self.active_reference_id = None
         self.active_target = None
         self.selected_automation_id = None
+        self.inspected_kind = None
+        self.placement_kind = None
 
     def _handle_command_click(self, position: tuple[int, int]) -> None:
         for rectangle, action in self._command_buttons:
             if not rectangle.collidepoint(position):
                 continue
+            if action == "settings":
+                self.settings_open = not self.settings_open
+                return
+            if action == "help":
+                self.help_open = not self.help_open
+                return
+            if action.startswith("build:"):
+                self.placement_kind = EntityKind(action.partition(":")[2])
+                self.notice = "Click a clear grid location to place the building."
+                return
+            if action.startswith("queue:"):
+                kind = EntityKind(action.partition(":")[2])
+                if self.production_sequence and self.production_sequence[-1][0] is kind:
+                    previous_kind, quantity = self.production_sequence[-1]
+                    self.production_sequence[-1] = (previous_kind, quantity + 1)
+                else:
+                    self.production_sequence.append((kind, 1))
+                self.notice = "Unit added to the staged production queue."
+                return
+            if action.startswith("loop:"):
+                factories = self._selected_factory_ids()
+                if not factories:
+                    self.notice = "Select one or more factories."
+                    return
+                kind = EntityKind(action.partition(":")[2])
+                results = [
+                    self.simulation.execute(
+                        CreateProductionCommand(
+                            factory_id,
+                            kind,
+                            1,
+                            title=f"Continuous {kind.value.replace('_', ' ').title()}",
+                            continuous=True,
+                        )
+                    )
+                    for factory_id in factories
+                ]
+                accepted = sum(result.accepted for result in results)
+                if accepted == len(factories):
+                    self.notice = (
+                        f"Continuous {kind.value.replace('_', ' ')} started for "
+                        f"{accepted} factories."
+                    )
+                    self.selected_automation_id = next(
+                        result.automation_id for result in reversed(results) if result.accepted
+                    )
+                else:
+                    failure = next(result.reason for result in results if not result.accepted)
+                    self.notice = f"Started {accepted}/{len(factories)} factories: {failure}"
+                return
+            if action == "start_queue":
+                factories = self._selected_factory_ids()
+                if not factories or not self.production_sequence:
+                    self.notice = "Select factories and stage at least one unit."
+                    return
+                sequence = tuple(self.production_sequence)
+                results = [
+                    self.simulation.execute(CreateProductionBatchCommand(factory_id, sequence))
+                    for factory_id in factories
+                ]
+                accepted = sum(result.accepted for result in results)
+                if accepted == len(factories):
+                    self.production_sequence.clear()
+                    self.notice = f"Production queue started for {accepted} factories."
+                    self.selected_automation_id = next(
+                        result.automation_id for result in reversed(results) if result.accepted
+                    )
+                else:
+                    failure = next(result.reason for result in results if not result.accepted)
+                    self.notice = f"Queued {accepted}/{len(factories)} factories: {failure}"
+                return
             {
                 "stop": self._stop_selected,
                 "hold": self._hold_selected,
                 "patrol": self._create_patrol,
                 "defend": self._create_defend,
                 "produce": self._create_production,
+                "economy": self._create_economy,
                 "delete": self._delete_selected_reference,
                 "save": self._save_game,
                 "load": self._load_game,
@@ -628,7 +907,21 @@ class AirtsApp:
             }[action]()
             return
 
+    def _handle_settings_click(self, position: tuple[int, int]) -> bool:
+        for rectangle, action in self._settings_buttons:
+            if not rectangle.collidepoint(position):
+                continue
+            {"save": self._save_game, "load": self._load_game, "new": self._new_game}[action]()
+            self.settings_open = False
+            return True
+        return False
+
     def _handle_panel_click(self, position: tuple[int, int]) -> None:
+        for rectangle, kind in self._type_buttons:
+            if rectangle.collidepoint(position):
+                self._filter_selection_to_kind(kind)
+                return
+        self._handle_command_click(position)
         for rectangle, action, automation_id in self._automation_buttons:
             if not rectangle.collidepoint(position):
                 continue
@@ -648,13 +941,22 @@ class AirtsApp:
     def _draw(self, screen: pygame.Surface) -> None:
         self._prune_removed_entities()
         screen.fill(self.BACKGROUND)
+        previous_clip = screen.get_clip()
+        screen.set_clip(self.canvas_rect)
         self._draw_map(screen)
         self._draw_spatial_input(screen)
+        self._draw_construction(screen)
         self._draw_assembly_glows(screen)
         self._draw_entities(screen)
         self._draw_projectiles(screen)
+        screen.set_clip(previous_clip)
         self._draw_command_bar(screen)
         self._draw_panel(screen)
+        self._draw_context_panel(screen)
+        if self.settings_open:
+            self._draw_settings_menu(screen)
+        if self.help_open:
+            self._draw_help(screen)
 
     def _prune_removed_entities(self) -> None:
         existing = self.simulation.entities.keys()
@@ -664,7 +966,8 @@ class AirtsApp:
 
     def _draw_map(self, screen: pygame.Surface) -> None:
         if self._map_surface is not None:
-            screen.blit(self._map_surface, (0, 0))
+            scaled = pygame.transform.scale(self._map_surface, self.map_pixel_size)
+            screen.blit(scaled, self.map_origin)
             return
         surface = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS))
         terrain_colors = {
@@ -675,7 +978,7 @@ class AirtsApp:
             Terrain.ROCK: (66, 69, 72),
             Terrain.BRIDGE: (148, 126, 82),
         }
-        tile = self.tile_size
+        tile = self.MAP_PIXELS / self.simulation.game_map.width
         for y, row in enumerate(self.simulation.game_map.terrain):
             for x, terrain in enumerate(row):
                 rectangle = pygame.Rect(
@@ -687,13 +990,15 @@ class AirtsApp:
             pygame.draw.line(surface, (44, 65, 49), (pixel, 0), (pixel, self.MAP_PIXELS))
             pygame.draw.line(surface, (44, 65, 49), (0, pixel), (self.MAP_PIXELS, pixel))
         self._map_surface = surface
-        screen.blit(surface, (0, 0))
+        scaled = pygame.transform.scale(surface, self.map_pixel_size)
+        screen.blit(scaled, self.map_origin)
 
     def _draw_entities(self, screen: pygame.Surface) -> None:
         colors = {
             EntityKind.SCOUT: (82, 211, 237),
             EntityKind.LIGHT_TANK: (235, 221, 93),
             EntityKind.HEAVY_TANK: (230, 139, 75),
+            EntityKind.BUILDER: (99, 220, 176),
             EntityKind.FACTORY: (112, 142, 181),
             EntityKind.REPAIR_HUB: (110, 178, 151),
             EntityKind.COMMAND_CENTER: (155, 129, 190),
@@ -716,8 +1021,8 @@ class AirtsApp:
             if entity.category is EntityCategory.BUILDING:
                 width, height = entity.kind.profile.footprint
                 rectangle = pygame.Rect(
-                    round(entity.position.x * self.tile_size),
-                    round(entity.position.y * self.tile_size),
+                    self._screen_point(entity.position)[0],
+                    self._screen_point(entity.position)[1],
                     round(width * self.tile_size),
                     round(height * self.tile_size),
                 )
@@ -742,21 +1047,74 @@ class AirtsApp:
             health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
             pygame.draw.rect(screen, (74, 218, 111), pygame.Rect(bar.x, bar.y, health_width, 3))
         inspected = self.simulation.entities.get(self.inspected_entity_id or "")
-        if (
-            inspected is not None
-            and inspected.kind.profile.attack_range > 0
-            and len(self.selected_entities) <= 1
-        ):
+        interaction_range = (
+            inspected.kind.profile.build_range
+            if inspected is not None and inspected.kind is EntityKind.BUILDER
+            else inspected.kind.profile.attack_range
+            if inspected is not None
+            else 0.0
+        )
+        if inspected is not None and interaction_range > 0 and len(self.selected_entities) <= 1:
             pygame.draw.circle(
                 screen,
-                (255, 218, 100),
+                (105, 232, 172) if inspected.kind is EntityKind.BUILDER else (255, 218, 100),
                 self._screen_point(inspected.selection_position),
-                round(inspected.kind.profile.attack_range * self.tile_size),
+                round(interaction_range * self.tile_size),
                 1,
             )
 
+    def _draw_construction(self, screen: pygame.Surface) -> None:
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        for automation in self.simulation.live_automations:
+            if automation.kind is not AutomationKind.CONSTRUCTION:
+                continue
+            parameters = automation.parameters
+            assert isinstance(parameters, ConstructionParameters)
+            width, height = parameters.building_kind.profile.footprint
+            origin = self._screen_point(parameters.position)
+            rectangle = pygame.Rect(
+                origin,
+                (round(width * self.tile_size), round(height * self.tile_size)),
+            )
+            pygame.draw.rect(overlay, (94, 176, 220, 80), rectangle)
+            pygame.draw.rect(overlay, (164, 222, 250, 230), rectangle, 2)
+            progress = parameters.construction_value / parameters.required_value
+            bar = pygame.Rect(rectangle.x, rectangle.bottom + 3, rectangle.width, 5)
+            pygame.draw.rect(overlay, (30, 38, 46, 230), bar)
+            pygame.draw.rect(
+                overlay,
+                (102, 222, 156, 245),
+                pygame.Rect(bar.x, bar.y, round(bar.width * progress), bar.height),
+            )
+            if self._small_font is not None:
+                label = self._small_font.render(f"{round(progress * 100)}%", True, (245, 250, 252))
+                overlay.blit(label, (rectangle.x, rectangle.y - label.get_height()))
+
+        mouse = pygame.mouse.get_pos() if pygame.display.get_init() else (-1, -1)
+        if self.placement_kind is not None and self.canvas_rect.collidepoint(mouse):
+            preview = self._construction_preview_at(self._map_point(mouse))
+            if preview is not None:
+                position, valid = preview
+                width, height = self.placement_kind.profile.footprint
+                origin = self._screen_point(position)
+                rectangle = pygame.Rect(
+                    origin,
+                    (round(width * self.tile_size), round(height * self.tile_size)),
+                )
+                color = (95, 224, 145) if valid else (235, 88, 88)
+                pygame.draw.rect(overlay, (*color, 72), rectangle)
+                pygame.draw.rect(overlay, (*color, 245), rectangle, 3)
+        screen.blit(overlay, (0, 0))
+
+    def _construction_preview_at(self, point: Point) -> tuple[Point, bool] | None:
+        if self.placement_kind is None:
+            return None
+        position = Point(float(int(point.x)), float(int(point.y)))
+        valid = self.simulation._validate_building_placement(self.placement_kind, position) is None
+        return position, valid
+
     def _draw_assembly_glows(self, screen: pygame.Surface) -> None:
-        glow = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS), pygame.SRCALPHA)
+        glow = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
         drawn = False
         for automation in self.simulation.live_automations:
             if automation.kind is not AutomationKind.DEFEND:
@@ -793,8 +1151,7 @@ class AirtsApp:
             if (
                 self.mode is InputMode.LINE
                 and self.line_points
-                and mouse[0] < self.MAP_PIXELS
-                and mouse[1] < self.MAP_PIXELS
+                and self.canvas_rect.collidepoint(mouse)
             ):
                 pixels.append(mouse)
             if len(pixels) > 1:
@@ -803,7 +1160,7 @@ class AirtsApp:
                 pygame.draw.circle(screen, (255, 170, 210), pixel, 3)
         if self.mode in {InputMode.SELECT, InputMode.RECTANGLE} and self.drag_start is not None:
             mouse = pygame.mouse.get_pos()
-            if mouse[0] < self.MAP_PIXELS and mouse[1] < self.MAP_PIXELS:
+            if self.canvas_rect.collidepoint(mouse):
                 start = self._screen_point(self.drag_start)
                 rectangle = pygame.Rect(start, (mouse[0] - start[0], mouse[1] - start[1]))
                 rectangle.normalize()
@@ -830,32 +1187,25 @@ class AirtsApp:
             EntityKind.LIGHT_TANK: (255, 232, 105),
             EntityKind.HEAVY_TANK: (255, 135, 70),
         }
-        radii = {
-            EntityKind.SCOUT: 3,
-            EntityKind.LIGHT_TANK: 4,
-            EntityKind.HEAVY_TANK: 5,
-        }
         for trace in self.simulation.projectile_traces:
             points = [self._screen_point(point) for point in trace.points]
             if len(points) > 1:
-                pygame.draw.lines(screen, colors[trace.weapon_kind], False, points, 2)
+                pygame.draw.lines(screen, colors[trace.weapon_kind], False, points, 1)
         for projectile in self.simulation.projectiles.values():
             color = colors[projectile.weapon_kind]
             points = [self._screen_point(point) for point in projectile.trajectory]
             if len(points) > 1:
-                pygame.draw.lines(screen, color, False, points, 3)
-            target = self.simulation.entities.get(projectile.target_entity_id)
-            if target is not None:
-                pygame.draw.line(
-                    screen,
-                    tuple(channel // 2 for channel in color),
-                    self._screen_point(projectile.position),
-                    self._screen_point(target.selection_position),
-                    1,
-                )
+                pygame.draw.lines(screen, color, False, points, 1)
+            pygame.draw.line(
+                screen,
+                tuple(channel // 2 for channel in color),
+                self._screen_point(projectile.position),
+                self._screen_point(projectile.destination),
+                1,
+            )
             center = self._screen_point(projectile.position)
-            pygame.draw.circle(screen, (255, 255, 255), center, radii[projectile.weapon_kind] + 2)
-            pygame.draw.circle(screen, color, center, radii[projectile.weapon_kind])
+            pygame.draw.circle(screen, (255, 255, 255), center, 3)
+            pygame.draw.circle(screen, color, center, 2)
 
     def _draw_target(
         self,
@@ -874,7 +1224,7 @@ class AirtsApp:
                 screen, color, False, [self._screen_point(p) for p in target.points], width
             )
         elif isinstance(target, PolygonRegion):
-            surface = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS), pygame.SRCALPHA)
+            surface = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
             points = [self._screen_point(point) for point in target.points]
             pygame.draw.polygon(surface, (*color, 55), points)
             pygame.draw.polygon(surface, (*color, 230), points, width)
@@ -883,12 +1233,12 @@ class AirtsApp:
     def _draw_command_bar(self, screen: pygame.Surface) -> None:
         if self._small_font is None:
             return
-        bar = pygame.Rect(0, self.MAP_PIXELS, self.MAP_PIXELS, self.COMMAND_BAR_HEIGHT)
+        bar = self.command_bar_rect
         pygame.draw.rect(screen, (24, 29, 36), bar)
         self._small_text(
             screen,
             "Commands — unavailable actions are omitted",
-            (14, self.MAP_PIXELS + 9),
+            (bar.x + 14, bar.y + 9),
             (190, 205, 220),
         )
         actions: list[tuple[str, str]] = []
@@ -904,19 +1254,18 @@ class AirtsApp:
             for entity in selected
             if entity.owner_id == "player" and entity.kind is EntityKind.FACTORY
         ]
-        if len(factories) == 1:
-            label = (
-                "Produce + Defend"
-                if isinstance(self.active_target, PolygonRegion)
-                else "Produce Continuously"
-            )
-            actions.append(("produce", label))
+        if factories:
+            loops = [self.simulation.continuous_production(item.entity_id) for item in factories]
+            if all(loop is not None for loop in loops) and isinstance(
+                self.active_target, PolygonRegion | PolylineTarget
+            ):
+                actions.append(("produce", "Produce + Defend"))
         if len(self.selected_routes | self.selected_regions) == 1:
             actions.append(("delete", "Delete route/region"))
-        actions.extend([("save", "Save"), ("load", "Load"), ("new", "New game")])
+        actions.append(("settings", "Settings"))
         self._command_buttons.clear()
-        x = 14
-        y = self.MAP_PIXELS + 38
+        x = bar.x + 14
+        y = bar.y + 38
         for action, label in actions:
             width = max(78, len(label) * 9 + 18)
             rectangle = pygame.Rect(x, y, width, 30)
@@ -927,15 +1276,16 @@ class AirtsApp:
     def _draw_panel(self, screen: pygame.Surface) -> None:
         if self._font is None or self._small_font is None:
             raise RuntimeError("fonts not initialized")
-        panel = pygame.Rect(self.MAP_PIXELS, 0, self.PANEL_WIDTH, self.MAP_PIXELS)
+        panel = self.left_panel_rect
         pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
-        x = self.MAP_PIXELS + 16
+        x = 16
         y = 14
         self._text(screen, "AIRTS — Phase 5", (x, y), (245, 245, 245))
         y += 28
         self._small_text(
             screen,
-            f"Tick {self.simulation.tick} | {self.mode.value} | {'PAUSED' if self.paused else 'RUNNING'}",
+            f"Tick {self.simulation.tick} | FPS {self.fps:4.0f} | "
+            f"{self.mode.value} | {'PAUSED' if self.paused else 'RUNNING'}",
             (x, y),
             (166, 191, 215),
         )
@@ -944,20 +1294,10 @@ class AirtsApp:
             self._small_text(screen, line, (x, y), (244, 216, 118))
             y += 18
         y += 7
-        self._small_text(screen, "1 Select  2 Line  3 Rectangle", (x, y), (205, 210, 218))
-        y += 18
-        self._small_text(screen, "4 Freehand  Right-click finishes line", (x, y), (205, 210, 218))
-        y += 18
-        self._small_text(
-            screen, "A Patrol D Defend P Produce R Repair G Economy", (x, y), (205, 210, 218)
-        )
-        y += 18
-        self._small_text(screen, "Right-click Move/Attack  Space Pause", (x, y), (205, 210, 218))
-        y += 28
-        self._small_text(screen, "Shift multi-select  N Name  E Edit", (x, y), (205, 210, 218))
-        y += 18
-        self._small_text(screen, "U Retarget  [ ] Priority", (x, y), (205, 210, 218))
-        y += 22
+        help_button = pygame.Rect(x, y, 72, 26)
+        self._button(screen, help_button, "Help")
+        self._command_buttons.append((help_button, "help"))
+        y += 38
         self._small_text(
             screen,
             f"Resources: {self.simulation.resources.get('player', 0)}",
@@ -1006,11 +1346,18 @@ class AirtsApp:
             self.selected_automation_id = (
                 live_automations[0].automation_id if live_automations else None
             )
-        for automation in live_automations:
-            self._small_text(screen, automation.title, (x, y), (232, 232, 232))
+        visible_automations = live_automations[self.automation_scroll : self.automation_scroll + 7]
+        for automation in visible_automations:
+            available_width = panel.right - x - 12
+            self._small_text(
+                screen,
+                self._fit_small_text(automation.title, available_width),
+                (x, y),
+                (232, 232, 232),
+            )
             self._automation_buttons.append(
                 (
-                    pygame.Rect(x, y - 2, self.PANEL_WIDTH - 32, 38),
+                    pygame.Rect(x, y - 2, panel.width - 32, 38),
                     "inspect",
                     automation.automation_id,
                 )
@@ -1031,7 +1378,19 @@ class AirtsApp:
                 linked_id = parameters.patrol_automation_id or parameters.defend_automation_id
                 if linked_id is not None:
                     summary += f" | -> {linked_id}"
-            self._small_text(screen, summary, (x, y), (153, 178, 198))
+            elif automation.kind is AutomationKind.CONSTRUCTION:
+                parameters = automation.parameters
+                assert isinstance(parameters, ConstructionParameters)
+                summary += (
+                    f" | {parameters.building_kind.value} "
+                    f"{parameters.construction_value:.0f}/{parameters.required_value:.0f}"
+                )
+            self._small_text(
+                screen,
+                self._fit_small_text(summary, available_width),
+                (x, y),
+                (153, 178, 198),
+            )
             y += 21
             if automation.status in {
                 AutomationStatus.ACTIVE,
@@ -1078,7 +1437,7 @@ class AirtsApp:
                 (x, y),
                 (158, 178, 194),
             )
-        y = max(y + 8, 690)
+        y = max(y + 8, panel.bottom - round(180 * self.ui_scale))
         self._text(screen, "Recent events", (x, y), (245, 245, 245))
         y += 24
         for event in self.simulation.events.query(limit=7):
@@ -1090,6 +1449,135 @@ class AirtsApp:
             if detail:
                 self._small_text(screen, f"  {detail}"[:47], (x, y), (124, 147, 166))
                 y += 16
+
+    def _draw_context_panel(self, screen: pygame.Surface) -> None:
+        panel = self.right_panel_rect
+        x = panel.x
+        pygame.draw.rect(screen, (22, 27, 34), panel)
+        x += 16
+        y = 16
+        self._text(screen, "Units and buildings", (x, y), (245, 245, 245))
+        y += 34
+        kinds: dict[EntityKind, int] = {}
+        for entity_id in self.selected_entities:
+            entity = self.simulation.entities[entity_id]
+            kinds[entity.kind] = kinds.get(entity.kind, 0) + 1
+        self._type_buttons.clear()
+        if not kinds:
+            self._small_text(screen, "Select a friendly unit or building.", (x, y), (164, 184, 202))
+            return
+        if len(kinds) > 1:
+            for kind, count in sorted(kinds.items(), key=lambda item: item[0].value):
+                rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+                self._button(screen, rectangle, f"{kind.value.replace('_', ' ').title()}  x{count}")
+                self._type_buttons.append((rectangle, kind))
+                y += 38
+        else:
+            self.inspected_kind = next(iter(kinds))
+        detail_kind = self.inspected_kind if self.inspected_kind in kinds else None
+        if detail_kind is None:
+            self._small_text(
+                screen, "Choose a type to show its controls.", (x, y + 4), (164, 184, 202)
+            )
+            return
+        y += 12
+        profile = detail_kind.profile
+        count = kinds[detail_kind]
+        detail_title = detail_kind.value.replace("_", " ").title()
+        if count > 1:
+            detail_title += f" x{count}"
+        self._text(screen, detail_title, (x, y), (244, 216, 118))
+        y += 28
+        self._small_text(
+            screen,
+            f"HP {profile.max_health}  Speed {profile.movement_speed or 0}  Cost {profile.production_cost}",
+            (x, y),
+            (180, 198, 214),
+        )
+        y += 34
+        if detail_kind is EntityKind.BUILDER:
+            self._small_text(
+                screen,
+                f"Build range {profile.build_range}  Work {profile.build_speed}/tick",
+                (x, y - 10),
+                (105, 222, 172),
+            )
+            y += 22
+            for kind in (EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR):
+                rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+                self._button(screen, rectangle, f"Build {kind.value.replace('_', ' ').title()}")
+                self._command_buttons.append((rectangle, f"build:{kind.value}"))
+                y += 38
+        elif detail_kind is EntityKind.FACTORY:
+            for kind in (
+                EntityKind.SCOUT,
+                EntityKind.LIGHT_TANK,
+                EntityKind.HEAVY_TANK,
+                EntityKind.BUILDER,
+            ):
+                queue = pygame.Rect(x, y, panel.width - 126, 30)
+                loop = pygame.Rect(queue.right + 8, y, 86, 30)
+                self._button(screen, queue, f"Add {kind.value.replace('_', ' ').title()}")
+                self._button(screen, loop, f"Loop x{count}" if count > 1 else "Loop")
+                self._command_buttons.append((queue, f"queue:{kind.value}"))
+                self._command_buttons.append((loop, f"loop:{kind.value}"))
+                y += 38
+            summary = ", ".join(
+                f"{quantity} {kind.value}" for kind, quantity in self.production_sequence
+            )
+            self._small_text(screen, summary[:42] or "Queue is empty", (x, y), (164, 184, 202))
+            y += 28
+            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            self._button(
+                screen,
+                rectangle,
+                f"Start queue on {count} factories" if count > 1 else "Start ordered queue",
+            )
+            self._command_buttons.append((rectangle, "start_queue"))
+        elif detail_kind is EntityKind.RESOURCE_GENERATOR:
+            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            self._button(
+                screen,
+                rectangle,
+                f"Develop economy x{count}" if count > 1 else "Develop economy",
+            )
+            self._command_buttons.append((rectangle, "economy"))
+
+    def _draw_settings_menu(self, screen: pygame.Surface) -> None:
+        x = self.command_bar_rect.x + 14
+        y = self.command_bar_rect.y - 106
+        self._settings_buttons.clear()
+        pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 160, 100), border_radius=4)
+        for action, label in (("save", "Save"), ("load", "Load"), ("new", "New game")):
+            rectangle = pygame.Rect(x + 8, y + 7, 144, 24)
+            self._button(screen, rectangle, label)
+            self._settings_buttons.append((rectangle, action))
+            y += 30
+
+    def _draw_help(self, screen: pygame.Surface) -> None:
+        rectangle = pygame.Rect(
+            self.canvas_rect.x + 40,
+            80,
+            max(320, self.canvas_rect.width - 80),
+            230,
+        )
+        pygame.draw.rect(screen, (28, 34, 42), rectangle, border_radius=4)
+        pygame.draw.rect(screen, (104, 126, 149), rectangle, 1, border_radius=4)
+        self._text(screen, "Controls", (rectangle.x + 18, rectangle.y + 16), (245, 245, 245))
+        lines = (
+            "1 Select   2 Line   3 Rectangle   4 Freehand",
+            "Right-click Move/Attack or finish a line   Middle-drag Pan",
+            "A Patrol   D Defend   R Repair   G Economy   Space Pause",
+            "Shift multi-select   N Name   E Edit   U Retarget   [ ] Priority",
+            "Choose a selected type in the right rail to show its actions.",
+        )
+        for index, line in enumerate(lines):
+            self._small_text(
+                screen,
+                line,
+                (rectangle.x + 18, rectangle.y + 55 + index * 28),
+                (190, 205, 220),
+            )
 
     def _button(self, screen: pygame.Surface, rectangle: pygame.Rect, label: str) -> None:
         pygame.draw.rect(screen, (59, 72, 88), rectangle, border_radius=3)
@@ -1119,15 +1607,35 @@ class AirtsApp:
         screen.blit(self._small_font.render(text, True, color), position)
 
     def _map_point(self, position: tuple[int, int]) -> Point:
-        return Point(position[0] / self.tile_size, position[1] / self.tile_size)
+        origin_x, origin_y = self.map_origin
+        if self._font is None and position[0] < self.canvas_rect.left:
+            origin_x -= self.canvas_rect.left
+        return Point(
+            (position[0] - origin_x) / self.tile_size,
+            (position[1] - origin_y) / self.tile_size,
+        )
 
     def _screen_point(self, point: Point) -> tuple[int, int]:
-        return round(point.x * self.tile_size), round(point.y * self.tile_size)
+        origin_x, origin_y = self.map_origin
+        return (
+            origin_x + round(point.x * self.tile_size),
+            origin_y + round(point.y * self.tile_size),
+        )
 
     def _clear_draft(self) -> None:
         self.line_points.clear()
         self.freehand_points.clear()
         self.drag_start = None
+
+    def _fit_small_text(self, text: str, width: int) -> str:
+        if self._small_font is None or self._small_font.size(text)[0] <= width:
+            return text
+        suffix = "..."
+        available = max(0, width - self._small_font.size(suffix)[0])
+        fitted = text
+        while fitted and self._small_font.size(fitted)[0] > available:
+            fitted = fitted[:-1]
+        return fitted.rstrip() + suffix
 
     @staticmethod
     def _wrap(text: str, width: int) -> list[str]:

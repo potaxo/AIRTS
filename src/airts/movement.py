@@ -18,6 +18,7 @@ def unit_mass(kind: EntityKind) -> int:
         EntityKind.SCOUT: 1,
         EntityKind.LIGHT_TANK: 2,
         EntityKind.HEAVY_TANK: 3,
+        EntityKind.BUILDER: 1,
     }.get(kind, 100)
 
 
@@ -26,6 +27,7 @@ def collision_radius(kind: EntityKind) -> float:
         EntityKind.SCOUT: 0.30,
         EntityKind.LIGHT_TANK: 0.38,
         EntityKind.HEAVY_TANK: 0.45,
+        EntityKind.BUILDER: 0.32,
     }.get(kind, 0.5)
 
 

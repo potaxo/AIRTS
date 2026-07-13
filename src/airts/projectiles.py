@@ -16,6 +16,7 @@ class Projectile:
     owner_id: str
     weapon_kind: EntityKind
     position: Point
+    destination: Point
     damage: int
     speed: float
     trajectory: list[Point] = field(default_factory=list)
@@ -32,6 +33,7 @@ class Projectile:
             "owner_id": self.owner_id,
             "weapon_kind": self.weapon_kind.value,
             "position": [self.position.x, self.position.y],
+            "destination": [self.destination.x, self.destination.y],
             "damage": self.damage,
             "speed": self.speed,
             "trajectory": [[point.x, point.y] for point in self.trajectory],

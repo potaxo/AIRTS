@@ -284,3 +284,44 @@ def test_convoy_fills_far_formation_slots_before_near_units_block_the_approach()
 
     simulation.advance(40)
     assert tuple(entity.position for entity in simulation.entities.values()) == settled
+
+
+def test_mixed_unit_four_way_choke_traffic_eventually_clears() -> None:
+    entities: list[dict[str, object]] = []
+    groups: list[tuple[tuple[str, ...], Point]] = []
+    specifications = (
+        ("west", "builder", [(3.5 + index, 19.5) for index in range(4)], Point(35.5, 19.5)),
+        ("east", "heavy_tank", [(36.5 - index, 20.5) for index in range(4)], Point(4.5, 20.5)),
+        ("north", "light_tank", [(19.5, 3.5 + index) for index in range(4)], Point(19.5, 35.5)),
+        ("south", "scout", [(20.5, 36.5 - index) for index in range(4)], Point(20.5, 4.5)),
+    )
+    for prefix, kind, positions, target in specifications:
+        entity_ids: list[str] = []
+        for index, position in enumerate(positions):
+            entity_id = f"{prefix}_{index}"
+            entity_ids.append(entity_id)
+            entities.append({"id": entity_id, "kind": kind, "position": list(position)})
+        groups.append((tuple(entity_ids), target))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "mixed_choke",
+                "name": "Mixed four-way choke",
+                "width": 40,
+                "height": 40,
+                "terrain": {
+                    "default": "rock",
+                    "rectangles": [[0, 18, 40, 4, "grass"], [18, 0, 4, 40, "grass"]],
+                },
+                "entities": entities,
+            }
+        )
+    )
+    for entity_ids, target in groups:
+        assert simulation.execute(MoveCommand(entity_ids, target)).accepted
+
+    simulation.advance(1000)
+
+    assert all(
+        not entity.path and entity.move_target is None for entity in simulation.entities.values()
+    )

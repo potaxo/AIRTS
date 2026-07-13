@@ -19,6 +19,7 @@ class UnitState(StrEnum):
     RETURNING = "returning"
     REPAIRING = "repairing"
     PRODUCING = "producing"
+    BUILDING = "building"
     ATTACKING = "attacking"
     RETREATING = "retreating"
 

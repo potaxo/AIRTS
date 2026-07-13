@@ -1,9 +1,10 @@
 # AIRTS
 
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
-automation. Phase 5 adds deterministic resources, paid production, generator-driven
-economic automation, simple combat, and explicit repair-and-return behavior. It does
-not add a language model yet. Units never retreat automatically because of low health;
+automation. The current milestone adds a responsive two-sided RTS interface, builder
+construction, ordered multi-unit factory queues, and continuous production to the
+deterministic Phase 5 economy and combat core. It does not add a language model yet.
+Units never retreat automatically because of low health;
 repair-and-return runs only after an explicit player command or automation request.
 
 The authoritative project scope and architecture are defined in
@@ -77,7 +78,7 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `4` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
 | `D` | Create a defend automation from selected units and current target |
-| `P` | Continuously produce light tanks from one selected factory; with an active area, grow a military gathering point from its center |
+| `P` | Attach every selected factory loop to the active line or area defense |
 | `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
 | `S` / `H` | Stop selected units or hold their current position |
@@ -87,10 +88,15 @@ Tick-stamped commands can also be captured and deterministically verified:
 | `F5` / `F9` | Save or load `airts-quicksave.json` |
 | `F2` | Reset the bundled/current starting scenario |
 | `U` | Replace the inspected patrol/defend target with the active spatial target |
+| `Shift` + build click | Keep placement mode active and append the site to the selected builders' FIFO construction queue |
+| Right-click while placing | Close building placement without moving builders or changing queued construction |
 | `[` / `]` | Decrease or increase the inspected automation priority |
 | Right-click | Move, or attack an enemy under the cursor |
 | `Space` | Pause or resume simulation time |
-| `Esc` | Clear the current spatial target or draft |
+| `Esc` | Return to selection mode and clear entity, spatial, placement, and inspection state |
+| Middle-drag | Pan the game canvas independently of window resolution |
+| Mouse wheel over left panel | Scroll active automations |
+| Double-click friendly entity | Select every visible friendly entity of the same type |
 
 Line, rectangle, and freehand tools return to selection mode after one completed
 operation. Drawing creates stable route and region IDs. Named regions are persistent and
@@ -120,7 +126,8 @@ automation for selected units explicitly replaces their older normal assignment;
 empty replaced automation is canceled and leaves the live panel. Emergency repair may
 temporarily suspend one assignment so it can be restored afterward.
 
-Each factory owns a FIFO production queue: the first unfinished request runs, later requests
+Each factory can produce scouts, light tanks, heavy tanks, and builders through one authoritative
+FIFO production queue: the first unfinished request runs, later requests
 wait visibly, and completion or cancellation starts the next job. Pausing preserves progress;
 resuming an active or queued job does not create a control conflict. Factories reserve unit
 costs before building and wait visibly when funds are insufficient. A continuous production
@@ -131,8 +138,30 @@ the formation and its translucent glow expand like a snowball. Only four new rou
 per tick. An incoming unit that meets its own settled formation stops at the outskirts instead of
 pushing through it, leaving the interior motionless. Creating another
 continuous request for the same factory cancels its older unfinished
-continuous request; finite jobs retain FIFO ordering. Units take five ticks (0.5 seconds) to
-build. Resource generators produce 1,000 resources every second; an economy
+continuous request. A finite player queue preempts the current continuous job, runs first, and
+then lets the loop resume; finite jobs retain FIFO ordering. A loop is production-only until
+`Produce + Defend` or the automation inspector explicitly attaches its current unit kind to a
+selected polygon area. Units take five ticks (0.5 seconds) to
+build. An ordered request stores exact per-kind quantities and advances stage by stage before
+leaving the live automation list. Factory controls apply to every selected friendly factory: a
+Loop click creates the same independent continuous request on each factory, starting an ordered
+queue copies the staged sequence to each factory, and `Produce + Defend` retargets every selected
+factory's current loop. Each action still submits ordinary authoritative commands per factory, so
+resource costs, build timing, persistence, replay, and finite-queue priority remain unchanged.
+Contextual actions use the same selection-wide rule for other compatible buildings; for example,
+`Develop economy` assigns all selected friendly resource generators. Builders cost 75 resources
+and can place factories, repair hubs,
+and resource generators on clear, passable, grid-aligned footprints. A selected builder group
+shares one construction job: its 400, 250, or 200 resource cost is reserved once and each assigned
+builder contributes its profile's 5-value build speed per tick toward the 100-value total only
+while inside its 2.5-map-unit build range. Out-of-range builders path to the site before work
+begins. Shift-clicking additional placements reserves their footprints and appends FIFO jobs; each
+queued cost is charged only when that job starts. The canvas shows a green or red footprint before
+placement, a builder range ring, and a progress bar during construction. A completed site waits
+instead of placing while any unit occupies its footprint; an assigned builder inside the footprint
+routes back outside before contributing more work.
+Command centers are scenario
+anchors and cannot be built. Resource generators produce 1,000 resources every second; an economy
 automation monitors progress toward a target and exposes it through the normal lifecycle.
 GUI games create seeded, deterministic enemy light or heavy tanks on the right side at the
 configured interval and stop at the configured cap. Defend behavior evenly assigns exact stations, locally rallies nearby defenders
@@ -141,6 +170,13 @@ Reinforcement transfers eligible units to another automation. Manual repair filt
 before routing, so only units strictly below 30% health are claimed. It selects destinations by
 repair-hub/factory/command-center order and valid path cost, then restores the original assignment;
 an unassigned unit instead returns to its stored pre-repair position.
+
+`Produce + Defend` attaches the selected factory's current continuous loop to either a polygon
+gathering area or a polyline defense. Polygon forces keep the expanding center-out formation;
+line forces redistribute across evenly spaced stations along the full route as units are produced.
+
+The left status rail includes the live frame rate. Middle-drag pans the map canvas, and window
+resizing recomputes the canvas and both side rails for compact through 4K displays.
 
 Movement uses deterministic four-direction A* with terrain costs. Terrain and building
 footprints are hard obstacles. Units sharing patrol, repair, or clustered large-group movement
@@ -174,7 +210,9 @@ while stationary units are pushed forward or yield laterally when forward displa
 
 Combat uses authoritative direct-hit projectiles. Firing creates a visible bullet that moves
 on deterministic simulation ticks, records its map trajectory, and applies the firing unit's
-damage only when it reaches the selected target. Completed trajectories remain briefly visible;
+damage only when it reaches the selected target. Bullets use one small, high-contrast visual size
+at every UI scale. If a target is destroyed first, an in-flight bullet continues to the target's
+last known position and lands there without applying damage. Completed trajectories remain briefly visible;
 projectiles and traces are included in save/load and replay state. Scouts, light tanks, and heavy
 tanks retain distinct damage and projectile-speed profiles; their attack ranges are 5, 6, and 7
 map units respectively. Weapon firing never clears a movement path: explicit attack orders pursue
@@ -201,10 +239,11 @@ For a headless graphical startup/render smoke test:
 SDL_VIDEODRIVER=dummy .venv/bin/python -m airts --max-frames 3
 ```
 
-## Phase 5 limitations and exclusions
+## Current limitations and exclusions
 
-Resources are a single integer balance per owner; there is no gathering unit, construction,
-technology tree, ballistic terrain collision, armor, cover modifier, or tactical enemy AI.
+Resources are a single integer balance per owner; builders do not gather resources, construction
+cannot be canceled for a refund, and there is no technology tree, ballistic
+terrain collision, armor, cover modifier, or tactical enemy AI.
 Combat uses deterministic direct-hit projectile, range, damage, and cooldown profiles; it does
 not currently model splash damage or missed shots. Visibility does not include
 line-of-sight occlusion, last-known enemy observations, or a fog overlay. Save and replay schemas are

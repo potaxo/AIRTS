@@ -10,6 +10,7 @@ from airts.automations import (
     AutomationKind,
     AutomationParameters,
     AutomationStatus,
+    ConstructionParameters,
     DefendParameters,
     EconomyParameters,
     PatrolParameters,
@@ -26,9 +27,11 @@ from airts.commands import (
     AttackCommand,
     Command,
     CommandResult,
+    CreateConstructionCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
     CreatePatrolCommand,
+    CreateProductionBatchCommand,
     CreateProductionCommand,
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
@@ -50,7 +53,7 @@ from airts.commands import (
 from airts.control import ControlAuthority, ControlClaim, claim_precedes
 from airts.entities import Entity, UnitState
 from airts.events import EventLog, EventType
-from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
+from airts.geometry import Point, PointTarget, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.map_model import Cell, EntityCategory, EntityKind, GameMap
 from airts.movement import NEIGHBOR_RADIUS, collision_radius, steering_candidates, unit_mass
 from airts.occupancy import OccupancyError, OccupancyGrid
@@ -87,6 +90,9 @@ class Simulation:
     STALLED_REPATH_BUDGET = 4
     COMBAT_PATH_BUDGET = 16
     MILITARY_OBSTACLE_PATH_PENALTY = 1.5
+    PRODUCTION_BUILD_TICKS = 5
+    CONSTRUCTION_BUILD_TICKS = 20
+    CONSTRUCTION_REQUIRED_VALUE = 100.0
 
     def __init__(
         self,
@@ -179,6 +185,18 @@ class Simulation:
 
         return self._factory_production_jobs(factory_id)
 
+    def continuous_production(self, factory_id: str) -> Automation | None:
+        """Return the factory's current unfinished background production loop."""
+
+        return next(
+            (
+                automation
+                for automation in self._factory_production_jobs(factory_id)
+                if _production_parameters(automation).continuous
+            ),
+            None,
+        )
+
     @property
     def navigation_field_build_count(self) -> int:
         """Expose shared-navigation work for deterministic performance regression tests."""
@@ -233,6 +251,10 @@ class Simulation:
             return self._create_defend(command)
         if isinstance(command, CreateProductionCommand):
             return self._create_production(command)
+        if isinstance(command, CreateProductionBatchCommand):
+            return self._create_production_batch(command)
+        if isinstance(command, CreateConstructionCommand):
+            return self._create_construction(command)
         if isinstance(command, CreateReinforcementCommand):
             return self._create_reinforcement(command)
         if isinstance(command, CreateRepairAndReturnCommand):
@@ -303,6 +325,14 @@ class Simulation:
                 and _production_parameters(automation).factory_id == entity_id
             ):
                 self._transition(automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
+            elif (
+                automation.kind is AutomationKind.CONSTRUCTION
+                and not automation.status.terminal
+                and entity_id in automation.entity_ids
+            ):
+                automation.remove_entity(entity_id)
+                if not automation.entity_ids:
+                    self._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
         if removed_entity.category is EntityCategory.BUILDING:
@@ -330,6 +360,8 @@ class Simulation:
             automation_id=None,
             reason=command.reason,
         )
+        if removed_entity.kind is EntityKind.BUILDER:
+            self._start_next_construction()
         return self._accept("remove_entity")
 
     def snapshot(self) -> dict[str, object]:
@@ -621,6 +653,44 @@ class Simulation:
                         ValidationFailure(ValidationPhase.PATH, _reason(error), "target"),
                     )
                 new_parameters = DefendParameters(command.target, stations)
+            elif automation.kind is AutomationKind.PRODUCTION:
+                parameters = _production_parameters(automation)
+                if not parameters.continuous:
+                    return self._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(
+                            ValidationPhase.CAPABILITY,
+                            "PRODUCTION_DEFENSE_REQUIRES_CONTINUOUS_LOOP",
+                            "target",
+                        ),
+                    )
+                if not isinstance(command.target, PolygonRegion | PolylineTarget):
+                    return self._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(
+                            ValidationPhase.SPATIAL,
+                            "PRODUCTION_DEFENSE_REQUIRES_LINE_OR_AREA",
+                            "target",
+                        ),
+                    )
+                geometry_failure = self._validate_geometry(command.target)
+                if geometry_failure is not None:
+                    return self._reject_validation("modify_automation", geometry_failure)
+                try:
+                    if isinstance(command.target, PolygonRegion):
+                        self._gathering_slots(
+                            command.target,
+                            1,
+                            collision_radius(parameters.current_unit_kind),
+                        )
+                    else:
+                        build_defend_stations(command.target, ("preview",), self.game_map)
+                except ValueError as error:
+                    return self._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(ValidationPhase.SPATIAL, _reason(error), "target"),
+                    )
+                self._attach_production_defense(automation, command.target)
             else:
                 return self._reject_validation(
                     "modify_automation",
@@ -969,15 +1039,27 @@ class Simulation:
                 ),
             )
         if command.defend_target is not None:
+            if not isinstance(command.defend_target, PolygonRegion | PolylineTarget):
+                return self._reject_validation(
+                    "create_production",
+                    ValidationFailure(
+                        ValidationPhase.SPATIAL,
+                        "PRODUCTION_DEFENSE_REQUIRES_LINE_OR_AREA",
+                        "defend_target",
+                    ),
+                )
             geometry_failure = self._validate_geometry(command.defend_target)
             if geometry_failure is not None:
                 return self._reject_validation("create_production", geometry_failure)
             try:
-                self._gathering_slots(
-                    command.defend_target,
-                    1,
-                    collision_radius(command.unit_kind),
-                )
+                if isinstance(command.defend_target, PolygonRegion):
+                    self._gathering_slots(
+                        command.defend_target,
+                        1,
+                        collision_radius(command.unit_kind),
+                    )
+                else:
+                    build_defend_stations(command.defend_target, ("preview",), self.game_map)
             except ValueError as error:
                 return self._reject_validation(
                     "create_production",
@@ -1004,7 +1086,9 @@ class Simulation:
                 )
         if command.continuous:
             self._supersede_continuous_production(command.factory_id)
-        build_ticks = 5
+        else:
+            self._preempt_continuous_production(command.factory_id)
+        build_ticks = self.PRODUCTION_BUILD_TICKS
         automation = self._new_automation(
             AutomationKind.PRODUCTION,
             command.title,
@@ -1023,8 +1107,7 @@ class Simulation:
                 patrol_target=command.patrol_target,
             ),
         )
-        existing_jobs = self._factory_production_jobs(command.factory_id)
-        if existing_jobs:
+        if self.assignments.get(command.factory_id) is not None:
             self._activate(automation, ())
             self._transition(automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
             return self._accept("create_production", automation.automation_id)
@@ -1035,6 +1118,168 @@ class Simulation:
         factory.state = UnitState.PRODUCING
         self._record_production_started(automation)
         return self._accept("create_production", automation.automation_id)
+
+    def _preempt_continuous_production(self, factory_id: str) -> None:
+        incumbent_id = self.assignments.get(factory_id)
+        incumbent = self.automations.get(incumbent_id or "")
+        if (
+            incumbent is None
+            or incumbent.kind is not AutomationKind.PRODUCTION
+            or not _production_parameters(incumbent).continuous
+            or incumbent.status.terminal
+        ):
+            return
+        if incumbent.status is AutomationStatus.WAITING:
+            self._transition(incumbent, AutomationStatus.PAUSED, "USER_QUEUE_PREEMPTING")
+            self._transition(incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED")
+        else:
+            self._transition(incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED")
+        self._release_automation(incumbent)
+
+    def _create_production_batch(self, command: CreateProductionBatchCommand) -> CommandResult:
+        if not command.sequence:
+            return self._reject_validation(
+                "create_production_batch",
+                ValidationFailure(ValidationPhase.SCHEMA, "EMPTY_PRODUCTION_SEQUENCE", "sequence"),
+            )
+        for kind, quantity in command.sequence:
+            if kind.profile.category is not EntityCategory.UNIT or quantity <= 0:
+                return self._reject_validation(
+                    "create_production_batch",
+                    ValidationFailure(
+                        ValidationPhase.SCHEMA, "INVALID_PRODUCTION_SEQUENCE", "sequence"
+                    ),
+                )
+        first_kind, first_quantity = command.sequence[0]
+        result = self._create_production(
+            CreateProductionCommand(
+                command.factory_id,
+                first_kind,
+                sum(quantity for _, quantity in command.sequence),
+                title=command.title,
+                priority=command.priority,
+                owner_id=command.owner_id,
+                original_instruction=command.original_instruction,
+            )
+        )
+        if result.accepted:
+            parameters = _production_parameters(self.automations[result.automation_id or ""])
+            parameters.sequence = command.sequence
+            parameters.target_count = sum(quantity for _, quantity in command.sequence)
+            parameters.unit_kind = first_kind
+        return CommandResult(result.accepted, result.reason, result.automation_id)
+
+    def _create_construction(self, command: CreateConstructionCommand) -> CommandResult:
+        builder_ids = tuple(dict.fromkeys(command.builder_ids or (command.builder_id,)))
+        if command.builder_id not in builder_ids:
+            builder_ids = (command.builder_id, *builder_ids)
+        failure = self._validate_entities(builder_ids, command.owner_id)
+        if failure is not None:
+            return self._reject_validation("create_construction", failure)
+        if any(
+            self.entities[builder_id].kind is not EntityKind.BUILDER for builder_id in builder_ids
+        ):
+            return self._reject_validation(
+                "create_construction",
+                ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_BUILDER", "builder_id"),
+            )
+        allowed = {EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR}
+        if command.building_kind not in allowed:
+            return self._reject_validation(
+                "create_construction",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY,
+                    "UNSUPPORTED_CONSTRUCTION_KIND",
+                    "building_kind",
+                ),
+            )
+        placement_failure = self._validate_building_placement(
+            command.building_kind, command.position
+        )
+        if placement_failure is not None:
+            return self._reject_validation("create_construction", placement_failure)
+        automation = self._new_automation(
+            AutomationKind.CONSTRUCTION,
+            command.title,
+            command.owner_id,
+            command.priority,
+            command.original_instruction,
+            list(builder_ids),
+            ConstructionParameters(
+                command.builder_id,
+                command.building_kind,
+                command.position,
+                self.CONSTRUCTION_REQUIRED_VALUE,
+                builder_ids=list(builder_ids),
+            ),
+        )
+        has_active_construction = any(
+            incumbent_id is not None
+            and self.automations[incumbent_id].kind is AutomationKind.CONSTRUCTION
+            for builder_id in builder_ids
+            if (incumbent_id := self.assignments.get(builder_id)) is not None
+        )
+        if command.queued and has_active_construction:
+            self._activate(automation, builder_ids, assign_entities=False)
+            self._transition(automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
+            return self._accept("create_construction", automation.automation_id)
+        if not command.queued:
+            self._cancel_queued_construction(builder_ids)
+        claim_failure = self._validate_claims(automation, builder_ids, replace_existing=True)
+        if claim_failure is not None:
+            return self._reject_validation("create_construction", claim_failure)
+        self._activate(automation, builder_ids)
+        return self._accept("create_construction", automation.automation_id)
+
+    def _validate_building_placement(
+        self,
+        kind: EntityKind,
+        position: Point,
+        *,
+        ignore_construction_id: str | None = None,
+    ) -> ValidationFailure | None:
+        if not position.x.is_integer() or not position.y.is_integer():
+            return ValidationFailure(
+                ValidationPhase.SPATIAL, "BUILDING_NOT_GRID_ALIGNED", "position"
+            )
+        width, height = kind.profile.footprint
+        cells = frozenset(
+            (int(position.x) + x, int(position.y) + y) for y in range(height) for x in range(width)
+        )
+        if any(not self.game_map.contains_cell(cell) for cell in cells):
+            return ValidationFailure(ValidationPhase.SPATIAL, "FOOTPRINT_OUTSIDE_MAP", "position")
+        if any(not self.game_map.is_cell_passable(cell) for cell in cells):
+            return ValidationFailure(
+                ValidationPhase.SPATIAL, "BUILDING_TERRAIN_BLOCKED", "position"
+            )
+        if cells & self._building_cells():
+            return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_OVERLAP", "position")
+        for automation in self.live_automations:
+            if (
+                automation.kind is not AutomationKind.CONSTRUCTION
+                or automation.automation_id == ignore_construction_id
+            ):
+                continue
+            parameters = automation.parameters
+            assert isinstance(parameters, ConstructionParameters)
+            if cells & self._construction_cells(parameters):
+                return ValidationFailure(
+                    ValidationPhase.SPATIAL,
+                    "CONSTRUCTION_SITE_RESERVED",
+                    "position",
+                )
+        return None
+
+    def _cancel_queued_construction(self, builder_ids: tuple[str, ...]) -> None:
+        selected = frozenset(builder_ids)
+        for automation in self.automations.values():
+            if (
+                automation.kind is AutomationKind.CONSTRUCTION
+                and automation.status is AutomationStatus.WAITING
+                and automation.reason_code == "BUILDERS_QUEUED"
+                and selected.intersection(automation.entity_ids)
+            ):
+                self._transition(automation, AutomationStatus.CANCELED, "QUEUE_REPLACED")
 
     def _supersede_continuous_production(self, factory_id: str) -> None:
         superseded = tuple(
@@ -1296,6 +1541,13 @@ class Simulation:
             self._assign(parameters.factory_id, automation)
             self.entities[parameters.factory_id].state = UnitState.PRODUCING
             self._record_production_started(automation)
+        elif automation.kind is AutomationKind.CONSTRUCTION and not any(
+            self.assignments.get(entity_id) == automation.automation_id
+            for entity_id in automation.entity_ids
+        ):
+            self._transition(automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
+            self._start_next_construction()
+            return self._accept("resume_automation", automation_id)
         else:
             for entity_id in automation.entity_ids:
                 if self.assignments.get(entity_id) == automation_id:
@@ -1326,6 +1578,8 @@ class Simulation:
             self._release_automation(automation, clear_suspended=True)
         if automation.kind is AutomationKind.PRODUCTION:
             self._start_next_production(_production_parameters(automation).factory_id)
+        elif automation.kind is AutomationKind.CONSTRUCTION:
+            self._start_next_construction()
         return self._accept("cancel_automation", automation_id)
 
     def _drive_automations(self) -> None:
@@ -1349,8 +1603,217 @@ class Simulation:
                 self._drive_reinforcement(automation)
             elif automation.kind is AutomationKind.ECONOMY:
                 self._drive_economy(automation)
+            elif automation.kind is AutomationKind.CONSTRUCTION:
+                self._drive_construction(automation)
             else:
                 self._drive_repair(automation)
+
+    def _drive_construction(self, automation: Automation) -> None:
+        parameters = automation.parameters
+        assert isinstance(parameters, ConstructionParameters)
+        if (
+            automation.status is AutomationStatus.WAITING
+            and automation.reason_code == "BUILDERS_QUEUED"
+        ):
+            return
+        active_builders = [
+            builder_id
+            for builder_id in automation.entity_ids
+            if self.assignments.get(builder_id) == automation.automation_id
+            and builder_id in self.entities
+        ]
+        if not active_builders:
+            self._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
+            self._release_automation(automation)
+            self._start_next_construction()
+            return
+        if not parameters.cost_paid:
+            cost = parameters.building_kind.profile.construction_cost
+            balance = self.resources.get(automation.owner_id, 0)
+            if balance < cost:
+                if automation.status is AutomationStatus.ACTIVE:
+                    self._transition(automation, AutomationStatus.WAITING, "INSUFFICIENT_RESOURCES")
+                return
+            self.resources[automation.owner_id] = balance - cost
+            parameters.cost_paid = True
+            if automation.status is AutomationStatus.WAITING:
+                self._transition(automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE")
+        placement_failure = self._validate_building_placement(
+            parameters.building_kind,
+            parameters.position,
+            ignore_construction_id=automation.automation_id,
+        )
+        if placement_failure is not None:
+            self._transition(automation, AutomationStatus.FAILED, placement_failure.code)
+            self._release_automation(automation)
+            self._start_next_construction()
+            return
+        site_cells = self._construction_cells(parameters)
+        site_occupants = frozenset(
+            entity_id for cell in site_cells for entity_id in self.occupancy.occupants(cell)
+        )
+        if (
+            automation.status is AutomationStatus.WAITING
+            and automation.reason_code == "SITE_OCCUPIED"
+            and not site_occupants
+        ):
+            self._transition(automation, AutomationStatus.ACTIVE, "SITE_CLEARED")
+        builders_in_range: list[str] = []
+        route_available = False
+        destinations = self._construction_interaction_points(parameters)
+        for builder_id in active_builders:
+            builder = self.entities[builder_id]
+            inside_footprint = bool(builder.occupied_cells & site_cells)
+            if (
+                not inside_footprint
+                and self._construction_distance(builder.position, parameters)
+                <= builder.kind.profile.build_range
+            ):
+                builder.path.clear()
+                builder.move_target = None
+                builder.state = UnitState.BUILDING
+                self._reset_movement_liveness(builder, clear_stop=True)
+                builders_in_range.append(builder_id)
+                route_available = True
+                continue
+            if inside_footprint and builder.move_target not in destinations:
+                builder.path.clear()
+                builder.move_target = None
+                self._reset_movement_liveness(builder, clear_stop=True)
+            if builder.path or builder.move_target is not None:
+                route_available = True
+                continue
+            try:
+                destination, path = self._routes.shared_path_to_any(
+                    builder.position,
+                    destinations,
+                    self._building_cells(),
+                )
+            except PathfindingError:
+                continue
+            self._start_path(
+                builder,
+                destination,
+                path,
+                automation.automation_id,
+                UnitState.MOVING,
+            )
+            route_available = True
+        if not builders_in_range:
+            if not route_available:
+                self._transition(automation, AutomationStatus.FAILED, "BUILD_SITE_UNREACHABLE")
+                self._release_automation(automation)
+                self._start_next_construction()
+            return
+        work = sum(
+            self.entities[builder_id].kind.profile.build_speed for builder_id in builders_in_range
+        )
+        parameters.construction_value = min(
+            parameters.required_value,
+            parameters.construction_value + work,
+        )
+        if parameters.construction_value < parameters.required_value:
+            return
+        site_occupants = frozenset(
+            entity_id for cell in site_cells for entity_id in self.occupancy.occupants(cell)
+        )
+        if site_occupants:
+            if automation.status is AutomationStatus.ACTIVE:
+                self._transition(automation, AutomationStatus.WAITING, "SITE_OCCUPIED")
+            return
+        while True:
+            entity_id = f"{parameters.building_kind.value}_{self._next_entity_number:03d}"
+            self._next_entity_number += 1
+            if entity_id not in self.entities:
+                break
+        building = Entity(
+            entity_id,
+            parameters.building_kind,
+            automation.owner_id,
+            parameters.position,
+            parameters.building_kind.profile.max_health,
+        )
+        self.occupancy.place(entity_id, building.occupied_cells)
+        self.entities[entity_id] = building
+        self._invalidate_navigation_cache()
+        parameters.constructed_entity_id = entity_id
+        self._transition(automation, AutomationStatus.COMPLETED, "CONSTRUCTION_COMPLETED")
+        self._release_automation(automation)
+        self._start_next_construction()
+
+    @staticmethod
+    def _construction_cells(parameters: ConstructionParameters) -> frozenset[Cell]:
+        width, height = parameters.building_kind.profile.footprint
+        origin_x = int(parameters.position.x)
+        origin_y = int(parameters.position.y)
+        return frozenset((origin_x + x, origin_y + y) for y in range(height) for x in range(width))
+
+    @staticmethod
+    def _construction_distance(point: Point, parameters: ConstructionParameters) -> float:
+        width, height = parameters.building_kind.profile.footprint
+        nearest_x = min(max(point.x, parameters.position.x), parameters.position.x + width)
+        nearest_y = min(max(point.y, parameters.position.y), parameters.position.y + height)
+        return point.distance_to(Point(nearest_x, nearest_y))
+
+    def _construction_interaction_points(
+        self, parameters: ConstructionParameters
+    ) -> tuple[Point, ...]:
+        build_range = EntityKind.BUILDER.profile.build_range
+        width, height = parameters.building_kind.profile.footprint
+        site_cells = self._construction_cells(parameters)
+        candidates: list[Point] = []
+        for y in range(
+            floor(parameters.position.y - build_range),
+            ceil(parameters.position.y + height + build_range),
+        ):
+            for x in range(
+                floor(parameters.position.x - build_range),
+                ceil(parameters.position.x + width + build_range),
+            ):
+                cell = (x, y)
+                point = Point(x + 0.5, y + 0.5)
+                if (
+                    cell not in site_cells
+                    and self.game_map.is_cell_passable(cell)
+                    and self._construction_distance(point, parameters) <= build_range
+                ):
+                    candidates.append(point)
+        return tuple(candidates)
+
+    def _start_next_construction(self) -> None:
+        queued = sorted(
+            (
+                automation
+                for automation in self.automations.values()
+                if automation.kind is AutomationKind.CONSTRUCTION
+                and automation.status is AutomationStatus.WAITING
+                and automation.reason_code == "BUILDERS_QUEUED"
+            ),
+            key=lambda automation: (automation.created_tick, automation.automation_id),
+        )
+        for automation in queued:
+            parameters = automation.parameters
+            assert isinstance(parameters, ConstructionParameters)
+            builder_ids = tuple(parameters.builder_ids)
+            if not builder_ids or any(
+                builder_id not in self.entities for builder_id in builder_ids
+            ):
+                self._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
+                continue
+            if any(builder_id in self.assignments for builder_id in builder_ids):
+                continue
+            failure = self._validate_building_placement(
+                parameters.building_kind,
+                parameters.position,
+                ignore_construction_id=automation.automation_id,
+            )
+            if failure is not None:
+                self._transition(automation, AutomationStatus.FAILED, failure.code)
+                continue
+            for builder_id in builder_ids:
+                self._assign(builder_id, automation)
+                self._initialize_runtime_entity(automation, builder_id)
+            self._transition(automation, AutomationStatus.ACTIVE, "BUILDERS_AVAILABLE")
 
     def _scheduled_entity_ids(self, automation: Automation) -> tuple[str, ...]:
         """Rotate deterministic work order so deferred large groups make fair progress."""
@@ -1519,7 +1982,8 @@ class Simulation:
             if automation.status is not AutomationStatus.PAUSED:
                 self._transition(automation, AutomationStatus.PAUSED, "FACTORY_UNAVAILABLE")
             return
-        cost = parameters.unit_kind.profile.production_cost
+        unit_kind = parameters.current_unit_kind
+        cost = unit_kind.profile.production_cost
         if not parameters.cost_paid:
             balance = self.resources.get(automation.owner_id, 0)
             if balance < cost:
@@ -1555,6 +2019,11 @@ class Simulation:
         entity_id = self._spawn_unit(automation, parameters, spawn)
         parameters.produced_count += 1
         parameters.produced_entity_ids.append(entity_id)
+        if parameters.sequence:
+            parameters.sequence_produced += 1
+            if parameters.sequence_produced >= parameters.sequence[parameters.sequence_index][1]:
+                parameters.sequence_index += 1
+                parameters.sequence_produced = 0
         if parameters.defend_target is not None:
             self._assign_produced_defender(automation, parameters, entity_id)
         elif parameters.patrol_target is not None:
@@ -1582,7 +2051,11 @@ class Simulation:
                     and not automation.status.terminal
                     and _production_parameters(automation).factory_id == factory_id
                 ),
-                key=lambda automation: (automation.created_tick, automation.automation_id),
+                key=lambda automation: (
+                    _production_parameters(automation).continuous,
+                    automation.created_tick,
+                    automation.automation_id,
+                ),
             )
         )
 
@@ -1938,6 +2411,7 @@ class Simulation:
                 owner_id=attacker.owner_id,
                 weapon_kind=attacker.kind,
                 position=attacker.selection_position,
+                destination=firing_target.selection_position,
                 damage=attacker.kind.profile.attack_damage,
                 speed=speed,
             )
@@ -1962,16 +2436,18 @@ class Simulation:
             if projectile is None:
                 continue
             target = self.entities.get(projectile.target_entity_id)
-            if target is None or target.owner_id == projectile.owner_id:
-                self._finish_projectile(projectile)
-                continue
-            destination = target.selection_position
+            if target is not None and target.owner_id != projectile.owner_id:
+                projectile.destination = target.selection_position
+            destination = projectile.destination
             distance = projectile.position.distance_to(destination)
             maximum_step = projectile.speed * self.TICK_SECONDS
             if distance <= maximum_step or isclose(distance, maximum_step):
                 projectile.position = destination
                 projectile.trajectory.append(destination)
-                self._impact_projectile(projectile, target)
+                if target is None or target.owner_id == projectile.owner_id:
+                    self._finish_projectile(projectile)
+                else:
+                    self._impact_projectile(projectile, target)
                 continue
             fraction = maximum_step / distance
             projectile.position = Point(
@@ -2780,6 +3256,7 @@ class Simulation:
         *,
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
         suspend: bool = False,
+        assign_entities: bool = True,
     ) -> None:
         self.automations[automation.automation_id] = automation
         self._next_automation_number += 1
@@ -2793,7 +3270,9 @@ class Simulation:
             entity_ids=list(entity_ids),
         )
         self._transition(automation, AutomationStatus.VALIDATING, "VALIDATION_STARTED")
-        if suspend:
+        if not assign_entities:
+            pass
+        elif suspend:
             for entity_id in entity_ids:
                 self._assign(entity_id, automation, authority=authority, suspend=True)
         else:
@@ -2822,8 +3301,9 @@ class Simulation:
                     authority=authority.name.lower(),
                 )
         self._transition(automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
-        for entity_id in entity_ids:
-            self._initialize_runtime_entity(automation, entity_id)
+        if assign_entities:
+            for entity_id in entity_ids:
+                self._initialize_runtime_entity(automation, entity_id)
 
     def _new_automation(
         self,
@@ -3039,6 +3519,8 @@ class Simulation:
             entity.state = UnitState.DEFENDING
         elif automation.kind is AutomationKind.PRODUCTION:
             entity.state = UnitState.PRODUCING
+        elif automation.kind is AutomationKind.CONSTRUCTION:
+            entity.state = UnitState.MOVING
         elif automation.kind is AutomationKind.REPAIR_AND_RETURN:
             entity.state = UnitState.RETURNING
         elif automation.kind is AutomationKind.ECONOMY:
@@ -3048,16 +3530,17 @@ class Simulation:
         self, automation: Automation, parameters: ProductionParameters, position: Point
     ) -> str:
         while True:
-            entity_id = f"{parameters.unit_kind.value}_{self._next_entity_number:03d}"
+            unit_kind = parameters.current_unit_kind
+            entity_id = f"{unit_kind.value}_{self._next_entity_number:03d}"
             self._next_entity_number += 1
             if entity_id not in self.entities:
                 break
         entity = Entity(
             entity_id=entity_id,
-            kind=parameters.unit_kind,
+            kind=unit_kind,
             owner_id=automation.owner_id,
             position=position,
-            health=parameters.unit_kind.profile.max_health,
+            health=unit_kind.profile.max_health,
         )
         self.entities[entity_id] = entity
         self.occupancy.place(entity_id, entity.occupied_cells)
@@ -3098,10 +3581,15 @@ class Simulation:
         assert target is not None
         defend = self.automations.get(parameters.defend_automation_id or "")
         if defend is None or defend.status.terminal:
-            slots = self._gathering_slots(
-                target, 1, collision_radius(self.entities[entity_id].kind)
-            )
-            stations = {entity_id: slots[0]}
+            gathering_point = isinstance(target, PolygonRegion)
+            if gathering_point:
+                slots = self._gathering_slots(
+                    target, 1, collision_radius(self.entities[entity_id].kind)
+                )
+                stations = {entity_id: slots[0]}
+            else:
+                stations = build_defend_stations(target, (entity_id,), self.game_map)
+                slots = ()
             defend = self._new_automation(
                 AutomationKind.DEFEND,
                 f"Defend {production.title}",
@@ -3112,9 +3600,9 @@ class Simulation:
                 DefendParameters(
                     target,
                     stations,
-                    gathering_point=True,
+                    gathering_point=gathering_point,
                     deployment_slots=slots,
-                    assembly_radius=slots[0].distance_to(target_center(target)),
+                    assembly_radius=(slots[0].distance_to(target_center(target)) if slots else 0.0),
                 ),
             )
             self._activate(defend, (entity_id,))
@@ -3138,12 +3626,69 @@ class Simulation:
                 station.distance_to(target_center(target)),
             )
         else:
-            defend_parameters.stations[entity_id] = self._next_reinforcement_station(
+            defend_parameters.stations = build_defend_stations(
                 target,
-                tuple(defend_parameters.stations.values()),
+                tuple(defend.entity_ids),
+                self.game_map,
             )
+            for defender_id in defend.entity_ids:
+                self._assign(defender_id, defend)
+                self._initialize_runtime_entity(defend, defender_id)
+            return
         self._assign(entity_id, defend)
         self._initialize_runtime_entity(defend, entity_id)
+
+    def _attach_production_defense(
+        self,
+        production: Automation,
+        target: PolygonRegion | PolylineTarget,
+    ) -> None:
+        parameters = _production_parameters(production)
+        parameters.rally_point = None
+        parameters.patrol_target = None
+        parameters.patrol_automation_id = None
+        parameters.defend_target = target
+        defend = self.automations.get(parameters.defend_automation_id or "")
+        produced_ids = [
+            entity_id
+            for entity_id in parameters.produced_entity_ids
+            if entity_id in self.entities
+            and self.entities[entity_id].owner_id == production.owner_id
+            and self.entities[entity_id].is_movable
+        ]
+        if defend is not None and not defend.status.terminal:
+            if isinstance(target, PolygonRegion):
+                radius = max(
+                    (collision_radius(self.entities[item].kind) for item in produced_ids),
+                    default=collision_radius(parameters.current_unit_kind),
+                )
+                slots = self._gathering_slots(target, max(1, len(produced_ids)), radius)
+                stations = dict(zip(produced_ids, slots, strict=False))
+                parameters_for_defend = DefendParameters(
+                    target,
+                    stations,
+                    gathering_point=True,
+                    deployment_slots=slots[: len(produced_ids)],
+                    assembly_radius=max(
+                        (
+                            slot.distance_to(target_center(target))
+                            for slot in slots[: len(produced_ids)]
+                        ),
+                        default=0.0,
+                    ),
+                )
+            else:
+                stations = build_defend_stations(target, tuple(produced_ids), self.game_map)
+                parameters_for_defend = DefendParameters(target, stations)
+            defend.entity_ids = list(produced_ids)
+            defend.parameters = parameters_for_defend
+            for entity_id in produced_ids:
+                self._assign(entity_id, defend)
+                self._initialize_runtime_entity(defend, entity_id)
+            return
+        parameters.defend_automation_id = None
+        for entity_id in produced_ids:
+            self._assign_produced_defender(production, parameters, entity_id)
 
     def _assign_produced_patroller(
         self,
@@ -3441,6 +3986,7 @@ class Simulation:
             AutomationKind.PATROL: UnitState.PATROLLING,
             AutomationKind.DEFEND: UnitState.DEFENDING,
             AutomationKind.PRODUCTION: UnitState.PRODUCING,
+            AutomationKind.CONSTRUCTION: UnitState.BUILDING,
             AutomationKind.REINFORCEMENT: UnitState.WAITING,
             AutomationKind.REPAIR_AND_RETURN: UnitState.REPAIRING,
             AutomationKind.ECONOMY: UnitState.IDLE,

@@ -10,6 +10,7 @@ from airts.automations import AutomationStatus, DefendParameters, ProductionPara
 from airts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
+    CreateProductionCommand,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
     DeleteSpatialReferenceCommand,
@@ -19,7 +20,7 @@ from airts.commands import (
     command_to_dict,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.map_model import load_map_data
+from airts.map_model import EntityKind, load_map_data
 from airts.simulation import Simulation
 
 
@@ -98,7 +99,7 @@ def test_line_enter_does_not_finish_and_escape_cancels() -> None:
 
     app._handle_key(27)
 
-    assert app.mode is InputMode.LINE
+    assert app.mode is InputMode.SELECT
     assert not app.line_points
 
 
@@ -146,13 +147,16 @@ def test_resource_generators_produce_without_an_automation() -> None:
     assert simulation.resources["player"] == 2500
 
 
-def test_factory_and_area_interaction_creates_continuous_defense_production() -> None:
+def test_factory_and_area_interaction_attaches_current_loop_to_defense() -> None:
     simulation = _interaction_simulation()
     app = AirtsApp(simulation)
     target = rectangle_region(Point(8, 8), Point(13, 13))
     created_region = simulation.execute(CreateSpatialReferenceCommand(target, "Front Line"))
     factory_position = simulation.entities["factory"].selection_position
 
+    loop = simulation.execute(
+        CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1, continuous=True)
+    )
     app._select_entities(factory_position, factory_position)
     app._select_entities(Point(9, 9), Point(9, 9))
 
@@ -161,9 +165,38 @@ def test_factory_and_area_interaction_creates_continuous_defense_production() ->
     assert app.selected_entities == {"factory"}
     assert app.selected_regions == {created_region.reference_id}
     automation = simulation.automations[app.selected_automation_id or ""]
+    assert automation.automation_id == loop.automation_id
     assert isinstance(automation.parameters, ProductionParameters)
     assert automation.parameters.continuous
+    assert automation.parameters.unit_kind is EntityKind.HEAVY_TANK
     assert automation.parameters.defend_target == target
+
+
+def test_factory_produce_and_defend_supports_line_target() -> None:
+    simulation = _interaction_simulation()
+    simulation.resources["player"] = 10_000
+    app = AirtsApp(simulation)
+    target = PolylineTarget((Point(8, 8), Point(13, 8), Point(15, 11)))
+    loop = simulation.execute(
+        CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1, continuous=True)
+    )
+    app.selected_entities = {"factory"}
+    app._selection_changed()
+    app.active_target = target
+
+    app._create_production()
+    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+
+    production = simulation.automations[loop.automation_id or ""]
+    parameters = production.parameters
+    assert isinstance(parameters, ProductionParameters)
+    assert parameters.unit_kind is EntityKind.HEAVY_TANK
+    assert parameters.defend_target == target
+    defend = simulation.automations[parameters.defend_automation_id or ""]
+    assert isinstance(defend.parameters, DefendParameters)
+    assert not defend.parameters.gathering_point
+    assert len(defend.parameters.stations) == 2
+    assert all(station.y >= 8 for station in defend.parameters.stations.values())
 
 
 def test_gathering_glow_radius_grows_with_the_authoritative_assembly_radius() -> None:

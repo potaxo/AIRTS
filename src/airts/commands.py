@@ -79,6 +79,29 @@ class CreateProductionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateProductionBatchCommand:
+    factory_id: str
+    sequence: tuple[tuple[EntityKind, int], ...]
+    title: str = "Production Queue"
+    priority: int = 0
+    owner_id: str = "player"
+    original_instruction: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CreateConstructionCommand:
+    builder_id: str
+    building_kind: EntityKind
+    position: Point
+    builder_ids: tuple[str, ...] = ()
+    title: str = "Construct Building"
+    priority: int = 0
+    owner_id: str = "player"
+    original_instruction: str = ""
+    queued: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CreateReinforcementCommand:
     candidate_entity_ids: tuple[str, ...]
     target_automation_id: str
@@ -190,6 +213,8 @@ Command = (
     | CreatePatrolCommand
     | CreateDefendCommand
     | CreateProductionCommand
+    | CreateProductionBatchCommand
+    | CreateConstructionCommand
     | CreateReinforcementCommand
     | CreateRepairAndReturnCommand
     | CreateEconomyCommand
@@ -331,6 +356,29 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "priority": command.priority,
             "owner_id": command.owner_id,
             "original_instruction": command.original_instruction,
+        }
+    if isinstance(command, CreateProductionBatchCommand):
+        return {
+            "type": "create_production_batch",
+            "factory_id": command.factory_id,
+            "sequence": [[kind.value, quantity] for kind, quantity in command.sequence],
+            "title": command.title,
+            "priority": command.priority,
+            "owner_id": command.owner_id,
+            "original_instruction": command.original_instruction,
+        }
+    if isinstance(command, CreateConstructionCommand):
+        return {
+            "type": "create_construction",
+            "builder_id": command.builder_id,
+            "builder_ids": list(command.builder_ids),
+            "building_kind": command.building_kind.value,
+            "position": [command.position.x, command.position.y],
+            "title": command.title,
+            "priority": command.priority,
+            "owner_id": command.owner_id,
+            "original_instruction": command.original_instruction,
+            "queued": command.queued,
         }
     if isinstance(command, CreateReinforcementCommand):
         return {
@@ -481,6 +529,36 @@ def command_from_dict(raw_data: object) -> Command:
             defend_target=defend_target,
             patrol_target=patrol_target,
         )
+    if command_type == "create_production_batch":
+        raw_sequence = _list(data.get("sequence"), "sequence")
+        sequence: list[tuple[EntityKind, int]] = []
+        for index, raw_item in enumerate(raw_sequence):
+            item = _list(raw_item, f"sequence[{index}]")
+            if len(item) != 2:
+                raise ValueError("production sequence entries require kind and quantity")
+            sequence.append(
+                (EntityKind(_string(item[0], "unit_kind")), _integer(item[1], "quantity"))
+            )
+        return CreateProductionBatchCommand(
+            _string(data.get("factory_id"), "factory_id"),
+            tuple(sequence),
+            _string(data.get("title", "Production Queue"), "title"),
+            _integer(data.get("priority", 0), "priority"),
+            owner_id,
+            _optional_string(data.get("original_instruction", "")),
+        )
+    if command_type == "create_construction":
+        return CreateConstructionCommand(
+            _string(data.get("builder_id"), "builder_id"),
+            EntityKind(_string(data.get("building_kind"), "building_kind")),
+            _point(data.get("position"), "position"),
+            _entity_ids(data.get("builder_ids", [])),
+            _string(data.get("title", "Construct Building"), "title"),
+            _integer(data.get("priority", 0), "priority"),
+            owner_id,
+            _optional_string(data.get("original_instruction", "")),
+            _boolean(data.get("queued", False), "queued"),
+        )
     if command_type == "create_reinforcement":
         return CreateReinforcementCommand(
             candidate_entity_ids=_entity_ids(data.get("candidate_entity_ids")),
@@ -532,6 +610,12 @@ def _automation_common(data: dict[str, object], owner_id: str) -> tuple[str, int
 def _mapping(value: object, field: str) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _list(value: object, field: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
     return value
 
 

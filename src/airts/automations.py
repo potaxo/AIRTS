@@ -45,6 +45,7 @@ class AutomationKind(StrEnum):
     REINFORCEMENT = "reinforcement"
     REPAIR_AND_RETURN = "repair_and_return"
     ECONOMY = "economy"
+    CONSTRUCTION = "construction"
 
 
 class RepairPhase(StrEnum):
@@ -124,6 +125,9 @@ class ProductionParameters:
     defend_automation_id: str | None = None
     patrol_target: SpatialTarget | None = None
     patrol_automation_id: str | None = None
+    sequence: tuple[tuple[EntityKind, int], ...] = ()
+    sequence_index: int = 0
+    sequence_produced: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -147,6 +151,37 @@ class ProductionParameters:
                 None if self.patrol_target is None else target_to_dict(self.patrol_target)
             ),
             "patrol_automation_id": self.patrol_automation_id,
+            "sequence": [[kind.value, quantity] for kind, quantity in self.sequence],
+            "sequence_index": self.sequence_index,
+            "sequence_produced": self.sequence_produced,
+        }
+
+    @property
+    def current_unit_kind(self) -> EntityKind:
+        return self.sequence[self.sequence_index][0] if self.sequence else self.unit_kind
+
+
+@dataclass(slots=True)
+class ConstructionParameters:
+    builder_id: str
+    building_kind: EntityKind
+    position: Point
+    required_value: float
+    construction_value: float = 0.0
+    cost_paid: bool = False
+    constructed_entity_id: str | None = None
+    builder_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "builder_id": self.builder_id,
+            "building_kind": self.building_kind.value,
+            "position": [self.position.x, self.position.y],
+            "required_value": self.required_value,
+            "construction_value": self.construction_value,
+            "cost_paid": self.cost_paid,
+            "constructed_entity_id": self.constructed_entity_id,
+            "builder_ids": list(self.builder_ids),
         }
 
 
@@ -216,6 +251,7 @@ AutomationParameters = (
     | ReinforcementParameters
     | RepairParameters
     | EconomyParameters
+    | ConstructionParameters
 )
 
 
@@ -307,6 +343,12 @@ class Automation:
             self.parameters.generator_ids[:] = [
                 entity_id
                 for entity_id in self.parameters.generator_ids
+                if entity_id not in entity_ids
+            ]
+        elif isinstance(self.parameters, ConstructionParameters):
+            self.parameters.builder_ids[:] = [
+                entity_id
+                for entity_id in self.parameters.builder_ids
                 if entity_id not in entity_ids
             ]
 

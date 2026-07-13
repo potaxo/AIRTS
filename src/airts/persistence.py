@@ -10,6 +10,7 @@ from airts.automations import (
     AutomationKind,
     AutomationStatus,
     AutomationTransition,
+    ConstructionParameters,
     DefendParameters,
     EconomyParameters,
     PatrolParameters,
@@ -45,7 +46,7 @@ from airts.spatial import (
 )
 from airts.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v4"
+SAVE_SCHEMA = "airts-save-v7"
 
 
 class PersistenceError(ValueError):
@@ -415,11 +416,14 @@ def _load_projectiles(raw_data: object, simulation: Simulation) -> dict[str, Pro
         if projectile_speed(weapon_kind) <= 0 or damage != weapon_kind.profile.attack_damage:
             raise PersistenceError("projectile weapon profile is invalid")
         position = _point(item.get("position"), "projectile.position")
+        destination = _point(item.get("destination"), "projectile.destination")
         trajectory = list(_points(item.get("trajectory"), "projectile.trajectory"))
         if not trajectory or trajectory[-1] != position:
             raise PersistenceError("projectile trajectory must end at its current position")
         if any(not simulation.game_map.contains(point) for point in trajectory):
             raise PersistenceError("projectile trajectory leaves the map")
+        if not simulation.game_map.contains(destination):
+            raise PersistenceError("projectile destination leaves the map")
         projectiles[projectile_id] = Projectile(
             projectile_id=projectile_id,
             source_entity_id=_string(item.get("source_entity_id"), "projectile.source_entity_id"),
@@ -427,6 +431,7 @@ def _load_projectiles(raw_data: object, simulation: Simulation) -> dict[str, Pro
             owner_id=_string(item.get("owner_id"), "projectile.owner_id"),
             weapon_kind=weapon_kind,
             position=position,
+            destination=destination,
             damage=damage,
             speed=speed,
             trajectory=trajectory,
@@ -583,6 +588,7 @@ def _load_automation_parameters(
     | ReinforcementParameters
     | RepairParameters
     | EconomyParameters
+    | ConstructionParameters
 ):
     data = _mapping(raw_data, "automation.parameters")
     if kind is AutomationKind.PATROL:
@@ -684,6 +690,25 @@ def _load_automation_parameters(
         )
         if not continuous and produced_count > target_count:
             raise PersistenceError("production count exceeds target")
+        raw_sequence = _list(data.get("sequence", []), "production.sequence")
+        sequence: list[tuple[EntityKind, int]] = []
+        for index, raw_item in enumerate(raw_sequence):
+            item = _list(raw_item, f"production.sequence[{index}]")
+            if len(item) != 2:
+                raise PersistenceError("production sequence entry must contain kind and quantity")
+            try:
+                sequence_kind = EntityKind(_string(item[0], "production sequence kind"))
+            except ValueError as error:
+                raise PersistenceError(f"invalid production sequence kind: {error}") from error
+            quantity = _integer(item[1], "production sequence quantity", minimum=1)
+            if sequence_kind.profile.category is not EntityCategory.UNIT:
+                raise PersistenceError("production sequence kind must be a unit")
+            sequence.append((sequence_kind, quantity))
+        sequence_index = _integer(
+            data.get("sequence_index", 0), "production.sequence_index", minimum=0
+        )
+        if sequence and sequence_index >= len(sequence) and produced_count < target_count:
+            raise PersistenceError("production sequence index is out of range")
         return ProductionParameters(
             factory_id=factory_id,
             unit_kind=unit_kind,
@@ -709,6 +734,52 @@ def _load_automation_parameters(
                 data.get("patrol_automation_id"),
                 "production.patrol_automation_id",
             ),
+            sequence=tuple(sequence),
+            sequence_index=sequence_index,
+            sequence_produced=_integer(
+                data.get("sequence_produced", 0),
+                "production.sequence_produced",
+                minimum=0,
+            ),
+        )
+    if kind is AutomationKind.CONSTRUCTION:
+        try:
+            building_kind = EntityKind(
+                _string(data.get("building_kind"), "construction.building_kind")
+            )
+        except ValueError as error:
+            raise PersistenceError(f"invalid construction kind: {error}") from error
+        builder_id = _string(data.get("builder_id"), "construction.builder_id")
+        builder_ids = _string_list(
+            data.get("builder_ids", [builder_id]), "construction.builder_ids"
+        )
+        if not builder_ids or any(
+            item not in simulation.entities
+            or simulation.entities[item].kind is not EntityKind.BUILDER
+            for item in builder_ids
+        ):
+            raise PersistenceError("construction references an invalid builder")
+        required_value = _number(
+            data.get("required_value"), "construction.required_value", minimum=1
+        )
+        construction_value = _number(
+            data.get("construction_value", 0),
+            "construction.construction_value",
+            minimum=0,
+        )
+        if construction_value > required_value:
+            raise PersistenceError("construction value cannot exceed required value")
+        return ConstructionParameters(
+            builder_id,
+            building_kind,
+            _point(data.get("position"), "construction.position"),
+            required_value,
+            construction_value,
+            _boolean(data.get("cost_paid", False), "construction.cost_paid"),
+            _nullable_string(
+                data.get("constructed_entity_id"), "construction.constructed_entity_id"
+            ),
+            builder_ids,
         )
     if kind is AutomationKind.REINFORCEMENT:
         return ReinforcementParameters(
@@ -883,6 +954,13 @@ def _validate_assignment_completeness(simulation: Simulation) -> None:
         ):
             if assigned:
                 raise PersistenceError("queued production cannot own its factory")
+        elif (
+            automation.kind is AutomationKind.CONSTRUCTION
+            and automation.status is AutomationStatus.WAITING
+            and automation.reason_code == "BUILDERS_QUEUED"
+        ):
+            if assigned:
+                raise PersistenceError("queued construction cannot own builders")
         elif automation.status is AutomationStatus.PAUSED:
             if not assigned.issubset(expected):
                 raise PersistenceError("paused automation assignments are invalid")

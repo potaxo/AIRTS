@@ -57,6 +57,9 @@ class EntityProfile:
     attack_damage: int = 0
     attack_range: float = 0.0
     production_cost: int = 0
+    construction_cost: int = 0
+    build_speed: float = 0.0
+    build_range: float = 0.0
 
     @property
     def movable(self) -> bool:
@@ -67,6 +70,7 @@ class EntityKind(StrEnum):
     SCOUT = "scout"
     LIGHT_TANK = "light_tank"
     HEAVY_TANK = "heavy_tank"
+    BUILDER = "builder"
     FACTORY = "factory"
     REPAIR_HUB = "repair_hub"
     COMMAND_CENTER = "command_center"
@@ -88,10 +92,28 @@ _ENTITY_PROFILES = {
     EntityKind.SCOUT: EntityProfile(EntityCategory.UNIT, 60, 7.0, (1, 1), 5.0, 5, 5.0, 50),
     EntityKind.LIGHT_TANK: EntityProfile(EntityCategory.UNIT, 100, 5.0, (1, 1), 3.5, 12, 6.0, 100),
     EntityKind.HEAVY_TANK: EntityProfile(EntityCategory.UNIT, 160, 4.0, (1, 1), 2.5, 20, 7.0, 175),
-    EntityKind.FACTORY: EntityProfile(EntityCategory.BUILDING, 500, 5.0, (4, 4)),
-    EntityKind.REPAIR_HUB: EntityProfile(EntityCategory.BUILDING, 350, 4.0, (3, 3)),
+    EntityKind.BUILDER: EntityProfile(
+        EntityCategory.UNIT,
+        80,
+        5.0,
+        (1, 1),
+        3.0,
+        0,
+        0.0,
+        75,
+        build_speed=5.0,
+        build_range=2.5,
+    ),
+    EntityKind.FACTORY: EntityProfile(
+        EntityCategory.BUILDING, 500, 5.0, (4, 4), construction_cost=400
+    ),
+    EntityKind.REPAIR_HUB: EntityProfile(
+        EntityCategory.BUILDING, 350, 4.0, (3, 3), construction_cost=250
+    ),
     EntityKind.COMMAND_CENTER: EntityProfile(EntityCategory.BUILDING, 700, 7.0, (5, 5)),
-    EntityKind.RESOURCE_GENERATOR: EntityProfile(EntityCategory.BUILDING, 250, 3.0, (2, 2)),
+    EntityKind.RESOURCE_GENERATOR: EntityProfile(
+        EntityCategory.BUILDING, 250, 3.0, (2, 2), construction_cost=200
+    ),
 }
 
 
