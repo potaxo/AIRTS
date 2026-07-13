@@ -64,6 +64,7 @@ class InputMode(StrEnum):
 class AirtsApp:
     TARGET_RENDER_FPS = 100
     MAX_SELECTED_PATHS = 32
+    DISPLAY_FLAGS = pygame.RESIZABLE | pygame.SCALED
     MAP_PIXELS = 768
     LEFT_PANEL_WIDTH = 280
     RIGHT_PANEL_WIDTH = 380
@@ -120,6 +121,20 @@ class AirtsApp:
         self._font: pygame.font.Font | None = None
         self._small_font: pygame.font.Font | None = None
         self._map_surface: pygame.Surface | None = None
+        self._scaled_map_surface: pygame.Surface | None = None
+        self._scaled_map_size: tuple[int, int] | None = None
+        self._frame_selected_entities: tuple[Entity, ...] | None = None
+        self._unit_sprite_cache: dict[tuple[int, tuple[int, int, int]], pygame.Surface] = {}
+        self._large_unit_render_key: tuple[object, ...] | None = None
+        self._large_unit_blits: tuple[tuple[pygame.Surface, tuple[int, int]], ...] = ()
+        self._large_building_draws: tuple[tuple[pygame.Rect, tuple[int, int, int], bool], ...] = ()
+        self._large_unit_selected_bounds: pygame.Rect | None = None
+        self._large_unit_health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
+        self._large_unit_inspected_ring: tuple[tuple[int, int], int] | None = None
+        self._large_unit_renderable = False
+        self._path_render_key: tuple[object, ...] | None = None
+        self._path_render_points: tuple[tuple[tuple[int, int], ...], ...] = ()
+        self._scaled_display_active = False
         self._frame_tile_size: float | None = None
         self._frame_map_pixel_size: tuple[int, int] | None = None
         self._frame_map_origin: tuple[int, int] | None = None
@@ -196,7 +211,8 @@ class AirtsApp:
             display_initialized = True
             pygame.font.init()
             font_initialized = True
-            screen = pygame.display.set_mode(self.WINDOW_SIZE, pygame.RESIZABLE)
+            screen = pygame.display.set_mode(self.WINDOW_SIZE, self.DISPLAY_FLAGS)
+            self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
             self.resize_layout(self.WINDOW_SIZE)
             pygame.display.set_caption("AIRTS — Phase 5")
             self._font = pygame.font.Font(None, 24)
@@ -233,6 +249,19 @@ class AirtsApp:
         self._font = None
         self._small_font = None
         self._map_surface = None
+        self._scaled_map_surface = None
+        self._scaled_map_size = None
+        self._unit_sprite_cache.clear()
+        self._large_unit_render_key = None
+        self._large_unit_blits = ()
+        self._large_building_draws = ()
+        self._large_unit_health_bars = ()
+        self._large_unit_selected_bounds = None
+        self._large_unit_inspected_ring = None
+        self._large_unit_renderable = False
+        self._path_render_key = None
+        self._path_render_points = ()
+        self._scaled_display_active = False
         try:
             if display_initialized:
                 pygame.event.clear()
@@ -266,7 +295,14 @@ class AirtsApp:
                     -event.y, visible_rows=7, total_rows=len(self.simulation.live_automations)
                 )
         elif event.type in {pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED}:
-            size = event.size if hasattr(event, "size") else (event.x, event.y)
+            display_surface = pygame.display.get_surface()
+            size = (
+                display_surface.get_size()
+                if self._scaled_display_active and display_surface is not None
+                else event.size
+                if hasattr(event, "size")
+                else (event.x, event.y)
+            )
             self.resize_layout(tuple(size))
 
     def _handle_key(self, key: int) -> None:
@@ -802,6 +838,8 @@ class AirtsApp:
             return
         self.simulation = simulation
         self._map_surface = None
+        self._scaled_map_surface = None
+        self._scaled_map_size = None
         self._clear_selection_state()
         self.notice = f"Loaded {self.quick_save_path}."
 
@@ -814,6 +852,8 @@ class AirtsApp:
             enemy_spawn_cap=self._initial_enemy_spawn_cap,
         )
         self._map_surface = None
+        self._scaled_map_surface = None
+        self._scaled_map_size = None
         self._clear_selection_state()
         self.notice = "New game started."
 
@@ -966,7 +1006,10 @@ class AirtsApp:
         )
         try:
             self._prune_removed_entities()
-            screen.fill(self.BACKGROUND)
+            self._frame_selected_entities = tuple(
+                self.simulation.entities[entity_id] for entity_id in self.selected_entities
+            )
+            pygame.draw.rect(screen, self.BACKGROUND, self.canvas_rect)
             previous_clip = screen.get_clip()
             screen.set_clip(self.canvas_rect)
             self._draw_map(screen)
@@ -987,6 +1030,7 @@ class AirtsApp:
             self._frame_tile_size = None
             self._frame_map_pixel_size = None
             self._frame_map_origin = None
+            self._frame_selected_entities = None
 
     def _prune_removed_entities(self) -> None:
         existing = self.simulation.entities.keys()
@@ -996,8 +1040,13 @@ class AirtsApp:
 
     def _draw_map(self, screen: pygame.Surface) -> None:
         if self._map_surface is not None:
-            scaled = pygame.transform.scale(self._map_surface, self.map_pixel_size)
-            screen.blit(scaled, self.map_origin)
+            if self._scaled_map_surface is None or self._scaled_map_size != self.map_pixel_size:
+                self._scaled_map_surface = pygame.transform.scale(
+                    self._map_surface,
+                    self.map_pixel_size,
+                )
+                self._scaled_map_size = self.map_pixel_size
+            screen.blit(self._scaled_map_surface, self.map_origin)
             return
         surface = pygame.Surface((self.MAP_PIXELS, self.MAP_PIXELS))
         terrain_colors = {
@@ -1020,8 +1069,9 @@ class AirtsApp:
             pygame.draw.line(surface, (44, 65, 49), (pixel, 0), (pixel, self.MAP_PIXELS))
             pygame.draw.line(surface, (44, 65, 49), (0, pixel), (self.MAP_PIXELS, pixel))
         self._map_surface = surface
-        scaled = pygame.transform.scale(surface, self.map_pixel_size)
-        screen.blit(scaled, self.map_origin)
+        self._scaled_map_surface = pygame.transform.scale(surface, self.map_pixel_size)
+        self._scaled_map_size = self.map_pixel_size
+        screen.blit(self._scaled_map_surface, self.map_origin)
 
     def _draw_entities(self, screen: pygame.Surface) -> None:
         colors = {
@@ -1034,65 +1084,77 @@ class AirtsApp:
             EntityKind.COMMAND_CENTER: (155, 129, 190),
             EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
         }
-        for entity_id in self._representative_path_entity_ids():
-            entity = self.simulation.entities.get(entity_id)
-            if entity is None:
-                continue
-            if entity.path:
-                points = [self._screen_point(point) for point in self._simplified_path(entity)]
-                pygame.draw.lines(screen, (225, 225, 225), False, points, 1)
-        large_selection = len(self.selected_entities) > 128
+        for points in self._representative_path_points():
+            pygame.draw.lines(screen, (225, 225, 225), False, points, 1)
+        tile_size = self.tile_size
+        origin_x, origin_y = self.map_origin
+        selected_entities = self.selected_entities
+        large_selection = len(selected_entities) > 128
+        if large_selection and self._draw_cached_large_unit_entities(
+            screen,
+            colors,
+            tile_size,
+            (origin_x, origin_y),
+        ):
+            return
         show_full_health_bars = not large_selection
-        selected_bounds: pygame.Rect | None = None
+        unit_radius = max(5, round(tile_size * 0.42))
+        bar_width = max(12, round(tile_size * 1.4))
+        selected_min_x: int | None = None
+        selected_min_y = 0
+        selected_max_x = 0
+        selected_max_y = 0
         for entity_id, entity in self.simulation.entities.items():
-            center = self._screen_point(entity.selection_position)
+            center = (
+                origin_x + round(entity.selection_position.x * tile_size),
+                origin_y + round(entity.selection_position.y * tile_size),
+            )
             if entity.category is EntityCategory.BUILDING:
                 width, height = entity.kind.profile.footprint
                 rectangle = pygame.Rect(
-                    self._screen_point(entity.position)[0],
-                    self._screen_point(entity.position)[1],
-                    round(width * self.tile_size),
-                    round(height * self.tile_size),
+                    origin_x + round(entity.position.x * tile_size),
+                    origin_y + round(entity.position.y * tile_size),
+                    round(width * tile_size),
+                    round(height * tile_size),
                 )
                 pygame.draw.rect(screen, colors[entity.kind], rectangle, border_radius=3)
                 pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
-                if entity_id in self.selected_entities:
+                if entity_id in selected_entities:
                     pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
             else:
-                radius = max(5, round(self.tile_size * 0.42))
+                radius = unit_radius
                 color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
-                if large_selection and entity_id in self.selected_entities:
+                if large_selection and entity_id in selected_entities:
                     color = (
                         min(255, color[0] + 45),
                         min(255, color[1] + 45),
                         min(255, color[2] + 45),
                     )
                 pygame.draw.circle(screen, color, center, radius)
-                if entity_id in self.selected_entities and not large_selection:
+                if entity_id in selected_entities and not large_selection:
                     pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
-                elif entity_id in self.selected_entities:
-                    unit_bounds = pygame.Rect(
-                        center[0] - radius,
-                        center[1] - radius,
-                        radius * 2,
-                        radius * 2,
-                    )
-                    selected_bounds = (
-                        unit_bounds
-                        if selected_bounds is None
-                        else selected_bounds.union(unit_bounds)
-                    )
-                if (
-                    entity_id == self.inspected_entity_id
-                    and entity_id not in self.selected_entities
-                ):
+                elif entity_id in selected_entities:
+                    left = center[0] - radius
+                    top = center[1] - radius
+                    right = center[0] + radius
+                    bottom = center[1] + radius
+                    if selected_min_x is None:
+                        selected_min_x = left
+                        selected_min_y = top
+                        selected_max_x = right
+                        selected_max_y = bottom
+                    else:
+                        selected_min_x = min(selected_min_x, left)
+                        selected_min_y = min(selected_min_y, top)
+                        selected_max_x = max(selected_max_x, right)
+                        selected_max_y = max(selected_max_y, bottom)
+                if entity_id == self.inspected_entity_id and entity_id not in selected_entities:
                     pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
             if (
                 show_full_health_bars
                 or entity.health < entity.kind.profile.max_health
                 or entity_id == self.inspected_entity_id
             ):
-                bar_width = max(12, round(self.tile_size * 1.4))
                 bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
                 pygame.draw.rect(screen, (70, 35, 35), bar)
                 health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
@@ -1101,11 +1163,16 @@ class AirtsApp:
                     (74, 218, 111),
                     pygame.Rect(bar.x, bar.y, health_width, 3),
                 )
-        if selected_bounds is not None:
+        if selected_min_x is not None:
             pygame.draw.rect(
                 screen,
                 (245, 245, 245),
-                selected_bounds.inflate(6, 6),
+                pygame.Rect(
+                    selected_min_x - 3,
+                    selected_min_y - 3,
+                    selected_max_x - selected_min_x + 6,
+                    selected_max_y - selected_min_y + 6,
+                ),
                 1,
             )
         inspected = self.simulation.entities.get(self.inspected_entity_id or "")
@@ -1124,6 +1191,154 @@ class AirtsApp:
                 round(interaction_range * self.tile_size),
                 1,
             )
+
+    def _draw_cached_large_unit_entities(
+        self,
+        screen: pygame.Surface,
+        colors: dict[EntityKind, tuple[int, int, int]],
+        tile_size: float,
+        origin: tuple[int, int],
+    ) -> bool:
+        """Draw a large scene without rebuilding unchanged transforms each frame."""
+
+        selected_entities = frozenset(self.selected_entities)
+        key: tuple[object, ...] = (
+            id(self.simulation),
+            self.simulation.tick,
+            origin,
+            tile_size,
+            selected_entities,
+            self.inspected_entity_id,
+            len(self.simulation.entities),
+        )
+        if key != self._large_unit_render_key:
+            self._large_unit_render_key = key
+            self._large_unit_renderable = True
+            if self._large_unit_renderable:
+                radius = max(5, round(tile_size * 0.42))
+                bar_width = max(12, round(tile_size * 1.4))
+                origin_x, origin_y = origin
+                blits: list[tuple[pygame.Surface, tuple[int, int]]] = []
+                building_draws: list[tuple[pygame.Rect, tuple[int, int, int], bool]] = []
+                health_bars: list[tuple[pygame.Rect, int]] = []
+                selected_min_x: int | None = None
+                selected_min_y = 0
+                selected_max_x = 0
+                selected_max_y = 0
+                inspected_ring: tuple[tuple[int, int], int] | None = None
+                for entity_id, entity in self.simulation.entities.items():
+                    color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
+                    selected = entity_id in selected_entities
+                    if entity.category is EntityCategory.BUILDING:
+                        width, height = entity.kind.profile.footprint
+                        rectangle = pygame.Rect(
+                            origin_x + round(entity.position.x * tile_size),
+                            origin_y + round(entity.position.y * tile_size),
+                            round(width * tile_size),
+                            round(height * tile_size),
+                        )
+                        building_draws.append((rectangle, color, selected))
+                        center = (
+                            origin_x + round(entity.selection_position.x * tile_size),
+                            origin_y + round(entity.selection_position.y * tile_size),
+                        )
+                    else:
+                        center = (
+                            origin_x + round(entity.position.x * tile_size),
+                            origin_y + round(entity.position.y * tile_size),
+                        )
+                        if selected:
+                            color = (
+                                min(255, color[0] + 45),
+                                min(255, color[1] + 45),
+                                min(255, color[2] + 45),
+                            )
+                            left = center[0] - radius
+                            top = center[1] - radius
+                            right = center[0] + radius
+                            bottom = center[1] + radius
+                            if selected_min_x is None:
+                                selected_min_x = left
+                                selected_min_y = top
+                                selected_max_x = right
+                                selected_max_y = bottom
+                            else:
+                                selected_min_x = min(selected_min_x, left)
+                                selected_min_y = min(selected_min_y, top)
+                                selected_max_x = max(selected_max_x, right)
+                                selected_max_y = max(selected_max_y, bottom)
+                        elif entity_id == self.inspected_entity_id:
+                            inspected_ring = (center, radius)
+                        sprite = self._unit_sprite(radius, color)
+                        blits.append((sprite, (center[0] - radius, center[1] - radius)))
+                    if (
+                        entity.health < entity.kind.profile.max_health
+                        or entity_id == self.inspected_entity_id
+                    ):
+                        bar = pygame.Rect(
+                            center[0] - bar_width // 2,
+                            center[1] - 12,
+                            bar_width,
+                            3,
+                        )
+                        health_width = round(
+                            bar_width * entity.health / entity.kind.profile.max_health
+                        )
+                        health_bars.append((bar, health_width))
+                self._large_unit_blits = tuple(blits)
+                self._large_building_draws = tuple(building_draws)
+                self._large_unit_health_bars = tuple(health_bars)
+                self._large_unit_inspected_ring = inspected_ring
+                self._large_unit_selected_bounds = (
+                    None
+                    if selected_min_x is None
+                    else pygame.Rect(
+                        selected_min_x - 3,
+                        selected_min_y - 3,
+                        selected_max_x - selected_min_x + 6,
+                        selected_max_y - selected_min_y + 6,
+                    )
+                )
+        if not self._large_unit_renderable:
+            return False
+        screen.fblits(self._large_unit_blits)
+        for rectangle, color, selected in self._large_building_draws:
+            pygame.draw.rect(screen, color, rectangle, border_radius=3)
+            pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
+            if selected:
+                pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
+        if self._large_unit_inspected_ring is not None:
+            center, radius = self._large_unit_inspected_ring
+            pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
+        for bar, health_width in self._large_unit_health_bars:
+            pygame.draw.rect(screen, (70, 35, 35), bar)
+            pygame.draw.rect(
+                screen,
+                (74, 218, 111),
+                pygame.Rect(bar.x, bar.y, health_width, 3),
+            )
+        if self._large_unit_selected_bounds is not None:
+            pygame.draw.rect(
+                screen,
+                (245, 245, 245),
+                self._large_unit_selected_bounds,
+                1,
+            )
+        return True
+
+    def _unit_sprite(
+        self,
+        radius: int,
+        color: tuple[int, int, int],
+    ) -> pygame.Surface:
+        key = (radius, color)
+        sprite = self._unit_sprite_cache.get(key)
+        if sprite is None:
+            diameter = radius * 2 + 1
+            sprite = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+            pygame.draw.circle(sprite, color, (radius, radius), radius)
+            self._unit_sprite_cache[key] = sprite
+        return sprite
 
     def _draw_construction(self, screen: pygame.Surface) -> None:
         construction_automations = tuple(
@@ -1230,6 +1445,35 @@ class AirtsApp:
             else:
                 representatives.append(inspected)
         return tuple(representatives)
+
+    def _representative_path_points(self) -> tuple[tuple[tuple[int, int], ...], ...]:
+        key: tuple[object, ...] = (
+            id(self.simulation),
+            self.simulation.tick,
+            len(self.simulation.command_history),
+            self.map_origin,
+            self.tile_size,
+            frozenset(self.selected_entities),
+            self.inspected_entity_id,
+        )
+        if key != self._path_render_key:
+            origin_x, origin_y = self.map_origin
+            tile_size = self.tile_size
+            paths: list[tuple[tuple[int, int], ...]] = []
+            for entity_id in self._representative_path_entity_ids():
+                entity = self.simulation.entities[entity_id]
+                points = tuple(
+                    (
+                        origin_x + round(point.x * tile_size),
+                        origin_y + round(point.y * tile_size),
+                    )
+                    for point in self._simplified_path(entity)
+                )
+                if len(points) >= 2:
+                    paths.append(points)
+            self._path_render_key = key
+            self._path_render_points = tuple(paths)
+        return self._path_render_points
 
     @staticmethod
     def _simplified_path(entity: Entity) -> tuple[Point, ...]:
@@ -1351,6 +1595,11 @@ class AirtsApp:
             pygame.draw.polygon(surface, (*color, 230), points, width)
             screen.blit(surface, (0, 0))
 
+    def _selected_entities_for_draw(self) -> tuple[Entity, ...]:
+        if self._frame_selected_entities is not None:
+            return self._frame_selected_entities
+        return tuple(self.simulation.entities[entity_id] for entity_id in self.selected_entities)
+
     def _draw_command_bar(self, screen: pygame.Surface) -> None:
         if self._small_font is None:
             return
@@ -1363,7 +1612,7 @@ class AirtsApp:
             (190, 205, 220),
         )
         actions: list[tuple[str, str]] = []
-        selected = [self.simulation.entities[item] for item in sorted(self.selected_entities)]
+        selected = self._selected_entities_for_draw()
         if selected and all(
             entity.owner_id == "player" and entity.is_movable for entity in selected
         ):
@@ -1438,18 +1687,17 @@ class AirtsApp:
                 f"damage {profile.attack_damage} | range {profile.attack_range}",
                 f"speed {profile.movement_speed or 0} | target {inspected.attack_target_id or '-'}",
             ]
-        elif self.selected_entities:
+        elif selected_entities := self._selected_entities_for_draw():
             kinds: dict[str, int] = {}
             health = 0
             maximum = 0
-            for entity_id in self.selected_entities:
-                entity = self.simulation.entities[entity_id]
+            for entity in selected_entities:
                 kinds[entity.kind.value] = kinds.get(entity.kind.value, 0) + 1
                 health += entity.health
                 maximum += entity.kind.profile.max_health
             distribution = ", ".join(f"{kind} {count}" for kind, count in sorted(kinds.items()))
             lines = [
-                f"{len(self.selected_entities)} selected | HP {health}/{maximum}",
+                f"{len(selected_entities)} selected | HP {health}/{maximum}",
                 distribution,
             ]
         else:
@@ -1580,8 +1828,7 @@ class AirtsApp:
         self._text(screen, "Units and buildings", (x, y), (245, 245, 245))
         y += 34
         kinds: dict[EntityKind, int] = {}
-        for entity_id in self.selected_entities:
-            entity = self.simulation.entities[entity_id]
+        for entity in self._selected_entities_for_draw():
             kinds[entity.kind] = kinds.get(entity.kind, 0) + 1
         self._type_buttons.clear()
         if not kinds:

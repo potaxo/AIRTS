@@ -35,7 +35,7 @@ class PlayerVisibility:
     def update(self, sources: tuple[tuple[Point, float], ...], tick: int) -> tuple[int, int, int]:
         previous_visible = self.visible
         current: set[Cell] = set()
-        row_intervals: list[list[tuple[int, int]]] = [[] for _ in range(self.height)]
+        row_masks = [0] * self.height
         for position, radius in sources:
             squared_radius = radius * radius
             minimum_y = max(0, int(position.y - radius))
@@ -52,19 +52,13 @@ class PlayerVisibility:
                     floor(position.x + horizontal_radius - 0.5),
                 )
                 if minimum_x <= maximum_x:
-                    row_intervals[y].append((minimum_x, maximum_x))
-        for y, intervals in enumerate(row_intervals):
-            if not intervals:
-                continue
-            intervals.sort()
-            start, end = intervals[0]
-            for next_start, next_end in intervals[1:]:
-                if next_start <= end + 1:
-                    end = max(end, next_end)
-                    continue
-                current.update((x, y) for x in range(start, end + 1))
-                start, end = next_start, next_end
-            current.update((x, y) for x in range(start, end + 1))
+                    width = maximum_x - minimum_x + 1
+                    row_masks[y] |= ((1 << width) - 1) << minimum_x
+        for y, row_mask in enumerate(row_masks):
+            while row_mask:
+                bit = row_mask & -row_mask
+                current.add((bit.bit_length() - 1, y))
+                row_mask ^= bit
         self.visible = current
         newly_visible = current.difference(previous_visible)
         no_longer_visible = previous_visible.difference(current)

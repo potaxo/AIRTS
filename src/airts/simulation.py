@@ -69,6 +69,8 @@ from airts.validation import (
 )
 from airts.visibility import VisibilitySystem
 
+type LocalCollider = tuple[str, Point, float, bool]
+
 
 class Simulation:
     TICKS_PER_SECOND = 10
@@ -800,13 +802,25 @@ class Simulation:
                 )
                 for entity_id in entity_ids
             }
+        cluster_size = (
+            8
+            if len(entity_ids) > 128
+            and all(self.entities[entity_id].kind is EntityKind.SCOUT for entity_id in entity_ids)
+            else 5
+        )
         clusters: dict[tuple[int, int], list[str]] = {}
         for entity_id in entity_ids:
             cell = self.game_map.cell_for(destinations[entity_id])
-            clusters.setdefault((cell[0] // 5, cell[1] // 5), []).append(entity_id)
+            clusters.setdefault(
+                (cell[0] // cluster_size, cell[1] // cluster_size),
+                [],
+            ).append(entity_id)
         paths: dict[str, PathResult] = {}
         for cluster, member_ids in sorted(clusters.items()):
-            center = Point(cluster[0] * 5 + 2.5, cluster[1] * 5 + 2.5)
+            center = Point(
+                (cluster[0] + 0.5) * cluster_size,
+                (cluster[1] + 0.5) * cluster_size,
+            )
             anchor_id = min(
                 member_ids,
                 key=lambda entity_id: (
@@ -2533,15 +2547,17 @@ class Simulation:
         self._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
 
     def _move_entities(self) -> None:
-        movable_ids = frozenset(
-            entity_id for entity_id, entity in self.entities.items() if entity.is_movable
-        )
+        movable_entities = {
+            entity_id: entity for entity_id, entity in self.entities.items() if entity.is_movable
+        }
+        movable_ids = frozenset(movable_entities)
+        collision_radii = {
+            entity_id: collision_radius(entity.kind)
+            for entity_id, entity in movable_entities.items()
+        }
+        static_occupant_cells = self._building_cells()
         unit_index = SpatialIndex(
-            {
-                entity_id: entity.position
-                for entity_id, entity in self.entities.items()
-                if entity_id in movable_ids
-            }
+            {entity_id: entity.position for entity_id, entity in movable_entities.items()}
         )
         for entity_id in sorted(self.entities):
             entity = self.entities[entity_id]
@@ -2561,16 +2577,36 @@ class Simulation:
             self._skip_crowded_waypoints(entity)
             target = entity.path[0]
             maximum_step = entity.speed * self.TICK_SECONDS
+            entity_radius = collision_radii[entity_id]
             local_query_radius = max(
                 NEIGHBOR_RADIUS,
-                maximum_step + collision_radius(entity.kind) + 0.5,
+                maximum_step + entity_radius + 0.5,
             )
             local_neighbor_ids = unit_index.nearby(entity.position, local_query_radius)
-            neighbors = tuple(
-                self.entities[other_id].position
+            local_colliders: tuple[LocalCollider, ...] = tuple(
+                (
+                    other_id,
+                    other.position,
+                    collision_radii[other_id],
+                    not other.path,
+                )
                 for other_id in local_neighbor_ids
-                if other_id != entity_id
-                and entity.position.distance_to(self.entities[other_id].position) <= NEIGHBOR_RADIUS
+                for other in (self.entities[other_id],)
+            )
+            neighbors = (
+                tuple(
+                    position
+                    for other_id, position, _, _ in local_colliders
+                    if other_id != entity_id
+                )
+                if local_query_radius == NEIGHBOR_RADIUS
+                else tuple(
+                    position
+                    for other_id, position, _, _ in local_colliders
+                    if other_id != entity_id
+                    and _squared_distance(entity.position, position)
+                    <= NEIGHBOR_RADIUS * NEIGHBOR_RADIUS
+                )
             )
             next_position: Point | None
             direct_distance = entity.position.distance_to(target)
@@ -2585,18 +2621,34 @@ class Simulation:
                 )
             )
             direct_position = self._clamp_to_collider_contact(
-                entity, desired_direct_position, local_neighbor_ids
+                entity,
+                desired_direct_position,
+                entity_radius,
+                local_colliders,
             )
-            direct_was_clamped = direct_position.distance_to(desired_direct_position) > 1e-9
+            direct_was_clamped = _squared_distance(direct_position, desired_direct_position) > 1e-18
             push_stationary_blocker = direct_was_clamped and self._contact_has_stationary_blocker(
-                entity, desired_direct_position, local_neighbor_ids
+                entity,
+                desired_direct_position,
+                entity_radius,
+                local_colliders,
             )
             if (
                 not direct_was_clamped or push_stationary_blocker
-            ) and self._local_move_is_available(entity, direct_position, local_neighbor_ids):
+            ) and self._local_move_is_available(
+                entity,
+                direct_position,
+                entity_radius,
+                local_colliders,
+                static_occupant_cells,
+            ):
                 next_position = direct_position
             else:
-                if len(entity.path) == 1 and self._replan_contested_final_approach(entity, target):
+                if (
+                    push_stationary_blocker
+                    and len(entity.path) == 1
+                    and self._replan_contested_final_approach(entity, target)
+                ):
                     continue
                 next_position = None
                 for raw_candidate in steering_candidates(
@@ -2609,13 +2661,22 @@ class Simulation:
                     if (
                         direct_was_clamped
                         and not push_stationary_blocker
-                        and raw_candidate.distance_to(desired_direct_position) <= 1e-9
+                        and _squared_distance(raw_candidate, desired_direct_position) <= 1e-18
                     ):
                         continue
                     candidate = self._clamp_to_collider_contact(
-                        entity, raw_candidate, local_neighbor_ids
+                        entity,
+                        raw_candidate,
+                        entity_radius,
+                        local_colliders,
                     )
-                    if self._local_move_is_available(entity, candidate, local_neighbor_ids):
+                    if self._local_move_is_available(
+                        entity,
+                        candidate,
+                        entity_radius,
+                        local_colliders,
+                        static_occupant_cells,
+                    ):
                         next_position = candidate
                         break
             if next_position is None:
@@ -2634,9 +2695,7 @@ class Simulation:
             self._blocked_ticks.pop(entity_id, None)
             entity.position = next_position
             unit_index.move(entity_id, next_position)
-            arrived = entity.position.distance_to(target) <= 1e-9 or isclose(
-                entity.position.distance_to(target), 0.0, abs_tol=1e-9
-            )
+            arrived = _squared_distance(entity.position, target) <= 1e-18
             if arrived:
                 entity.path.pop(0)
                 if not entity.path:
@@ -2805,13 +2864,10 @@ class Simulation:
 
         while len(entity.path) > 1:
             waypoint = entity.path[0]
-            occupants = self.occupancy.occupants(self.game_map.cell_for(waypoint)) - {
-                entity.entity_id
-            }
-            unit_occupants = {
-                occupant_id for occupant_id in occupants if self.entities[occupant_id].is_movable
-            }
-            if not unit_occupants:
+            if not any(
+                occupant_id != entity.entity_id and self.entities[occupant_id].is_movable
+                for occupant_id in self.occupancy.occupants(self.game_map.cell_for(waypoint))
+            ):
                 return
             if not self._waypoint_has_lateral_clearance(entity, waypoint):
                 return
@@ -2829,24 +2885,31 @@ class Simulation:
         return any(self.game_map.is_cell_passable(candidate) for candidate in lateral_cells)
 
     def _local_move_is_available(
-        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
+        self,
+        entity: Entity,
+        candidate: Point,
+        entity_radius: float,
+        local_colliders: tuple[LocalCollider, ...],
+        static_occupant_cells: frozenset[Cell],
     ) -> bool:
         if not self.game_map.is_passable(candidate):
             return False
-        cells = self._cells_at(entity, candidate)
-        return not any(
-            occupant_id != entity.entity_id and not self.entities[occupant_id].is_movable
-            for cell in cells
-            for occupant_id in self.occupancy.occupants(cell)
-        ) and all(
+        if static_occupant_cells and not self._cells_at(entity, candidate).isdisjoint(
+            static_occupant_cells
+        ):
+            return False
+        return all(
             other_id == entity.entity_id
-            or candidate.distance_to(self.entities[other_id].position)
-            >= collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind) - 1e-6
-            for other_id in local_neighbor_ids
+            or _squared_distance(candidate, position) >= (entity_radius + other_radius - 1e-6) ** 2
+            for other_id, position, other_radius, _ in local_colliders
         )
 
     def _clamp_to_collider_contact(
-        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
+        self,
+        entity: Entity,
+        candidate: Point,
+        entity_radius: float,
+        local_colliders: tuple[LocalCollider, ...],
     ) -> Point:
         direction_x = candidate.x - entity.position.x
         direction_y = candidate.y - entity.position.y
@@ -2854,20 +2917,22 @@ class Simulation:
         if squared_length <= 1e-12:
             return candidate
         maximum_fraction = 1.0
-        for other_id in local_neighbor_ids:
+        for other_id, other_position, other_radius, _ in local_colliders:
             if other_id == entity.entity_id:
                 continue
-            other = self.entities[other_id]
-            radius = collision_radius(entity.kind) + collision_radius(other.kind)
-            if candidate.distance_to(other.position) >= radius:
+            radius = entity_radius + other_radius
+            radius_squared = radius * radius
+            candidate_distance_squared = _squared_distance(candidate, other_position)
+            if candidate_distance_squared >= radius_squared:
                 continue
-            current_distance = entity.position.distance_to(other.position)
-            if current_distance <= radius:
-                if candidate.distance_to(other.position) < current_distance - 1e-9:
+            current_distance_squared = _squared_distance(entity.position, other_position)
+            if current_distance_squared <= radius_squared:
+                current_distance = current_distance_squared**0.5
+                if candidate_distance_squared**0.5 < current_distance - 1e-9:
                     return entity.position
                 continue
-            offset_x = entity.position.x - other.position.x
-            offset_y = entity.position.y - other.position.y
+            offset_x = entity.position.x - other_position.x
+            offset_y = entity.position.y - other_position.y
             linear = 2 * (offset_x * direction_x + offset_y * direction_y)
             constant = offset_x * offset_x + offset_y * offset_y - radius * radius
             discriminant = linear * linear - 4 * squared_length * constant
@@ -2882,14 +2947,17 @@ class Simulation:
         )
 
     def _contact_has_stationary_blocker(
-        self, entity: Entity, candidate: Point, local_neighbor_ids: tuple[str, ...]
+        self,
+        entity: Entity,
+        candidate: Point,
+        entity_radius: float,
+        local_colliders: tuple[LocalCollider, ...],
     ) -> bool:
         return any(
             other_id != entity.entity_id
-            and not self.entities[other_id].path
-            and candidate.distance_to(self.entities[other_id].position)
-            < collision_radius(entity.kind) + collision_radius(self.entities[other_id].kind)
-            for other_id in local_neighbor_ids
+            and stationary
+            and _squared_distance(candidate, position) < (entity_radius + other_radius) ** 2
+            for other_id, position, other_radius, stationary in local_colliders
         )
 
     def _resolve_unit_collisions(self, unit_index: SpatialIndex) -> None:
@@ -4277,6 +4345,12 @@ class Simulation:
 
 def _reason(error: Exception) -> str:
     return str(error).upper().replace(" ", "_")
+
+
+def _squared_distance(first: Point, second: Point) -> float:
+    offset_x = first.x - second.x
+    offset_y = first.y - second.y
+    return offset_x * offset_x + offset_y * offset_y
 
 
 def _patrol_parameters(automation: Automation) -> PatrolParameters:

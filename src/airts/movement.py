@@ -11,24 +11,26 @@ NEIGHBOR_RADIUS = 2.25
 PREFERRED_SEPARATION = 1.15
 _PASSING_ANGLES = (22.5, -22.5, 45.0, -45.0, 67.5, -67.5, 90.0, -90.0)
 _PASSING_ROTATIONS = tuple((cos(radians(angle)), sin(radians(angle))) for angle in _PASSING_ANGLES)
+_UNIT_MASSES = {
+    EntityKind.SCOUT: 1,
+    EntityKind.LIGHT_TANK: 2,
+    EntityKind.HEAVY_TANK: 3,
+    EntityKind.BUILDER: 1,
+}
+_COLLISION_RADII = {
+    EntityKind.SCOUT: 0.30,
+    EntityKind.LIGHT_TANK: 0.38,
+    EntityKind.HEAVY_TANK: 0.45,
+    EntityKind.BUILDER: 0.32,
+}
 
 
 def unit_mass(kind: EntityKind) -> int:
-    return {
-        EntityKind.SCOUT: 1,
-        EntityKind.LIGHT_TANK: 2,
-        EntityKind.HEAVY_TANK: 3,
-        EntityKind.BUILDER: 1,
-    }.get(kind, 100)
+    return _UNIT_MASSES.get(kind, 100)
 
 
 def collision_radius(kind: EntityKind) -> float:
-    return {
-        EntityKind.SCOUT: 0.30,
-        EntityKind.LIGHT_TANK: 0.38,
-        EntityKind.HEAVY_TANK: 0.45,
-        EntityKind.BUILDER: 0.32,
-    }.get(kind, 0.5)
+    return _COLLISION_RADII.get(kind, 0.5)
 
 
 def steering_candidates(

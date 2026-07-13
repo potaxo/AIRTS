@@ -3,9 +3,10 @@
 AIRTS is a small research environment for human-in-the-loop, language-driven RTS
 automation. The current milestone adds a responsive two-sided RTS interface, builder
 construction, ordered multi-unit factory queues, and continuous production to the
-deterministic Phase 5 economy and combat core. Its verified responsiveness target is
-1,000 selected ground units executing move, patrol, or defend while the frontend renders
-at 100 frames per second. It does not add a language model yet.
+deterministic Phase 5 economy and combat core. Its verified responsiveness targets include
+1,000 selected ground units executing move, patrol, or defend, plus 1,000 selected scouts
+colliding head-on while the complete 4K software-surface workload renders at 100 frames per
+second. It does not add a language model yet.
 Units never retreat automatically because of low health;
 repair-and-return runs only after an explicit player command or automation request.
 
@@ -118,14 +119,24 @@ persistence, replay, event, and spatial-index modules are independently testable
 converts user input into the same tagged commands used by tests and future control
 sources. Simulation advances at a fixed 10 ticks per second independently of rendering.
 Local steering, collision broadphase, and nearby targeting use deterministic spatial buckets
-instead of global entity-pair scans; each movement attempt reuses one local-neighbor query for
-steering and collision safety. Reverse navigation fields use dense indexed storage, with a
-layered builder for uniform terrain and weighted Dijkstra for mixed terrain. Visibility unions
-exact per-row sight intervals before materializing visible cells. The UI caches static terrain,
-targets 100 FPS, and bounds large-selection path feedback to 32 deterministic representative
-routes. Large selected groups use a color lift and group outline instead of a second outline and
-full-health bar for every unit; damaged and inspected health bars remain visible. Repeated
-physical corrections are limited to one structured push event per unit per tick.
+instead of global entity-pair scans; each movement attempt builds one compact local-collider
+snapshot and reuses it for steering, collision safety, and stationary-blocker checks. Static
+building cells are computed once per movement tick, and squared distances avoid repeated square
+roots in the inner loop. Reverse navigation fields use dense indexed storage, with a layered
+builder for uniform terrain and weighted Dijkstra for mixed terrain. Large scout formations share
+8 x 8 staging clusters before branching to unique final slots; other unit kinds retain the
+existing 5 x 5 grouping. Visibility unions exact circular sight into per-row bit masks before
+materializing visible cells. The UI caches scaled terrain, per-tick large-scene transforms, unit
+sprites, and representative route transforms, targets 100 FPS, and submits cached unit blits in
+one batch. Large selected groups use a color lift and group outline instead of a second outline and
+full-health bar for every unit; damaged and inspected health bars and normal buildings remain
+visible. Repeated physical corrections are limited to one structured push event per unit per tick.
+
+The runtime keeps a bounded logical Pygame software framebuffer and opens it with
+`SCALED | RESIZABLE`; SDL scales that frame to the physical window and translates mouse input back
+to logical coordinates. This prevents a 4K desktop from multiplying every Python/Pygame draw by
+the physical pixel count. Pygame's Surface drawing remains CPU work; the active SDL backend may
+accelerate presentation, but AIRTS does not require or claim an explicit GPU rendering pipeline.
 
 Every automation follows an explicit lifecycle from proposal and validation through
 active, waiting, paused, blocked, and terminal states. Creating a new patrol or defend
@@ -252,6 +263,17 @@ The 1,000-unit interaction budget has a dedicated expected-behavior test:
 .venv/bin/python -m pytest tests/test_thousand_unit_100fps.py
 ```
 
+The denser 4K scout movement-and-collision budget is verified separately:
+
+```bash
+.venv/bin/python -m pytest tests/test_4k_thousand_scout_100fps.py
+```
+
+That contract independently measures static 4K rendering and command-plus-collision CPU work,
+then measures an end-to-end second containing two 500-scout head-on move commands, ten
+authoritative ticks, and 100 complete 3840 x 2160 software-surface draws. All scouts remain
+selected and ordered, collision work must occur, and at least 750 must make progress.
+
 ## Current limitations and exclusions
 
 Resources are a single integer balance per owner; builders do not gather resources, construction
@@ -268,9 +290,12 @@ interpreted by language. Full fog of war, LM Studio or other AI
 providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor are not
 implemented in this phase.
 
-The 100 FPS acceptance test covers command submission, ten authoritative simulation ticks, and
-100 complete Pygame software-surface draws for 1,000 selected units on mixed passable terrain.
-It does not guarantee that every display presents 100 physical refreshes per second: desktop
-composition, VSync, refresh rate, GPU/driver behavior, and machine speed remain outside the
-deterministic simulation contract. Worst-case 1,000-unit combat and choke-point throughput are
-also separate workloads; the existing dense-choke regression currently covers 500 units.
+The 4K 100 FPS acceptance test covers two command submissions, ten authoritative collision-heavy
+simulation ticks, and 100 complete Pygame software-surface draws for 1,000 selected scouts, normal
+buildings, UI panels, and mixed passable terrain. It validates the CPU-side frame construction at
+3840 x 2160, not physical presentation. A real window uses a bounded logical surface and SDL
+scaling, so monitor refresh below 100 Hz, VSync, desktop composition, WSLg, SDL renderer fallback,
+GPU/driver behavior, and machine speed can still prevent 100 displayed refreshes per second.
+`pygame.SCALED` is experimental in pygame-ce, and a backend without a fast renderer may fall back
+to slower scaling. Worst-case 1,000-unit combat and choke-point throughput are also separate
+workloads; the existing dense-choke regression currently covers 500 units.

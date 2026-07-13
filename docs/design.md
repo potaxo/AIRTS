@@ -1152,16 +1152,22 @@ Uniform-cost passable terrain uses deterministic layer expansion without a heap;
 uses deterministic weighted Dijkstra with the same goal and next-cell tie rules. These are
 representation and construction optimizations, not approximations of terrain cost or reachability.
 Large direct-move formations may cluster paths through nearby staging anchors before branching to
-unique final slots. Replans whose costs depend on current unit positions remain uncached because
-their obstacle penalties change with the formation.
+unique final slots. Scout formations use 8 x 8 staging clusters at the verified 1,000-unit scale;
+other unit kinds retain 5 x 5 clusters so heavier formations do not regress dense-choke behavior.
+Replans whose costs depend on current unit positions remain uncached because their obstacle
+penalties change with the formation.
 Military units are finite-cost dynamic path obstacles rather than impassable terrain. Movement
 controllers periodically recalculate delayed routes through or around changing formations, with
 per-tick path budgets preserving responsiveness during mass movement and focus-fire commands.
 Dense movement must retain throughput rather than pausing whole formations. Collision broadphase
 pairs are generated directly from spatial buckets, reused across solver passes where safe, and
-each unit's deterministic steering neighborhood is reused by the collision-clamp, local-clearance,
-and stationary-blocker checks for that movement attempt. Visibility retains exact circular sight
-geometry while merging overlapping horizontal intervals before materializing visible cells.
+each unit's deterministic steering neighborhood is converted once into compact collider records
+reused by the collision-clamp, local-clearance, and stationary-blocker checks for that movement
+attempt. Static building cells are materialized once per movement tick, and local comparisons use
+squared distances. Contested final-approach rerouting is reserved for actual stationary blockers;
+moving head-on traffic continues through physical steering rather than triggering a path search
+per unit. Visibility retains exact circular sight geometry while unioning occupied cells into
+per-row integer bit masks before materializing visible cells.
 Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
 without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
@@ -1546,6 +1552,15 @@ render pass. The frontend initializes only the Pygame subsystems it uses and rel
 graphics objects, pending events, fonts, the display, and global Pygame state in a deterministic
 order on both normal and exceptional exits.
 
+The initial renderer remains a Pygame software-Surface pipeline. Its runtime display is created as
+a bounded logical `WINDOW_SIZE` framebuffer with `SCALED | RESIZABLE`; SDL scales that logical
+frame to the physical window and maps pointer input back to logical coordinates. A 4K desktop must
+therefore not cause AIRTS to allocate and repaint a physical 3840 x 2160 runtime framebuffer on
+every frame. SDL may accelerate final presentation when the active backend supports it, but this
+architecture neither requires nor promises an explicit GPU renderer. Physical refresh rate,
+VSync, WSLg/desktop composition, driver behavior, and SDL fallback remain outside the deterministic
+simulation and CPU-side rendering contract.
+
 Entity hit testing uses the visible occupied footprint for buildings rather than only their center
 point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
 interaction perimeter so selecting a building does not trigger one full search per attacker.
@@ -1554,6 +1569,11 @@ unit color and one group outline, omits redundant full-health bars, and draws at
 sampled authoritative routes. Damaged-unit and inspected-unit health bars remain visible. An
 inspected route is retained in the representative set. This is visual level of detail only: every
 selected unit remains selected, simulated, collision-enabled, visible, and owned by its command.
+The static terrain scale is cached until layout changes. For large selections, unit and building
+screen transforms, health-bar geometry, group bounds, and representative route transforms are
+rebuilt at most once per simulation tick or relevant UI-state change; cached unit sprites are
+submitted through a batched blit call on intervening render frames. Normal buildings and damaged
+or inspected health feedback remain part of every complete frame.
 
 It should eventually display:
 
@@ -2314,7 +2334,7 @@ collision, panel drawing, and entity drawing occur inside it.
 The milestone uses algorithmic and data-layout changes within the existing Python process:
 
 * dense reverse-navigation fields with uniform and weighted builders;
-* exact scanline interval unions for visibility;
+* exact per-row bit-mask unions for visibility;
 * one reused spatial-neighbor result per unit movement attempt;
 * cached per-frame map transforms and bounded large-selection visual detail.
 
@@ -2327,3 +2347,38 @@ display presentation also depends on CPU speed, refresh rate, VSync, desktop com
 GPU/driver behavior, so it is not a cross-machine guarantee of 100 displayed refreshes per second.
 The milestone covers move, patrol, and defend responsiveness, not worst-case 1,000-unit combat or
 choke throughput; dense choke behavior has its own 500-unit regression.
+
+---
+
+# 39. 4K Thousand-Scout Movement and Collision Milestone
+
+The 4K acceptance workload adds simultaneous rendering and dense movement pressure that the
+general interaction milestone does not exercise. It contains two opposing 500-scout formations,
+four ordinary friendly buildings outside the traffic lane, and mixed grass, road, and forest on
+an 80 x 60 map. Both formations receive head-on move commands and must physically interact during
+the measured second. No unit may be hidden, deselected, removed from collision, or omitted from
+authoritative simulation to satisfy the budget.
+
+`tests/test_4k_thousand_scout_100fps.py` is the executable expected-behavior contract. It first
+isolates 100 complete draws on a real 3840 x 2160 Pygame software Surface and then isolates two
+command submissions plus ten authoritative collision ticks. The end-to-end test measures those
+commands, ten ticks interleaved at 10 Hz, and 100 complete 4K draws in one interval that must finish
+within one second. All 1,000 scouts must retain active orders, collision-pair checks must occur,
+the simulation must advance exactly ten ticks, and at least 750 scouts must change position. Its
+runtime-configuration assertion additionally requires a bounded logical window opened with both
+`SCALED` and `RESIZABLE`.
+
+This milestone remains within the declared Python and `pygame-ce` dependencies. The renderer
+caches static terrain scaling, per-tick large-scene transforms, sprite Surfaces, and representative
+routes, then batches unit blits. The simulation uses compact reused collider snapshots, cached
+static building occupancy, exact bit-mask visibility unions, and larger scout-only staging
+clusters. These are data-layout and redundant-work reductions; entity movement, collision,
+visibility, selection, buildings, UI panels, and command ownership remain authoritative.
+
+The 3840 x 2160 Surface test verifies CPU-side full-frame construction and is suitable for
+headless regression testing. It cannot prove that a physical 4K monitor presents 100 distinct
+refreshes per second. The real runtime deliberately renders a smaller logical Surface and asks SDL
+to scale it; backend acceleration is environment-dependent, and `pygame.SCALED` may report that no
+fast renderer is available. An explicit OpenGL renderer can be reconsidered if a future measured
+graphics workload exceeds this contract, but it is not required for this milestone. Worst-case
+1,000-unit combat and dense-choke throughput remain separate workloads.

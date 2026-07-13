@@ -40,10 +40,10 @@ class SpatialIndex:
         minimum_y = floor((point.y - radius) / self.bucket_size)
         maximum_y = floor((point.y + radius) / self.bucket_size)
         squared_radius = radius * radius
-        candidates: set[str] = set()
+        candidates: list[str] = []
         for bucket_y in range(minimum_y, maximum_y + 1):
             for bucket_x in range(minimum_x, maximum_x + 1):
-                candidates.update(self._buckets.get((bucket_x, bucket_y), ()))
+                candidates.extend(self._buckets.get((bucket_x, bucket_y), ()))
         return tuple(
             entity_id
             for entity_id in sorted(candidates)
