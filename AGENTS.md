@@ -38,6 +38,12 @@ later-phase features unless explicitly requested.
 - Persistent automations must be serializable and inspectable.
 - Preserve deterministic behavior for the same initial state and random
   seed.
+- Keep AIRTS a modular monolith. Preserve `airts.simulation.Simulation` as
+  the stable public facade, authoritative state owner, and tick orchestrator;
+  place cohesive deterministic behavior under `airts.systems`.
+- Split modules by responsibility, invariant, and reason to change, not by
+  an arbitrary line-count target. Keep packages shallow and avoid generic
+  dumping grounds such as `utils`, `helpers`, or `manager`.
 
 ## Working Style
 
@@ -64,6 +70,7 @@ problem cannot be understood from existing evidence.
 Prefer clear types, small focused modules, low coupling, and simple
 solutions over unnecessary factories, registries, or inheritance
 hierarchies.
+
 
 ## Git and Generated Files
 
@@ -92,17 +99,21 @@ cannot run, report the exact failure and what remains unverified.
 
 ## Documentation
 
-Update `docs/design.md` whenever architecture, dependencies, scope, user-visible
-behavior, feature capability, performance strategy, or implementation limitations
-change. Record every architecture modification, feature upgrade, optimization, and
-behavioral improvement there, including important tradeoffs and relevant acceptance
-tests.
+Update the design documentation set indexed by `docs/design.md` whenever
+architecture, dependencies, scope, user-visible behavior, feature capability,
+performance strategy, or implementation limitations change. Record every
+architecture modification, feature upgrade, optimization, and behavioral
+improvement in its owning document, including important tradeoffs and relevant
+acceptance tests. Update `docs/design.md` when document ownership or the current
+implemented baseline changes, and add an architecture decision record under
+`docs/decisions/` when a consequential choice has durable alternatives.
 
 Keep `README.md` focused on concise user and developer setup, runtime, controls, and
-entry points. Keep `docs/design.md`, `README.md`, `AGENTS.md`, and `pyproject.toml`
-consistent without duplicating the full design specification. Do not otherwise modify
-`AGENTS.md` unless a repository instruction is genuinely incorrect, contradictory, or
-missing a rule required to complete the task safely.
+entry points. Keep the design set, `README.md`, `AGENTS.md`, and `pyproject.toml`
+consistent while giving each fact one authoritative owner. Do not duplicate the full
+design specification. Do not otherwise modify `AGENTS.md` unless a repository
+instruction is genuinely incorrect, contradictory, or missing a rule required to
+complete the task safely.
 
 ## Completion Report
 

@@ -14,7 +14,7 @@ from airts.geometry import (
     SpatialTarget,
     target_to_dict,
 )
-from airts.map_model import EntityKind, GameMap
+from airts.world.map_model import EntityKind, GameMap
 
 
 class AutomationStatus(StrEnum):

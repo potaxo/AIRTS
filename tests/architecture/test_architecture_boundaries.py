@@ -1,0 +1,115 @@
+"""Executable dependency rules for AIRTS's modular monolith."""
+
+from __future__ import annotations
+
+import ast
+from importlib import import_module
+from pathlib import Path
+
+import airts
+from airts.simulation import Simulation
+
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / "src" / "airts"
+PACKAGE_RULES = {
+    "world": {
+        "airts.adapters",
+        "airts.navigation",
+        "airts.presentation",
+        "airts.simulation",
+        "airts.systems",
+    },
+    "navigation": {
+        "airts.adapters",
+        "airts.presentation",
+        "airts.simulation",
+        "airts.systems",
+    },
+    "systems": {
+        "airts.adapters",
+        "airts.presentation",
+        "airts.simulation",
+    },
+}
+LEGACY_EXPORTS = {
+    "app": ("presentation.app", "AirtsApp"),
+    "entities": ("world.entities", "Entity"),
+    "map_model": ("world.map_model", "GameMap"),
+    "movement": ("navigation.movement", "collision_radius"),
+    "occupancy": ("world.occupancy", "OccupancyGrid"),
+    "opengl_renderer": ("presentation.opengl_renderer", "OpenGLRenderer"),
+    "pathfinding": ("navigation.pathfinding", "RoutingService"),
+    "persistence": ("adapters.persistence", "load_simulation"),
+    "projectiles": ("world.projectiles", "Projectile"),
+    "replay": ("adapters.replay", "load_replay"),
+    "spatial_index": ("navigation.spatial_index", "SpatialIndex"),
+    "visibility": ("world.visibility", "VisibilitySystem"),
+}
+
+
+def test_simulation_remains_the_public_package_facade() -> None:
+    assert airts.Simulation is Simulation
+
+
+def test_package_dependencies_point_toward_domain_code() -> None:
+    violations: list[str] = []
+    for package, forbidden_imports in PACKAGE_RULES.items():
+        for path in sorted((SOURCE / package).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for module_name, line in _runtime_imports(tree.body):
+                if _matches_any(module_name, forbidden_imports):
+                    violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
+    assert not violations, "\n".join(violations)
+
+
+def test_internal_source_uses_canonical_package_imports() -> None:
+    violations: list[str] = []
+    wrappers = {SOURCE / f"{legacy}.py" for legacy in LEGACY_EXPORTS}
+    legacy_imports = {f"airts.{legacy}" for legacy in LEGACY_EXPORTS}
+    for path in sorted(SOURCE.rglob("*.py")):
+        if path in wrappers:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for module_name, line in _runtime_imports(tree.body):
+            if _matches_any(module_name, legacy_imports):
+                violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
+    assert not violations, "\n".join(violations)
+
+
+def test_legacy_import_paths_reexport_canonical_objects() -> None:
+    for legacy, (canonical, export_name) in LEGACY_EXPORTS.items():
+        legacy_module = import_module(f"airts.{legacy}")
+        canonical_module = import_module(f"airts.{canonical}")
+        assert legacy_module is canonical_module
+        assert getattr(legacy_module, export_name) is getattr(canonical_module, export_name)
+
+
+def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:
+    return any(
+        module_name == forbidden or module_name.startswith(f"{forbidden}.")
+        for forbidden in forbidden_imports
+    )
+
+
+def _runtime_imports(statements: list[ast.stmt]) -> list[tuple[str, int]]:
+    imports: list[tuple[str, int]] = []
+    for statement in statements:
+        if isinstance(statement, ast.If) and _is_type_checking_guard(statement.test):
+            imports.extend(_runtime_imports(statement.orelse))
+            continue
+        if isinstance(statement, ast.Import):
+            imports.extend((alias.name, statement.lineno) for alias in statement.names)
+        elif isinstance(statement, ast.ImportFrom) and statement.module is not None:
+            imports.append((statement.module, statement.lineno))
+        elif isinstance(statement, (ast.If, ast.Try, ast.With)):
+            nested = list(statement.body)
+            nested.extend(getattr(statement, "orelse", ()))
+            nested.extend(getattr(statement, "finalbody", ()))
+            for handler in getattr(statement, "handlers", ()):
+                nested.extend(handler.body)
+            imports.extend(_runtime_imports(nested))
+    return imports
+
+
+def _is_type_checking_guard(expression: ast.expr) -> bool:
+    return isinstance(expression, ast.Name) and expression.id == "TYPE_CHECKING"

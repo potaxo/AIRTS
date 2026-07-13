@@ -5,9 +5,9 @@ human-supervised automation. The current build includes economy, construction, p
 combat, spatial commands, save/load, and deterministic replay. Language-model control is not
 implemented yet.
 
-The [design document](docs/design.md) is the source of truth for architecture, scope, implemented
-milestones, and limitations. [AGENTS.md](AGENTS.md) contains contributor rules and required
-validation.
+The [design index](docs/design.md) is the entry point for architecture, scope, implemented
+milestones, limitations, and focused owner documents. [AGENTS.md](AGENTS.md) contains contributor
+rules and required validation.
 
 ## Requirements and setup
 
@@ -84,5 +84,5 @@ Enemy generation defaults to one unit per second with a cap of 100. Set
 
 Keep code changes within the requested milestone and preserve the simulation/UI dependency
 boundary. Before declaring a coding task complete, run the validation suite listed in
-[AGENTS.md](AGENTS.md). Update [docs/design.md](docs/design.md) for every architecture change,
-feature upgrade, optimization, or behavioral improvement.
+[AGENTS.md](AGENTS.md). Update the owning document linked from [docs/design.md](docs/design.md) for
+every architecture change, feature upgrade, optimization, or behavioral improvement.

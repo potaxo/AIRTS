@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from airts.geometry import Point, SpatialTarget, target_from_dict, target_to_dict
-from airts.map_model import EntityKind
+from airts.world.map_model import EntityKind
 
 
 @dataclass(frozen=True, slots=True)
