@@ -34,10 +34,12 @@ OpenGL 3.3 is the default renderer. For diagnostics or systems where OpenGL is n
 OpenGL startup failures are reported and do not silently fall back. Use `--renderer software`
 explicitly when that backend is intended.
 
-The OpenGL frontend is not capped by the application clock and does not request VSync. Open
+The OpenGL frontend uses a 1,000 FPS application-clock ceiling and does not request VSync. Open
 `Settings` to choose a window-resolution preset and inspect rolling p95 frame, render, present-wait,
-and simulation timing. `Submit FPS` counts completed application swaps; physical display cadence
-still depends on the monitor, driver, and Windows compositor.
+and simulation timing. The left rail's `Real FPS` is the rolling 1%-low rate derived from p99
+completed-swap frame time, so visible stalls lower it even when average submission remains high.
+Settings retains average `Submit FPS` for comparison. Neither application-side measurement captures
+physical monitor scan-out, which still depends on the driver and Windows compositor.
 
 Common workflows:
 

@@ -3,14 +3,24 @@
 This document records the executable 1,000-unit software, native-4K, and OpenGL performance
 contracts and the limits of their evidence. It is normative for current behavior.
 
+The contracts currently expose unresolved p99 frame stalls in the simulation-bearing 1,000-unit
+workloads; they must not be described as achieved until every Real FPS assertion passes. Earlier
+average-throughput results remain useful profiling history but are not acceptance evidence under
+ADR 0004. The crowd contracts also expose unresolved deep overlap in settled formations and choke
+traffic; successful throughput does not excuse stacked unit centers.
+
 [Design index](../design.md)
 
 ---
 
-# 38. Thousand-Unit 100 FPS Interaction Milestone
+# 38. Thousand-Unit 100 Real FPS Interaction Milestone
 
-The frontend is uncapped while the authoritative simulation remains fixed at 10 ticks per second;
-the acceptance budget remains at least 100 FPS. The required interaction workload contains 1,000
+The frontend uses a 1,000 FPS application-clock ceiling while the authoritative simulation remains
+fixed at 10 ticks per second; every frame-rate acceptance budget requires at least 100 `Real FPS`.
+The invariant criterion is `1000 / p99 completed-frame milliseconds`, so 100 Real FPS requires a
+p99 interval at or below 10 ms. Average submission throughput is diagnostic only and cannot pass an
+FPS test. [ADR 0004](../decisions/0004-real-fps-acceptance.md) owns this permanent rule. The required
+interaction workload contains 1,000
 selected player light tanks on an
 80 x 60 map with grass, road, and forest terrain. Move, patrol, and defend commands must each be
 accepted for the complete selection; the UI must not deselect, hide, suspend, or omit simulation
@@ -18,8 +28,9 @@ work for any unit to meet the budget.
 
 `tests/performance/test_thousand_unit_100fps.py` is the executable expected-behavior contract. For
 each command
-it measures one interval containing command submission, 100 complete Pygame software-surface draw
-passes, and ten authoritative simulation advances. The interval must complete within one second.
+it records 100 consecutive completed-frame intervals containing command submission, 100 complete
+Pygame software-surface draw passes, and ten authoritative simulation advances. The p99 completed
+frame interval must remain at or below 10 ms.
 Afterward, all 1,000 units must still belong to the order, the simulation must have advanced ten
 ticks, and at least 100 units must have changed position. Large-selection route feedback must remain
 visible through one to 32 deterministic representative paths. Timing setup and the initial warm-up
@@ -59,8 +70,8 @@ authoritative simulation to satisfy the budget.
 It first
 isolates 100 complete draws on a real 3840 x 2160 Pygame software Surface and then isolates two
 command submissions plus ten authoritative collision ticks. The end-to-end test measures those
-commands, ten ticks interleaved at 10 Hz, and 100 complete 4K draws in one interval that must finish
-within one second. All 1,000 scouts must retain active orders, collision-pair checks must occur,
+commands, ten ticks interleaved at 10 Hz, and 100 complete 4K draws as consecutive frame intervals
+whose p99 must remain at or below 10 ms. All 1,000 scouts must retain active orders,
 the simulation must advance exactly ten ticks, and at least 750 scouts must change position. Its
 runtime-configuration assertion additionally requires a bounded logical window opened with both
 `SCALED` and `RESIZABLE`.
@@ -98,11 +109,12 @@ The GPU performs rasterization and composition. The CPU still performs authorita
 collision, commands, input, buffer preparation, and font rasterization.
 
 Dynamic shape instances contain both the previous and current fixed-tick center. The vertex shader
-mixes those endpoints with a per-render interpolation uniform, so uncapped submissions produce
+mixes those endpoints with a per-render interpolation uniform, so high-rate submissions produce
 distinct unit and projectile positions between 10 Hz ticks while reusing the same resident buffer.
 The simulation remains authoritative and interpolation intentionally adds at most 100 ms of visual
 latency rather than predicting or mutating future state. The application passes `vsync=0` and uses
-an uncapped Pygame clock; the driver and compositor may still impose physical presentation limits.
+a 1,000 FPS Pygame clock ceiling; the driver and compositor may still impose physical presentation
+limits.
 
 The existing Pygame interaction UI is preserved as a cached transparent native-resolution texture.
 Spatial editing feedback, construction previews, gathering glow, panels, settings, and help are
@@ -123,14 +135,14 @@ or redrawing the 1,000-unit base scene in software.
 * diagnostic context failure with no hidden software fallback;
 * deterministic buffer reuse and explicit GPU-resource release;
 * previous/current shape endpoints and changing GPU interpolation without dynamic-buffer rebuilds;
-* an uncapped application clock and explicit VSync-off request;
+* a 1,000 FPS application-clock ceiling and explicit VSync-off request;
 * two head-on 500-scout commands, ten collision ticks, 100 native-4K GPU frames, a non-background
-  rendered-pixel check, and a final GPU completion wait within one second;
+  rendered-pixel check, per-frame GPU completion, and at least 100 Real FPS;
 * rejection of llvmpipe, softpipe, SwiftShader, or another software rasterizer as hardware proof.
 
 The dependency is `moderngl>=5.12,<6`, which provides OpenGL 3.3 core access and instanced buffer
 submission on Python 3.13. A passing offscreen hardware benchmark proves GPU rasterization and the
-100 FPS work budget on the tested adapter. The verifier uses ModernGL's native platform backend,
+100 Real FPS work budget on the tested adapter. The verifier uses ModernGL's native platform backend,
 including WGL on Windows, instead of hard-coding EGL; known Mesa software rasterizers, SwiftShader,
 GDI Generic, and the Microsoft Basic Render Driver are rejected as hardware evidence. It still
 cannot prove that a compositor and physical monitor display 100 distinct refreshes, and it does
@@ -157,11 +169,11 @@ instead of scanning every assigned responder for every attacked unit.
 warm-up frame, its measured interval includes the 500-unit defend and enemy-move command submissions,
 30 authoritative
 ticks, 300 native-4K hardware frames, ten interpolation samples per tick, normal clock-value
-fluctuation, six inspected-target changes,
-GPU completion, and a rendered-pixel readback. The test requires real collision work, live
-projectiles, health loss, both hostile owners, every mobile unit profile, and at least 100 FPS over
-the complete three-second work budget. Software rasterizers remain invalid evidence under the
-Section 40 hardware rules.
+fluctuation, six inspected-target changes, per-frame GPU completion, and a rendered-pixel readback.
+The test requires real collision work, live projectiles, health loss, both hostile owners, every
+mobile unit profile, and at least 100 Real FPS over the complete three-second work budget under the
+same p99 criterion. Software rasterizers remain invalid evidence under the Section 40 hardware
+rules.
 
 The interactive cache key uses an O(1) command count instead of copying replay history. Per-frame
 FPS sampling does not invalidate the full 31.64 MiB 4K overlay; the displayed status is refreshed
@@ -171,9 +183,9 @@ automation workload achieved 188.1 FPS after GPU projectile batching and spatial
 These are offscreen workload results, not proof that a physical monitor or compositor presents the
 same number of distinct frames per second.
 
-A separate Windows interactive capture used PresentMon 2.5.1 against a window launched from the
-same 500-vs-500 mixed-unit battle at the default 1428 x 872 resolution. Over 9.968 seconds the
-uncapped application submitted 44,665 frames (4,480.7 presents/s), while Windows recorded 1,268
+A separate historical Windows interactive capture used PresentMon 2.5.1 against an uncapped build
+launched with the same 500-vs-500 mixed-unit battle at the default 1428 x 872 resolution. Over
+9.968 seconds the application submitted 44,665 frames (4,480.7 presents/s), while Windows recorded 1,268
 display changes (127.2 displayed frames/s) in `Composed: Copy with GPU GDI` mode. CPU-busy and GPU
 time p95 were 0.662 ms and 0.675 ms respectively; display-latency p95 was 19.844 ms and median
 displayed duration was 6.95 ms. This capture demonstrates more than 100 actually displayed frames
@@ -189,34 +201,86 @@ and redundant-work improvements.
 
 ---
 
-# Saturated 1,000-Unit Crowd and Choke Milestone
+# Saturated Crowd and Choke Milestone
 
 `tests/performance/test_crowd_congestion_performance.py` is the executable regression for the
 late-game cases that are intentionally harsher than the open-field and mixed-battle contracts:
 
 * 999 scouts explicitly focus one durable enemy for 220 ticks;
-* 1,000 scouts defend a two-by-two target for 200 ticks;
-* 1,000 scouts must pass through a six-cell opening to reach the same undersized defense;
-* smaller correctness cases prove unique defend stations and coherent point/area patrol slots.
+* 400 scouts must fully settle with at least 0.90 map-unit center spacing around an undersized
+  two-by-two defense while authoritative tick p95 remains below 100 ms;
+* all 400 scouts must cross a nine-cell bridge opening on a 120 x 80 map without deep overlap;
+  bridge completion has only a generous deadlock guard, not a throughput or formation-settling
+  deadline;
+* smaller correctness cases prove unique initial defend stations, coherent point/area patrol slots,
+  and topology-safe crowded-waypoint lookahead at a bridge turn.
+
+The 400-unit formation and bridge counts are deliberate capacity tests rather than reduced
+performance targets. A 1,000-unit formation at the required visual spacing consumes a large fraction
+of an 80 x 60 map and can place valid destination slots on the wrong side of a choke, conflating map
+capacity with routing correctness. Independent software, native-4K, OpenGL, mixed-battle, and
+focus-fire contracts retain roughly 1,000 authoritative units and the unchanged 100 Real FPS target.
 
 Every unit remains authoritative, visible to normal renderers, collision-enabled, and assigned to
 its command or automation. A target that cannot contain the group expands into deterministic
 reachable hex-packed holding slots. Explicit attackers clear their pursue path at weapon range.
-Moving queue members continue to use the shared static navigation field and local collision solver;
-only settled blockers can trigger a dynamic military-penalty replan. Delayed-route checks are
+Large-formation assignment pairs front-to-back arrivals with far-to-near slots along the approach
+axis; small gathering groups preserve center-first behavior. Nearby slots share reverse-field
+anchors but branch toward their final destinations before reaching
+the exact anchor, avoiding a secondary point bottleneck. Moving queue members continue to use the
+shared static navigation field and local collision solver; crowded lookahead may skip an occupied
+waypoint only while the next route cell remains on the same grid axis and the cached static corridor
+is passable, so it cannot cut diagonally across water.
+Only settled blockers can trigger a dynamic military-penalty replan. Delayed-route checks are
 distributed over stable 50-tick phases, final-approach replans share the stalled-route budget, and
 blocked recovery performs at most four searches per tick.
 
-The two sustained timing cases require p95 authoritative tick time below the fixed 100 ms tick
-budget. The bridge case additionally requires at least 500 scouts to have crossed by tick 200, so
-the implementation cannot pass by freezing or parking the force on the near side. On the reference
-Python 3.13 Windows environment, the peak tiny-defense convergence measured 95.6 ms p95, the bridge
-queue measured 88.7 ms p95 with 557 scouts across, and sustained focus fire measured 62.7 ms p95.
-These are simulation timings, not displayed-frame measurements, and other hardware may differ.
+A large expanded defense starts with deterministic hex-packed stations. Congestion-stopped arrivals
+may adopt their current position inside the formation core, and after a 500-tick deployment window
+an arrival not under collision pressure anywhere inside the declared overflow envelope becomes its
+new inspectable station. This bounds exact-slot churn without changing the defended target or
+removing a unit from the automation; groups of at most 128 units retain exact stations.
+
+The sustained timing cases require p95 authoritative tick time below the fixed 100 ms tick budget.
+The bridge test requires the complete force east of the river regardless of throughput, and the
+tiny-defense test requires every unit to have no retained route, remain inside the expanded
+formation envelope, and preserve its minimum spacing. The
+implementation therefore cannot pass by freezing the queue, parking units on the near side, or
+measuring only an early fast interval. These are simulation timings, not displayed-frame
+measurements, and other hardware may differ.
 
 The current policy is deliberately not a full ORCA, ClearPath, or Continuum Crowds implementation.
 It applies their useful architectural split—shared group-scale routing plus bounded local avoidance—
 without changing AIRTS's deterministic command, collision, and replay semantics. ADR 0003 records
 the alternatives and the evidence required before native or GPU crowd compute is justified.
+
+---
+
+# Human-Inspection GUI Scenarios
+
+The non-discovered modules under `tests/gui_scenarios/` provide live native-window counterparts for
+visual performance workloads. They cover saturated crowd and bridge flow, large-army routing and
+formations, 1,000 selected-unit commands, native-4K OpenGL movement and feedback, and the sustained
+500-vs-500 mixed-unit battle. Each scenario uses the normal `AirtsApp` OpenGL frontend, advances the
+authoritative simulation in the application loop, and remains open until the operator closes the
+window.
+
+These modules deliberately do not use `test_*.py` filenames. A normal `pytest` invocation therefore
+does not collect or block on them. Run a module explicitly, and optionally select one scenario with
+`-k`:
+
+```powershell
+.\.venv\Scripts\python -m pytest -s tests\gui_scenarios\crowd_congestion_gui.py
+.\.venv\Scripts\python -m pytest -s tests\gui_scenarios\large_army_gui.py -k choke
+.\.venv\Scripts\python -m pytest -s tests\gui_scenarios\rendering_performance_gui.py -k battle
+```
+
+Closing a scenario window completes that pytest item; the result records successful setup and a
+clean frontend shutdown, not an automated frame-rate threshold or a human judgment. The automated
+contracts under `tests/performance/` remain the authoritative reproducible acceptance evidence, and
+every FPS claim uses the shared Real FPS rule rather than average throughput.
+Physical-window inspection adds evidence about native window creation, compositor-visible rendering,
+interaction, and qualitative motion, but results depend on the active desktop, monitor mode, window
+occlusion, compositor, and GPU driver.
 
 ---

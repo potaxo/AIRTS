@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import ceil, hypot
@@ -14,6 +15,7 @@ import pygame
 
 from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
 from airts.automations import (
+    Automation,
     AutomationKind,
     AutomationStatus,
     ConstructionParameters,
@@ -71,11 +73,22 @@ class RendererBackend(StrEnum):
     SOFTWARE = "software"
 
 
+REAL_FPS_FRAME_TIME_PERCENTILE = 0.99
+
+
+def real_fps_from_frame_times(frame_times_ms: Iterable[float]) -> float:
+    """Return AIRTS's permanent stutter-sensitive FPS acceptance metric."""
+
+    frame_p99_ms = _percentile(frame_times_ms, REAL_FPS_FRAME_TIME_PERCENTILE)
+    return 1000.0 / frame_p99_ms if frame_p99_ms > 0.0 else 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class PresentationMetrics:
     """Rolling measurements for the application-to-compositor presentation path."""
 
-    fps: float = 0.0
+    submit_fps: float = 0.0
+    one_percent_low_fps: float = 0.0
     frame_p95_ms: float = 0.0
     render_p95_ms: float = 0.0
     present_p95_ms: float = 0.0
@@ -132,9 +145,10 @@ class PresentationProfiler:
         elapsed = (
             self._presented_at[-1] - self._presented_at[0] if len(self._presented_at) > 1 else 0.0
         )
-        fps = (len(self._presented_at) - 1) / elapsed if elapsed > 0.0 else 0.0
+        submit_fps = (len(self._presented_at) - 1) / elapsed if elapsed > 0.0 else 0.0
         self.metrics = PresentationMetrics(
-            fps=fps,
+            submit_fps=submit_fps,
+            one_percent_low_fps=real_fps_from_frame_times(self._frame_ms),
             frame_p95_ms=_percentile(self._frame_ms, 0.95),
             render_p95_ms=_percentile(self._render_ms, 0.95),
             present_p95_ms=_percentile(self._present_ms, 0.95),
@@ -147,9 +161,12 @@ class PresentationProfiler:
 
 
 class AirtsApp:
-    FRAME_RATE_LIMIT = 0
+    FRAME_RATE_LIMIT = 1_000
     OPENGL_OVERLAY_REFRESH_TICKS = 3
     MAX_SELECTED_PATHS = 32
+    AUTOMATION_ROW_HEIGHT = 70
+    AUTOMATION_SCROLLBAR_WIDTH = 12
+    AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT = 32
     OPENGL_DISPLAY_FLAGS = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
     DISPLAY_FLAGS = pygame.RESIZABLE | pygame.SCALED
     MAP_PIXELS = 768
@@ -199,12 +216,16 @@ class AirtsApp:
         self.camera_offset = Point(0, 0)
         self._camera_drag_position: tuple[int, int] | None = None
         self.automation_scroll = 0
+        self._automation_visible_rows = 6
+        self._automation_scrollbar_track: pygame.Rect | None = None
+        self._automation_scrollbar_thumb: pygame.Rect | None = None
+        self._automation_scroll_drag_offset: int | None = None
         self.settings_open = False
         self.help_open = False
         self.placement_kind: EntityKind | None = None
         self.production_sequence: list[tuple[EntityKind, int]] = []
         self.paused = False
-        self.fps = 0.0
+        self.real_fps = 0.0
         self.presentation_metrics = PresentationMetrics()
         self.render_alpha = 1.0
         self._previous_entity_positions: dict[str, Point] = {}
@@ -358,6 +379,41 @@ class AirtsApp:
         maximum = max(0, total_rows - visible_rows)
         self.automation_scroll = max(0, min(maximum, self.automation_scroll + delta))
 
+    def _automation_panel_rows(self) -> tuple[Automation, ...]:
+        live_automations = self.simulation.live_automations
+        linked_defense_ids = {
+            parameters.defend_automation_id
+            for automation in live_automations
+            if automation.kind is AutomationKind.PRODUCTION
+            and isinstance((parameters := automation.parameters), ProductionParameters)
+            and parameters.defend_automation_id is not None
+        }
+        return tuple(
+            automation
+            for automation in live_automations
+            if automation.automation_id not in linked_defense_ids
+        )
+
+    def _clamp_automation_scroll(self, *, visible_rows: int, total_rows: int) -> None:
+        self.scroll_automations(0, visible_rows=visible_rows, total_rows=total_rows)
+
+    def _set_automation_scroll_from_pointer(self, pointer_y: int) -> None:
+        track = self._automation_scrollbar_track
+        thumb = self._automation_scrollbar_thumb
+        rows = self._automation_panel_rows()
+        maximum = max(0, len(rows) - self._automation_visible_rows)
+        if track is None or thumb is None or maximum == 0:
+            self.automation_scroll = 0
+            return
+        travel = track.height - thumb.height
+        if travel <= 0:
+            self.automation_scroll = 0
+            return
+        offset = self._automation_scroll_drag_offset
+        thumb_top = pointer_y - (thumb.height // 2 if offset is None else offset)
+        fraction = max(0.0, min(1.0, (thumb_top - track.top) / travel))
+        self.automation_scroll = round(fraction * maximum)
+
     def _in_canvas(self, position: tuple[int, int]) -> bool:
         return self.canvas_rect.collidepoint(position)
 
@@ -472,7 +528,7 @@ class AirtsApp:
                     present_ms=present_ms,
                     simulation_ms=simulation_ms,
                 )
-                self.fps = self.presentation_metrics.fps
+                self.real_fps = self.presentation_metrics.one_percent_low_fps
                 frames += 1
         finally:
             if opengl_renderer is not None:
@@ -538,8 +594,11 @@ class AirtsApp:
         elif event.type == pygame.MOUSEWHEEL:
             mouse = pygame.mouse.get_pos()
             if self.left_panel_rect.collidepoint(mouse):
+                rows = self._automation_panel_rows()
                 self.scroll_automations(
-                    -event.y, visible_rows=7, total_rows=len(self.simulation.live_automations)
+                    -event.y,
+                    visible_rows=self._automation_visible_rows,
+                    total_rows=len(rows),
                 )
         elif event.type in {pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED}:
             display_surface = pygame.display.get_surface()
@@ -619,6 +678,19 @@ class AirtsApp:
             return
         if button == 2 and self._in_canvas(position):
             self._camera_drag_position = position
+            return
+        if (
+            button == 1
+            and self._automation_scrollbar_track is not None
+            and self._automation_scrollbar_track.collidepoint(position)
+        ):
+            thumb = self._automation_scrollbar_thumb
+            self._automation_scroll_drag_offset = (
+                position[1] - thumb.top
+                if thumb is not None and thumb.collidepoint(position)
+                else None
+            )
+            self._set_automation_scroll_from_pointer(position[1])
             return
         if self.left_panel_rect.collidepoint(position) or self.right_panel_rect.collidepoint(
             position
@@ -702,6 +774,9 @@ class AirtsApp:
         if self._font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
             position = (position[0] + origin_x, position[1] + origin_y)
+        if self._automation_scroll_drag_offset is not None and buttons[0]:
+            self._set_automation_scroll_from_pointer(position[1])
+            return
         if (
             self.mode is InputMode.FREEHAND
             and buttons[0]
@@ -722,6 +797,9 @@ class AirtsApp:
             position = (position[0] + origin_x, position[1] + origin_y)
         if button == 2:
             self._camera_drag_position = None
+            return
+        if button == 1 and self._automation_scroll_drag_offset is not None:
+            self._automation_scroll_drag_offset = None
             return
         if button != 1 or not self._in_canvas(position):
             return
@@ -1242,6 +1320,11 @@ class AirtsApp:
             else:
                 result = self.simulation.execute(CancelAutomationCommand(automation_id))
             self.notice = "Automation updated." if result.accepted else result.reason
+            if result.accepted:
+                self._clamp_automation_scroll(
+                    visible_rows=self._automation_visible_rows,
+                    total_rows=len(self._automation_panel_rows()),
+                )
             return
 
     def _draw(self, screen: pygame.Surface) -> None:
@@ -1975,7 +2058,7 @@ class AirtsApp:
         y += 28
         self._small_text(
             screen,
-            f"Tick {self.simulation.tick} | Submit FPS {self.fps:4.0f} | "
+            f"Tick {self.simulation.tick} | Real FPS {self.real_fps:4.0f} | "
             f"{self.mode.value} | {'PAUSED' if self.paused else 'RUNNING'}",
             (x, y),
             (166, 191, 215),
@@ -2030,15 +2113,55 @@ class AirtsApp:
         self._text(screen, "Automations", (x, y), (245, 245, 245))
         y += 25
         self._automation_buttons.clear()
-        live_automations = self.simulation.live_automations
+        live_automations = self._automation_panel_rows()
         live_ids = {automation.automation_id for automation in live_automations}
         if self.selected_automation_id not in live_ids:
             self.selected_automation_id = (
                 live_automations[0].automation_id if live_automations else None
             )
-        visible_automations = live_automations[self.automation_scroll : self.automation_scroll + 7]
+        list_top = y
+        list_bottom = max(
+            list_top + self.AUTOMATION_ROW_HEIGHT, panel.bottom - round(180 * self.ui_scale)
+        )
+        self._automation_visible_rows = max(
+            1, (list_bottom - list_top) // self.AUTOMATION_ROW_HEIGHT
+        )
+        self._clamp_automation_scroll(
+            visible_rows=self._automation_visible_rows,
+            total_rows=len(live_automations),
+        )
+        visible_automations = live_automations[
+            self.automation_scroll : self.automation_scroll + self._automation_visible_rows
+        ]
+        track = pygame.Rect(
+            panel.right - self.AUTOMATION_SCROLLBAR_WIDTH - 6,
+            list_top,
+            self.AUTOMATION_SCROLLBAR_WIDTH,
+            self._automation_visible_rows * self.AUTOMATION_ROW_HEIGHT,
+        )
+        self._automation_scrollbar_track = track
+        pygame.draw.rect(screen, (49, 61, 75), track, border_radius=6)
+        total_rows = len(live_automations)
+        thumb_height = (
+            track.height
+            if total_rows <= self._automation_visible_rows
+            else max(
+                self.AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT,
+                round(track.height * self._automation_visible_rows / total_rows),
+            )
+        )
+        maximum = max(0, total_rows - self._automation_visible_rows)
+        thumb_y = track.top + (
+            0
+            if maximum == 0
+            else round((track.height - thumb_height) * self.automation_scroll / maximum)
+        )
+        thumb = pygame.Rect(track.x, thumb_y, track.width, thumb_height)
+        self._automation_scrollbar_thumb = thumb
+        pygame.draw.rect(screen, (112, 174, 224), thumb, border_radius=6)
+        pygame.draw.rect(screen, (190, 225, 250), thumb, 2, border_radius=6)
         for automation in visible_automations:
-            available_width = panel.right - x - 12
+            available_width = track.left - x - 8
             self._small_text(
                 screen,
                 self._fit_small_text(automation.title, available_width),
@@ -2067,7 +2190,11 @@ class AirtsApp:
                     summary += f" | nonstop {parameters.produced_count}"
                 linked_id = parameters.patrol_automation_id or parameters.defend_automation_id
                 if linked_id is not None:
-                    summary += f" | -> {linked_id}"
+                    summary += (
+                        " | area defense"
+                        if parameters.defend_automation_id is not None
+                        else f" | -> {linked_id}"
+                    )
             elif automation.kind is AutomationKind.CONSTRUCTION:
                 parameters = automation.parameters
                 assert isinstance(parameters, ConstructionParameters)
@@ -2102,8 +2229,6 @@ class AirtsApp:
                 y += 32
             else:
                 y += 7
-            if y > 600:
-                break
         selected = self.simulation.automations.get(self.selected_automation_id or "")
         if selected is not None:
             y += 4
@@ -2127,7 +2252,7 @@ class AirtsApp:
                 (x, y),
                 (158, 178, 194),
             )
-        y = max(y + 8, panel.bottom - round(180 * self.ui_scale))
+        y = max(y + 8, list_bottom)
         self._text(screen, "Recent events", (x, y), (245, 245, 245))
         y += 24
         for event in self.simulation.events.query(limit=7):
@@ -2263,7 +2388,7 @@ class AirtsApp:
         )
         self._small_text(
             screen,
-            "Frame cap off; VSync not requested",
+            f"Real FPS {metrics.one_percent_low_fps:4.0f}  Submit FPS {metrics.submit_fps:4.0f}",
             (x + 10, y + 102),
             (111, 221, 151),
         )
@@ -2374,10 +2499,10 @@ class AirtsApp:
         return lines
 
 
-def _percentile(values: deque[float], fraction: float) -> float:
-    if not values:
-        return 0.0
+def _percentile(values: Iterable[float], fraction: float) -> float:
     ordered = sorted(values)
+    if not ordered:
+        return 0.0
     index = max(0, min(len(ordered) - 1, ceil(fraction * len(ordered)) - 1))
     return ordered[index]
 

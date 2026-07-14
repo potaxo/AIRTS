@@ -15,6 +15,7 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
+    assign_formation_slots,
     build_defend_stations,
     build_patrol_waypoints,
     target_center,
@@ -483,16 +484,24 @@ def _allocate_defend_stations(
         if _stations_have_clearance(tuple(stations.values()), radius * 2):
             return stations, (), False
     slots = simulation._gathering_slots(target, len(entity_ids), radius)
-    ordered_ids = sorted(
-        entity_ids,
-        key=lambda entity_id: (
-            simulation.entities[entity_id].position.y,
-            simulation.entities[entity_id].position.x,
-            entity_id,
-        ),
-    )
-    ordered_slots = sorted(slots, key=lambda point: (point.y, point.x))
-    return dict(zip(ordered_ids, ordered_slots, strict=True)), slots, True
+    if len(entity_ids) > 128:
+        stations = assign_formation_slots(
+            {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids},
+            slots,
+            target_center(target),
+        )
+    else:
+        ordered_ids = sorted(
+            entity_ids,
+            key=lambda entity_id: (
+                simulation.entities[entity_id].position.y,
+                simulation.entities[entity_id].position.x,
+                entity_id,
+            ),
+        )
+        ordered_slots = sorted(slots, key=lambda point: (point.y, point.x))
+        stations = dict(zip(ordered_ids, ordered_slots, strict=True))
+    return stations, slots, True
 
 
 def _stations_have_clearance(stations: tuple[Point, ...], minimum_spacing: float) -> bool:

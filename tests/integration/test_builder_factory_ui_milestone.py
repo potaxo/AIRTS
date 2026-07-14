@@ -8,8 +8,14 @@ from unittest.mock import patch
 import pygame
 import pytest
 
-from airts.app import AirtsApp, PresentationProfiler
+from airts.app import (
+    REAL_FPS_FRAME_TIME_PERCENTILE,
+    AirtsApp,
+    PresentationProfiler,
+    real_fps_from_frame_times,
+)
 from airts.automations import (
+    AutomationKind,
     AutomationStatus,
     ConstructionParameters,
     EconomyParameters,
@@ -387,6 +393,97 @@ def test_ui_state_exposes_two_side_panels_scrolling_popovers_and_camera_pan() ->
     assert app.automation_scroll == 4
 
 
+def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
+    simulation = _simulation()
+    created_ids = []
+    for _ in range(8):
+        result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+        assert result.accepted
+        assert result.automation_id is not None
+        created_ids.append(result.automation_id)
+    app = AirtsApp(simulation)
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface(app.WINDOW_SIZE)
+
+    app._draw_panel(surface)
+    app.automation_scroll = 2
+    canceled = simulation.execute(CancelAutomationCommand(created_ids[-1]))
+    assert canceled.accepted
+    app._draw_panel(surface)
+
+    panel_rows = app._automation_panel_rows()
+    visible_ids = [
+        automation_id for _, action, automation_id in app._automation_buttons if action == "inspect"
+    ]
+    assert app.automation_scroll == 1
+    assert len(visible_ids) == app._automation_visible_rows
+    assert visible_ids == [
+        item.automation_id for item in panel_rows[1 : 1 + app._automation_visible_rows]
+    ]
+    pygame.font.quit()
+
+
+def test_factory_production_and_linked_area_defense_share_one_panel_item() -> None:
+    simulation = _simulation()
+    result = simulation.execute(
+        CreateProductionCommand(
+            "factory",
+            EntityKind.SCOUT,
+            1,
+            continuous=True,
+            defend_target=rectangle_region(Point(5, 5), Point(9, 9)),
+        )
+    )
+    assert result.accepted
+    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    assert {item.kind for item in simulation.live_automations} == {
+        AutomationKind.PRODUCTION,
+        AutomationKind.DEFEND,
+    }
+
+    rows = AirtsApp(simulation)._automation_panel_rows()
+
+    assert len(rows) == 1
+    assert rows[0].kind is AutomationKind.PRODUCTION
+
+
+def test_automation_panel_exposes_a_prominent_clickable_scrollbar() -> None:
+    simulation = _simulation()
+    for _ in range(8):
+        result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+        assert result.accepted
+    app = AirtsApp(simulation)
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface(app.WINDOW_SIZE)
+    app._draw_panel(surface)
+
+    track = app._automation_scrollbar_track
+    thumb = app._automation_scrollbar_thumb
+    assert track is not None
+    assert thumb is not None
+    assert track.width == app.AUTOMATION_SCROLLBAR_WIDTH
+    assert thumb.height >= app.AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT
+    assert thumb.height < track.height
+
+    app._handle_mouse_down(1, (track.centerx, track.bottom - 1))
+
+    assert app.automation_scroll == len(app._automation_panel_rows()) - app._automation_visible_rows
+    app._draw_panel(surface)
+    thumb = app._automation_scrollbar_thumb
+    assert thumb is not None
+    app._handle_mouse_down(1, thumb.center)
+    app._handle_mouse_motion((track.centerx, track.top), (True, False, False))
+    app._handle_mouse_up(1, (track.centerx, track.top))
+
+    assert app.automation_scroll == 0
+    assert app._automation_scroll_drag_offset is None
+    pygame.font.quit()
+
+
 def test_resizing_reflows_panels_and_scales_canvas_coordinates() -> None:
     app = AirtsApp(_simulation())
     original_tile_size = app.tile_size
@@ -520,7 +617,8 @@ def test_presentation_profiler_reports_present_wait_and_frame_pacing() -> None:
             simulation_ms=0.4 if frame % 10 == 0 else 0.0,
         )
 
-    assert metrics.fps == pytest.approx(200.0)
+    assert metrics.submit_fps == pytest.approx(200.0)
+    assert metrics.one_percent_low_fps == pytest.approx(200.0)
     assert metrics.frame_p95_ms == 5.0
     assert metrics.render_p95_ms == 1.5
     assert metrics.present_p95_ms == 2.5
@@ -606,9 +704,36 @@ def test_construction_preview_reports_validity_before_placement() -> None:
     assert blocked is not None and blocked[0] == Point(2, 2) and not blocked[1]
 
 
-def test_info_panel_displays_current_fps() -> None:
+def test_presentation_profiler_reports_stutter_sensitive_real_fps() -> None:
+    profiler = PresentationProfiler()
+    metrics = profiler.metrics
+    presented_at = 0.0
+    for frame in range(200):
+        frame_ms = 30.0 if frame % 20 == 0 else 5.0
+        presented_at += frame_ms / 1000.0
+        metrics = profiler.record(
+            presented_at=presented_at,
+            frame_ms=frame_ms,
+            render_ms=1.5,
+            present_ms=2.5,
+            simulation_ms=0.0,
+        )
+
+    assert metrics.submit_fps > 150.0
+    assert metrics.one_percent_low_fps == pytest.approx(1000.0 / 30.0)
+    assert metrics.one_percent_low_fps < metrics.submit_fps / 4.0
+
+
+def test_real_fps_acceptance_rule_remains_inverse_p99_frame_time() -> None:
+    frame_times_ms = [5.0] * 190 + [30.0] * 10
+
+    assert REAL_FPS_FRAME_TIME_PERCENTILE == 0.99
+    assert real_fps_from_frame_times(frame_times_ms) == pytest.approx(1000.0 / 30.0)
+
+
+def test_info_panel_displays_stutter_sensitive_real_fps() -> None:
     app = AirtsApp(_simulation())
-    app.fps = 59.4
+    app.real_fps = 41.6
     pygame.font.init()
     app._font = pygame.font.Font(None, 24)
     app._small_font = pygame.font.Font(None, 19)
@@ -618,7 +743,7 @@ def test_info_panel_displays_current_fps() -> None:
         app._draw_panel(surface)
 
     rendered = [call.args[1] for call in small_text.call_args_list]
-    assert any("Submit FPS   59" in line for line in rendered)
+    assert any("Real FPS   42" in line for line in rendered)
     pygame.font.quit()
 
 

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 from array import array
-from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pygame
 import pytest
+from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
 from airts.app import AirtsApp
 from airts.commands import MoveCommand
@@ -180,8 +180,8 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer() -> None:
     renderer.release.assert_called_once_with()
     software_draw.assert_not_called()
     flip.assert_called_once_with()
-    clock.tick.assert_called_once_with(0)
-    assert app.FRAME_RATE_LIMIT == 0
+    clock.tick.assert_called_once_with(1_000)
+    assert app.FRAME_RATE_LIMIT == 1_000
 
 
 def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back() -> None:
@@ -305,10 +305,10 @@ def test_fps_sampling_does_not_invalidate_the_full_native_overlay() -> None:
 
     simulation, eastbound, _ = _head_on_scout_simulation()
     app = _native_four_k_app(simulation, eastbound)
-    app.fps = 96.0
+    app.real_fps = 96.0
     initial_key = app._opengl_overlay_key()
 
-    app.fps = 104.0
+    app.real_fps = 104.0
 
     assert app._opengl_overlay_key() == initial_key
 
@@ -553,8 +553,8 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
     assert uniforms[0]["interpolation_alpha"].value == pytest.approx(0.9)
 
 
-def test_native_4k_opengl_submission_cpu_work_fits_the_100fps_interval() -> None:
-    """Commands, collisions, and GPU-frame preparation must fit one real-time second."""
+def test_native_4k_opengl_submission_cpu_work_sustains_100_real_fps() -> None:
+    """Commands, collisions, and GPU-frame preparation must sustain 100 Real FPS."""
 
     simulation, eastbound, westbound = _head_on_scout_simulation()
     entity_ids = eastbound + westbound
@@ -564,7 +564,7 @@ def test_native_4k_opengl_submission_cpu_work_fits_the_100fps_interval() -> None
         entity_id: simulation.entities[entity_id].position for entity_id in entity_ids
     }
 
-    started = perf_counter()
+    probe = RealFpsProbe()
     assert simulation.execute(MoveCommand(eastbound, Point(70.5, 30.5))).accepted
     assert simulation.execute(MoveCommand(westbound, Point(9.5, 30.5))).accepted
     frame = builder.build(app, DISPLAY_SIZE)
@@ -577,7 +577,7 @@ def test_native_4k_opengl_submission_cpu_work_fits_the_100fps_interval() -> None
                 simulation.collision_pair_check_count,
             )
         frame = builder.build(app, DISPLAY_SIZE)
-    elapsed = perf_counter() - started
+        probe.frame_completed()
 
     progressing = sum(
         simulation.entities[entity_id].position != initial_positions[entity_id]
@@ -588,11 +588,11 @@ def test_native_4k_opengl_submission_cpu_work_fits_the_100fps_interval() -> None
     assert frame.framebuffer_size == DISPLAY_SIZE
     assert maximum_collision_checks > 0
     assert progressing >= 750
-    assert elapsed <= 1.0, f"native-4K OpenGL submission work took {elapsed:.3f}s"
+    assert_real_fps(probe, TARGET_FPS, "native-4K OpenGL submission work")
 
 
-def test_native_4k_hardware_opengl_sustains_100fps_end_to_end() -> None:
-    """A real hardware context must rasterize the complete native-4K scenario at 100 FPS."""
+def test_native_4k_hardware_opengl_sustains_100_real_fps_end_to_end() -> None:
+    """A hardware context must rasterize the native-4K scenario at 100 Real FPS."""
 
     simulation, eastbound, westbound = _head_on_scout_simulation()
     entity_ids = eastbound + westbound
@@ -618,7 +618,7 @@ def test_native_4k_hardware_opengl_sustains_100fps_end_to_end() -> None:
             entity_id: simulation.entities[entity_id].position for entity_id in entity_ids
         }
 
-        started = perf_counter()
+        probe = RealFpsProbe()
         assert simulation.execute(MoveCommand(eastbound, Point(70.5, 30.5))).accepted
         assert simulation.execute(MoveCommand(westbound, Point(9.5, 30.5))).accepted
         maximum_collision_checks = 0
@@ -630,8 +630,8 @@ def test_native_4k_hardware_opengl_sustains_100fps_end_to_end() -> None:
                     simulation.collision_pair_check_count,
                 )
             renderer.render(app, DISPLAY_SIZE, framebuffer=target.framebuffer)
-        renderer.finish()
-        elapsed = perf_counter() - started
+            renderer.finish()
+            probe.frame_completed()
 
         progressing = sum(
             simulation.entities[entity_id].position != initial_positions[entity_id]
@@ -648,8 +648,4 @@ def test_native_4k_hardware_opengl_sustains_100fps_end_to_end() -> None:
     assert maximum_collision_checks > 0
     assert progressing >= 750
     assert center_pixel != bytes((18, 22, 28, 255))
-    achieved_fps = MEASURED_FRAMES / elapsed
-    assert achieved_fps >= TARGET_FPS, (
-        f"{renderer_name} achieved {achieved_fps:.1f} native-4K FPS "
-        f"({elapsed:.3f}s for {MEASURED_FRAMES} frames)"
-    )
+    assert_real_fps(probe, TARGET_FPS, f"{renderer_name} native-4K rendering")

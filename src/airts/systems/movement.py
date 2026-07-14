@@ -372,9 +372,37 @@ def skip_crowded_waypoints(simulation: Simulation, entity: Entity) -> None:
             )
         ):
             return
+        if not _waypoint_lookahead_preserves_axis(simulation, entity, entity.path[1]):
+            return
         if not simulation._waypoint_has_lateral_clearance(entity, waypoint):
             return
         entity.path.pop(0)
+
+
+def _waypoint_lookahead_preserves_axis(
+    simulation: Simulation, entity: Entity, destination: Point
+) -> bool:
+    """Only look past occupied waypoints along one passable four-direction corridor."""
+
+    start = simulation.game_map.cell_for(entity.position)
+    end = simulation.game_map.cell_for(destination)
+    if start[0] != end[0] and start[1] != end[1]:
+        return False
+    first, second = sorted((start, end))
+    cache_key = (first, second)
+    cached = simulation._waypoint_corridor_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if start[0] == end[0]:
+        cells = ((start[0], y) for y in range(min(start[1], end[1]), max(start[1], end[1]) + 1))
+    else:
+        cells = ((x, start[1]) for x in range(min(start[0], end[0]), max(start[0], end[0]) + 1))
+    blocked = simulation._building_cells()
+    corridor_is_clear = all(
+        simulation.game_map.is_cell_passable(cell) and cell not in blocked for cell in cells
+    )
+    simulation._waypoint_corridor_cache[cache_key] = corridor_is_clear
+    return corridor_is_clear
 
 
 def waypoint_has_lateral_clearance(simulation: Simulation, entity: Entity, waypoint: Point) -> bool:

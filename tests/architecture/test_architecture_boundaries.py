@@ -11,6 +11,7 @@ from airts.simulation import Simulation
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "airts"
+PERFORMANCE_TESTS = ROOT / "tests" / "performance"
 PACKAGE_RULES = {
     "world": {
         "airts.adapters",
@@ -82,6 +83,20 @@ def test_legacy_import_paths_reexport_canonical_objects() -> None:
         canonical_module = import_module(f"airts.{canonical}")
         assert legacy_module is canonical_module
         assert getattr(legacy_module, export_name) is getattr(canonical_module, export_name)
+
+
+def test_every_fps_performance_contract_uses_the_real_fps_rule() -> None:
+    violations: list[str] = []
+    for path in sorted(PERFORMANCE_TESTS.glob("test_*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "TARGET_FPS" not in source:
+            continue
+        if "assert_real_fps(" not in source:
+            violations.append(f"{path.name} does not assert the shared Real FPS metric")
+        for forbidden in ("achieved_fps", "MEASURED_FRAMES /", "/ elapsed"):
+            if forbidden in source:
+                violations.append(f"{path.name} uses forbidden average-FPS logic: {forbidden}")
+    assert not violations, "\n".join(violations)
 
 
 def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:

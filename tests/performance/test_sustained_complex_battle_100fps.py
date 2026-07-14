@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from time import perf_counter
-
 import pygame
+from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
 from airts.app import AirtsApp
 from airts.commands import CreateDefendCommand, MoveCommand
@@ -115,8 +114,8 @@ def _battle_app(simulation: Simulation, player_ids: tuple[str, ...]) -> AirtsApp
     return app
 
 
-def test_sustained_complex_battle_renders_above_100fps() -> None:
-    """Real enemies, combat, UI churn, and GPU completion must remain above 100 FPS."""
+def test_sustained_complex_battle_renders_above_100_real_fps() -> None:
+    """Real enemies, combat, UI churn, and GPU completion must exceed 100 Real FPS."""
 
     simulation, player_ids, enemy_ids = _battle_simulation()
     assert {simulation.entities[item].owner_id for item in player_ids + enemy_ids} == {
@@ -151,7 +150,7 @@ def test_sustained_complex_battle_renders_above_100fps() -> None:
         assert warm_frame.unit_count == UNITS_PER_OWNER * 2
         assert warm_frame.selected_unit_count == UNITS_PER_OWNER
         renderer.finish()
-        started = perf_counter()
+        probe = RealFpsProbe()
         assert app.active_target is not None
         defend_result = simulation.execute(
             CreateDefendCommand(
@@ -167,7 +166,7 @@ def test_sustained_complex_battle_renders_above_100fps() -> None:
         interpolation_samples: set[float] = set()
         for frame_index in range(MEASURED_FRAMES):
             # A real Clock reading fluctuates. It must not force a full 4K UI upload every frame.
-            app.fps = 96.0 + frame_index % 9
+            app.real_fps = 96.0 + frame_index % 9
             if frame_index % 50 == 0:
                 inspected_index = (frame_index // 50) % UNITS_PER_OWNER
                 app.inspected_entity_id = f"enemy_{inspected_index:04d}"
@@ -183,8 +182,8 @@ def test_sustained_complex_battle_renders_above_100fps() -> None:
             )
             interpolation_samples.add(app.render_alpha)
             renderer.render(app, DISPLAY_SIZE, framebuffer=target.framebuffer)
-        renderer.finish()
-        elapsed = perf_counter() - started
+            renderer.finish()
+            probe.frame_completed()
         rendered_pixel = target.read_pixel(
             (app.canvas_rect.centerx, DISPLAY_SIZE[1] - app.canvas_rect.centery)
         )
@@ -199,8 +198,8 @@ def test_sustained_complex_battle_renders_above_100fps() -> None:
     assert len(interpolation_samples) == SIMULATION_INTERVAL_FRAMES
     assert ending_health < starting_health
     assert rendered_pixel != bytes((*AirtsApp.BACKGROUND, 255))
-    achieved_fps = MEASURED_FRAMES / elapsed
-    assert achieved_fps >= TARGET_FPS, (
-        f"{renderer_name} achieved {achieved_fps:.1f} sustained complex-battle FPS "
-        f"({elapsed:.3f}s for {MEASURED_FRAMES} frames and {simulation.tick} ticks)"
+    assert_real_fps(
+        probe,
+        TARGET_FPS,
+        f"{renderer_name} sustained complex battle with {simulation.tick} ticks",
     )

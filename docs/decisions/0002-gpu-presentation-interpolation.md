@@ -20,8 +20,10 @@ on every submitted frame. Static terrain and buildings use the same center at bo
 Presentation history is reset on load and new game. It is never serialized and cannot influence
 simulation state, command validation, hit testing, targeting, or replay.
 
-The application frame limiter is disabled and the SDL OpenGL window requests VSync off. Windowed
-resolution presets allow the player to trade pixel workload for detail. Rolling application-side
+The application frame limiter uses a 1,000 FPS ceiling and the SDL OpenGL window requests VSync
+off. The ceiling prevents accidental unbounded submission while remaining an order of magnitude
+above the 100 Real FPS acceptance target. Windowed resolution presets allow the player to trade pixel
+workload for detail. Rolling application-side
 timings distinguish simulation, render submission, and `display.flip()` wait, but external ETW
 instrumentation remains authoritative for compositor/display cadence.
 
@@ -32,4 +34,4 @@ uploads at render cadence. The cost is two additional floats per shape instance 
 100 ms tick of visual latency. Projectile trajectory lines and spatial paths still update at tick
 cadence; only moving shape centers interpolate. The software compatibility renderer is unchanged.
 Driver-forced synchronization and monitor refresh can still limit actually displayed frames even
-when application submission exceeds 100 FPS.
+when Submit FPS exceeds 100.

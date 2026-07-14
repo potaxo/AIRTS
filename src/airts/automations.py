@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import ceil, floor, hypot
@@ -529,6 +530,48 @@ def target_center(target: SpatialTarget) -> Point:
         sum(point.x for point in target.points) / len(target.points),
         sum(point.y for point in target.points) / len(target.points),
     )
+
+
+def assign_formation_slots(
+    entity_positions: Mapping[str, Point],
+    slots: tuple[Point, ...],
+    center: Point,
+) -> dict[str, Point]:
+    """Match front-to-back unit order to far-to-near slots along the approach axis."""
+
+    if len(entity_positions) != len(slots):
+        raise ValueError("formation entity and slot counts must match")
+    if not entity_positions:
+        return {}
+    group_center = Point(
+        sum(point.x for point in entity_positions.values()) / len(entity_positions),
+        sum(point.y for point in entity_positions.values()) / len(entity_positions),
+    )
+    direction_x = center.x - group_center.x
+    direction_y = center.y - group_center.y
+    if hypot(direction_x, direction_y) <= 1e-9:
+        ordered_ids = sorted(
+            entity_positions,
+            key=lambda entity_id: (
+                entity_positions[entity_id].y,
+                entity_positions[entity_id].x,
+                entity_id,
+            ),
+        )
+        ordered_slots = sorted(slots, key=lambda point: (point.y, point.x))
+    else:
+
+        def formation_key(point: Point) -> tuple[float, float]:
+            forward = point.x * direction_x + point.y * direction_y
+            lateral = -point.x * direction_y + point.y * direction_x
+            return -forward, lateral
+
+        ordered_ids = sorted(
+            entity_positions,
+            key=lambda entity_id: (*formation_key(entity_positions[entity_id]), entity_id),
+        )
+        ordered_slots = sorted(slots, key=lambda point: (*formation_key(point), point.y, point.x))
+    return dict(zip(ordered_ids, ordered_slots, strict=True))
 
 
 def patrol_formation_waypoint(

@@ -38,7 +38,7 @@ Provisional values:
 
 ```text
 Simulation: 10 ticks per second
-Rendering:  uncapped submission; 100 FPS acceptance budget
+Rendering:  1,000 FPS submission ceiling; 100 Real FPS acceptance budget
 ```
 
 The game should support:
@@ -93,12 +93,20 @@ back, because doing so would make performance evidence and renderer identity unt
 
 On Windows, SDL creates the interactive OpenGL context through the native Windows driver stack,
 and ModernGL's standalone verifier uses its native WGL backend. Context creation requires OpenGL
-3.3 or newer. The application clock is uncapped and the OpenGL window explicitly requests VSync
-off. Settings expose 1280 x 720 through 3840 x 2160 presets and rolling p95 frame, renderer,
-simulation, and buffer-swap wait measurements. The swap wait includes work that SDL cannot
-separate into GPU, driver, and compositor stages, while `Submit FPS` counts application swaps rather
-than frames actually displayed. Physical refresh rate, driver overrides, desktop composition, and
-monitor timing remain outside the deterministic simulation contract.
+3.3 or newer. The application clock has a 1,000 FPS ceiling and the OpenGL window explicitly
+requests VSync off. Settings expose 1280 x 720 through 3840 x 2160 presets and rolling p95 frame,
+renderer, simulation, and buffer-swap wait measurements. The left rail's `Real FPS` is the rolling
+1%-low rate obtained by inverting the p99 completed-swap frame interval, while Settings retains the
+rolling average `Submit FPS`. This makes the primary readout respond to frame-pacing stalls instead
+of hiding them inside an average. Swap wait includes work that SDL cannot separate into GPU, driver,
+and compositor stages; neither rate counts frames physically scanned out by the monitor. Physical
+refresh rate, driver overrides, desktop composition, and monitor timing remain outside the
+deterministic simulation contract.
+
+The inverse-p99 `Real FPS` definition is also the invariant acceptance rule for every automated test
+that makes a frame-rate claim. Those tests sample consecutive completed frames through the shared
+presentation metric; average throughput is diagnostic only. Hardware tests synchronize each frame
+before sampling so queued GPU work cannot satisfy the contract. ADR 0004 records this decision.
 
 WSLg remains a compatibility path and prefers Wayland when no SDL video driver is selected.
 

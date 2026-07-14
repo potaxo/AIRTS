@@ -6,5 +6,6 @@ tradeoffs. They complement the current-state design documents; they do not repla
 * [ADR 0001: Preserve a modular monolith with a stable Simulation facade](0001-modular-monolith.md)
 * [ADR 0002: Interpolate fixed-tick presentation on the GPU](0002-gpu-presentation-interpolation.md)
 * [ADR 0003: Use saturation-aware shared crowd flow before per-agent ORCA](0003-saturation-aware-crowd-flow.md)
+* [ADR 0004: Use Real FPS for every frame-rate acceptance test](0004-real-fps-acceptance.md)
 
 [Design index](../design.md)

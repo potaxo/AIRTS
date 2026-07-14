@@ -1,13 +1,13 @@
-"""Performance contract for 1,000-unit interactive rendering at 100 FPS."""
+"""Performance contract for 1,000-unit interactive rendering at 100 Real FPS."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from time import perf_counter
 from unittest.mock import patch
 
 import pygame
 import pytest
+from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
 from airts.app import AirtsApp
 from airts.automations import AutomationKind, AutomationStatus
@@ -32,7 +32,7 @@ def _simulation() -> tuple[Simulation, tuple[str, ...]]:
         load_map_data(
             {
                 "id": "thousand_unit_100fps",
-                "name": "Thousand Unit 100 FPS",
+                "name": "Thousand Unit 100 Real FPS",
                 "width": 80,
                 "height": 60,
                 "terrain": {
@@ -120,7 +120,7 @@ def _assert_order_owns_every_unit(
         ("defend", _defend_order, AutomationKind.DEFEND),
     ),
 )
-def test_thousand_selected_units_execute_and_render_at_100fps(
+def test_thousand_selected_units_execute_and_render_at_100_real_fps(
     name: str,
     order_factory: OrderFactory,
     expected_kind: AutomationKind | None,
@@ -133,13 +133,13 @@ def test_thousand_selected_units_execute_and_render_at_100fps(
         entity_id: simulation.entities[entity_id].position for entity_id in entity_ids
     }
 
-    started = perf_counter()
+    probe = RealFpsProbe()
     result = simulation.execute(order_factory(entity_ids))
     for frame in range(MEASURED_FRAMES):
         if frame % SIMULATION_INTERVAL_FRAMES == 0:
             simulation.advance()
         app._draw(surface)
-    elapsed = perf_counter() - started
+        probe.frame_completed()
 
     assert result.accepted
     assert simulation.tick == Simulation.TICKS_PER_SECOND
@@ -150,11 +150,7 @@ def test_thousand_selected_units_execute_and_render_at_100fps(
         for entity_id in entity_ids
     )
     assert progressing >= MINIMUM_PROGRESSING_UNITS
-    achieved_fps = MEASURED_FRAMES / elapsed
-    assert achieved_fps >= TARGET_FPS, (
-        f"{name} achieved {achieved_fps:.1f} FPS for {UNIT_COUNT} selected units "
-        f"({elapsed:.3f}s for {MEASURED_FRAMES} frames)"
-    )
+    assert_real_fps(probe, TARGET_FPS, f"{name} with {UNIT_COUNT} selected units")
 
 
 def test_thousand_selected_unit_paths_are_visible_but_bounded() -> None:
@@ -176,5 +172,5 @@ def test_thousand_selected_unit_paths_are_visible_but_bounded() -> None:
     assert 1 <= len(route_calls) <= MAXIMUM_REPRESENTATIVE_PATHS
 
 
-def test_application_render_loop_is_not_clock_capped_at_100fps() -> None:
-    assert AirtsApp.FRAME_RATE_LIMIT == 0
+def test_application_render_loop_uses_the_requested_thousand_fps_ceiling() -> None:
+    assert AirtsApp.FRAME_RATE_LIMIT == 1_000

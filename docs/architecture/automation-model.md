@@ -280,6 +280,10 @@ representation and construction optimizations, not approximations of terrain cos
 Large direct-move formations may cluster paths through nearby staging anchors before branching to
 unique final slots. Scout formations use 8 x 8 staging clusters at the verified 1,000-unit scale;
 other unit kinds retain 5 x 5 clusters so heavier formations do not regress dense-choke behavior.
+Large-formation members are paired with slots along the approach axis so the front of the group
+fills the far side first; small gathering groups retain center-first assignment. Cluster routes
+leave the shared reverse field before the exact anchor and compute a short deterministic local
+branch, preventing the anchor itself from becoming a point choke.
 Replans whose costs depend on current unit positions remain uncached because their obstacle
 penalties change with the formation.
 Settled military units are finite-cost dynamic path obstacles rather than impassable terrain.
@@ -288,7 +292,10 @@ per-entity phases and per-tick path budgets preserving responsiveness. Moving qu
 fed back into per-agent A*: the shared static field supplies global direction while deterministic
 local steering, collision response, and bounded yielding carry the flow through unavoidable chokes.
 Blocked recovery follows the same rule and does not search for an alternate route merely because a
-moving bridge queue occupies the next cells.
+moving bridge queue occupies the next route cells. Crowded waypoint lookahead requires a passable
+cached static corridor on the current grid axis; a unit cannot skip the turn that enters a bridge
+and cut diagonally through water. The corridor cache is cleared with navigation state when buildings
+change.
 Dense movement must retain throughput rather than pausing whole formations. Collision broadphase
 pairs are generated directly from spatial buckets, reused across solver passes where safe, and
 each unit's deterministic steering neighborhood is converted once into compact collider records
@@ -307,8 +314,13 @@ per unit. Visibility retains exact circular sight geometry while unioning occupi
 per-row integer bit masks before materializing visible cells.
 When an ordinary defend target cannot physically contain its assigned force, it automatically uses
 the same reachable hex-packed deployment slots as a gathering defense instead of repeating a few
-station coordinates. Tiny point and area patrols move one spaced formation through the patrol cycle
-in phase. Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
+station coordinates. In groups larger than 128 units, a congestion-stopped defender inside the
+formation core may adopt its current position as an inspectable station. After 500 deployment
+ticks, a defender not under collision pressure and already inside the overflow envelope may also
+adopt its current position; this ends exact-slot churn while preserving the target, envelope,
+assignment, and serialized station evidence. Smaller groups retain exact stations. Tiny point and
+area patrols move one spaced formation through the patrol cycle in phase.
+Blocked-unit recovery is budgeted across ticks. These optimizations reduce repeated computation
 without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
 because of worker scheduling.

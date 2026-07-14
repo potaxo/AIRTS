@@ -87,6 +87,8 @@ class Simulation:
     DEFEND_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
+    DEFEND_FORMATION_TOLERANCE = 1.0
+    DEFEND_FORMATION_SETTLE_TICKS = 500
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
     GATHERING_PATH_BUDGET = 4
@@ -162,6 +164,7 @@ class Simulation:
         )
         self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
         self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
+        self._waypoint_corridor_cache: dict[tuple[Cell, Cell], bool] = {}
         self._update_visibility()
 
     @property
@@ -1166,6 +1169,7 @@ class Simulation:
         self._routes.clear()
         self._gathering_slot_cache.clear()
         self._gathering_reachable_cache.clear()
+        self._waypoint_corridor_cache.clear()
 
     def _cells_at(self, entity: Entity, position: Point) -> frozenset[Cell]:
         width, height = entity.kind.profile.footprint

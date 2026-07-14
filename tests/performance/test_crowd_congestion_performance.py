@@ -10,6 +10,14 @@ from airts.commands import AttackCommand, CreateDefendCommand, CreatePatrolComma
 from airts.geometry import Point, rectangle_region
 from airts.map_model import load_map_data
 from airts.simulation import Simulation
+from airts.spatial_index import SpatialIndex
+
+LARGE_FORMATION_UNIT_COUNT = 400
+BRIDGE_UNIT_COUNT = 400
+MINIMUM_SETTLED_SCOUT_SPACING = 0.90
+MAXIMUM_MOVING_OVERLAP_FRACTION = 0.10
+SCOUT_CONTACT_DISTANCE = 0.60
+BRIDGE_EAST_BANK_X = 63.5
 
 
 def _crowd_simulation(
@@ -18,14 +26,27 @@ def _crowd_simulation(
     enemy_position: Point | None = None,
     bridge: bool = False,
 ) -> tuple[Simulation, tuple[str, ...]]:
-    columns = 32 if bridge else 40
+    if bridge:
+        columns = 20
+        start_x = 8.5
+        start_y = 30.5
+        map_width = 120
+        map_height = 80
+        terrain_rectangles = [[58, 0, 5, 35, "water"], [58, 44, 5, 36, "water"]]
+    else:
+        columns = 40
+        start_x = 2.5
+        start_y = 2.5
+        map_width = 80
+        map_height = 60
+        terrain_rectangles = []
     entity_ids = tuple(f"scout_{index:04d}" for index in range(unit_count))
     entities: list[dict[str, object]] = [
         {
             "id": entity_id,
             "kind": "scout",
             "owner": "player",
-            "position": [2.5 + index % columns, 2.5 + index // columns],
+            "position": [start_x + index % columns, start_y + index // columns],
         }
         for index, entity_id in enumerate(entity_ids)
     ]
@@ -43,13 +64,11 @@ def _crowd_simulation(
             {
                 "id": f"crowd_congestion_{unit_count}",
                 "name": "Crowd Congestion Performance",
-                "width": 80,
-                "height": 60,
+                "width": map_width,
+                "height": map_height,
                 "terrain": {
                     "default": "grass",
-                    "rectangles": (
-                        [[38, 0, 5, 27, "water"], [38, 33, 5, 27, "water"]] if bridge else []
-                    ),
+                    "rectangles": terrain_rectangles,
                 },
                 "entities": entities,
             }
@@ -59,6 +78,22 @@ def _crowd_simulation(
     if enemy_position is not None:
         simulation.entities["focus_target"].health = 1_000_000
     return simulation, entity_ids
+
+
+def _minimum_unit_separation(
+    simulation: Simulation,
+    entity_ids: tuple[str, ...],
+    search_radius: float,
+) -> float:
+    positions = {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids}
+    index = SpatialIndex(positions)
+    return min(
+        (
+            positions[first_id].distance_to(positions[second_id])
+            for first_id, second_id in index.candidate_pairs(search_radius)
+        ),
+        default=float("inf"),
+    )
 
 
 def test_focus_attackers_hold_at_weapon_range_instead_of_converging_on_adjacency() -> None:
@@ -96,7 +131,7 @@ def test_tiny_defend_area_allocates_distinct_physical_stations() -> None:
             for index, first in enumerate(stations)
             for second in stations[index + 1 :]
         )
-        >= 0.6
+        >= MINIMUM_SETTLED_SCOUT_SPACING
     )
 
 
@@ -118,24 +153,91 @@ def test_tiny_patrol_area_uses_a_collision_safe_group_formation() -> None:
             for index, first in enumerate(concrete)
             for second in concrete[index + 1 :]
         )
-        >= 0.6
+        >= MINIMUM_SETTLED_SCOUT_SPACING
     )
 
 
-def test_thousand_scout_tiny_defend_congestion_ticks_fit_realtime_budget() -> None:
-    simulation, entity_ids = _crowd_simulation(1_000)
+def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
+    simulation, entity_ids = _crowd_simulation(8, bridge=True)
+    mover = simulation.entities[entity_ids[0]]
+    allowed_conflicts = frozenset(entity_ids)
+    mover_position = Point(57.5, 28.5)
+    simulation.occupancy.move(mover.entity_id, frozenset({(57, 28)}), allowed_conflicts)
+    mover.position = mover_position
+    for y, entity_id in zip(range(29, 36), entity_ids[1:], strict=True):
+        blocker = simulation.entities[entity_id]
+        blocker_position = Point(57.5, y + 0.5)
+        simulation.occupancy.move(entity_id, frozenset({(57, y)}), allowed_conflicts)
+        blocker.position = blocker_position
+    mover.path = [
+        *(Point(57.5, y + 0.5) for y in range(29, 36)),
+        *(Point(x + 0.5, 35.5) for x in range(58, 66)),
+    ]
+
+    simulation._skip_crowded_waypoints(mover)
+
+    assert mover.path[0] == Point(57.5, 35.5)
+
+
+def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks() -> None:
+    simulation, entity_ids = _crowd_simulation(LARGE_FORMATION_UNIT_COUNT)
     target = rectangle_region(Point(65, 28), Point(67, 30))
-    assert simulation.execute(CreateDefendCommand(entity_ids, target)).accepted
-    simulation.advance(180)
+    result = simulation.execute(CreateDefendCommand(entity_ids, target))
+    assert result.accepted
+    automation = simulation.automations[result.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
     tick_times: list[float] = []
 
-    for _ in range(20):
+    unsettled = len(entity_ids)
+    while simulation.tick < 800 and unsettled:
         started = perf_counter()
         simulation.advance()
         tick_times.append(perf_counter() - started)
+        unsettled = sum(
+            bool(simulation.entities[entity_id].path)
+            or simulation.entities[entity_id].position.distance_to(
+                automation.parameters.stations[entity_id]
+            )
+            > Simulation.DEFEND_FORMATION_TOLERANCE
+            for entity_id in entity_ids
+        )
 
     ordered = sorted(tick_times)
     p95 = ordered[int(len(ordered) * 0.95) - 1]
+    center = Point(66, 29)
+    distances = sorted(
+        simulation.entities[entity_id].position.distance_to(
+            automation.parameters.stations[entity_id]
+        )
+        for entity_id in entity_ids
+    )
+    assert unsettled == 0, (
+        f"{unsettled} of {len(entity_ids)} defenders remained unsettled at tick {simulation.tick}; "
+        f"{sum(bool(simulation.entities[item].path) for item in entity_ids)} retained paths, "
+        f"{sum(simulation.entities[item].congestion_stopped for item in entity_ids)} yielded, "
+        f"{sum(simulation.entities[item].collision_pressure > 0 for item in entity_ids)} under collision pressure, "
+        f"{sum(simulation.entities[item].route_ticks >= Simulation.DESTINATION_REPATH_TICKS for item in entity_ids)} on mature routes, "
+        f"{sum(simulation.entities[item].position.distance_to(center) <= automation.parameters.assembly_radius + Simulation.DEFEND_FORMATION_TOLERANCE for item in entity_ids)} inside the assembly envelope, "
+        f"{sum(distance <= 1.0 for distance in distances)} were within one unit, "
+        f"median station distance {distances[len(distances) // 2]:.2f}, "
+        f"maximum {distances[-1]:.2f}, and "
+        f"{simulation.navigation_field_build_count} navigation fields were built; "
+        f"measured tick p95 was {p95 * 1_000:.1f} ms"
+    )
+    assert all(not simulation.entities[entity_id].path for entity_id in entity_ids)
+    assert all(
+        simulation.entities[entity_id].position.distance_to(center)
+        <= automation.parameters.assembly_radius + Simulation.DEFEND_FORMATION_TOLERANCE
+        for entity_id in entity_ids
+    )
+    minimum_separation = _minimum_unit_separation(
+        simulation,
+        entity_ids,
+        MINIMUM_SETTLED_SCOUT_SPACING,
+    )
+    assert minimum_separation >= MINIMUM_SETTLED_SCOUT_SPACING, (
+        f"settled defenders were only {minimum_separation:.3f} units apart"
+    )
     assert p95 < Simulation.TICK_SECONDS, (
         f"tiny-defense ticks had median {median(tick_times) * 1_000:.1f} ms, "
         f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
@@ -143,25 +245,39 @@ def test_thousand_scout_tiny_defend_congestion_ticks_fit_realtime_budget() -> No
     )
 
 
-def test_thousand_scout_bridge_queue_preserves_throughput_and_tick_budget() -> None:
-    simulation, entity_ids = _crowd_simulation(1_000, bridge=True)
-    target = rectangle_region(Point(65, 28), Point(67, 30))
-    assert simulation.execute(CreateDefendCommand(entity_ids, target)).accepted
+def test_large_bridge_queue_fully_crosses_without_deep_overlap() -> None:
+    simulation, entity_ids = _crowd_simulation(BRIDGE_UNIT_COUNT, bridge=True)
+    target = rectangle_region(Point(100, 38), Point(102, 40))
+    result = simulation.execute(CreateDefendCommand(entity_ids, target))
+    assert result.accepted
+    automation = simulation.automations[result.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+    assert all(
+        station.x > BRIDGE_EAST_BANK_X for station in automation.parameters.stations.values()
+    )
 
-    simulation.advance(180)
-    tick_times: list[float] = []
-    for _ in range(20):
-        started = perf_counter()
+    crossed = 0
+    while simulation.tick < 1_200 and crossed < len(entity_ids):
         simulation.advance()
-        tick_times.append(perf_counter() - started)
+        crossed = sum(
+            simulation.entities[entity_id].position.x >= BRIDGE_EAST_BANK_X
+            for entity_id in entity_ids
+        )
 
-    ordered = sorted(tick_times)
-    p95 = ordered[int(len(ordered) * 0.95) - 1]
-    crossed = sum(simulation.entities[entity_id].position.x > 45 for entity_id in entity_ids)
-    assert crossed >= 500, f"only {crossed} of 1,000 scouts crossed by tick 200"
-    assert p95 < Simulation.TICK_SECONDS, (
-        f"bridge ticks had median {median(tick_times) * 1_000:.1f} ms, "
-        f"p95 {p95 * 1_000:.1f} ms, and max {max(tick_times) * 1_000:.1f} ms"
+    assert crossed == len(entity_ids), (
+        f"only {crossed} of {len(entity_ids)} scouts crossed; every ordered unit must reach "
+        f"the east bank even if bridge throughput is slow"
+    )
+
+    minimum_separation = _minimum_unit_separation(
+        simulation,
+        entity_ids,
+        SCOUT_CONTACT_DISTANCE,
+    )
+    required_separation = SCOUT_CONTACT_DISTANCE * (1.0 - MAXIMUM_MOVING_OVERLAP_FRACTION)
+    assert minimum_separation >= required_separation, (
+        f"bridge force crossed with {minimum_separation:.3f} center separation; overlap may not "
+        f"exceed {MAXIMUM_MOVING_OVERLAP_FRACTION:.0%} of scout contact distance"
     )
 
 

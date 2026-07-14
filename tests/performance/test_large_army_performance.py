@@ -509,7 +509,8 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work() -> Non
         {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids}
     )
     close_pairs = final_index.candidate_pairs(collision_radius(EntityKind.LIGHT_TANK) * 2)
-    # Active pressure may create transient overlap, but unit centers must never collapse together.
+    # Active pressure may create slight transient overlap, but deep visual stacking is invalid.
+    contact_distance = collision_radius(EntityKind.LIGHT_TANK) * 2
     assert (
         min(
             simulation.entities[first_id].position.distance_to(
@@ -517,7 +518,7 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work() -> Non
             )
             for first_id, second_id in close_pairs
         )
-        >= collision_radius(EntityKind.LIGHT_TANK) * 0.65
+        >= contact_distance * 0.90
     )
     assert elapsed < 7.0
 

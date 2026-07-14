@@ -384,7 +384,8 @@ domain behavior. The public `airts.simulation.Simulation` import and facade rema
 The former top-level implementation paths remain compatibility re-exports for downstream callers;
 AIRTS's own source imports the canonical package paths. Tests are grouped by intent under
 `tests/unit/`, `tests/integration/`, `tests/movement/`, `tests/performance/`, and
-`tests/architecture/`.
+`tests/architecture/`. Optional blocking human-inspection workloads live under
+`tests/gui_scenarios/` in files that deliberately do not match pytest's normal discovery pattern.
 
 ## 41.2 Supported behavior
 
@@ -394,8 +395,9 @@ hubs, command centers, and resource generators.
 
 The runtime currently supports:
 
-* fixed 10 Hz deterministic simulation with an uncapped, GPU-interpolated frontend and a tested
-  100 FPS 1,000-unit work budget;
+* fixed 10 Hz deterministic simulation with a 1,000 FPS-ceiling, GPU-interpolated frontend and an
+  invariant inverse-p99-frame-time acceptance contract whose current 1,000-unit workloads expose
+  unresolved p99 stalls below the 100 Real FPS target;
 * direct move, stop, hold, and explicit attack commands with manual override;
 * point, polyline, rectangle, and freehand grounding; typed selection; region naming; whole-object
   geometry replacement; and route/region deletion;
@@ -407,7 +409,7 @@ The runtime currently supports:
 * versioned complete-state saves, deterministic replay verification, JSON Lines event export,
   configurable deterministic enemy generation, and custom map loading;
 * a native OpenGL 3.3 default renderer with GPU-batched projectile feedback, fixed-tick position
-  interpolation, selectable window resolution, uncapped submission, and bounded UI-texture
+  interpolation, selectable window resolution, a 1,000 FPS submission ceiling, and bounded UI-texture
   refreshes, plus an explicitly selected bounded software renderer.
 
 Starting resources are one integer balance per owner. Each resource generator adds 1,000 resources
@@ -415,9 +417,10 @@ every ten simulation ticks. Ambient enemy generation defaults to one mobile enem
 cap of 100 and can be disabled or reconfigured. Save and replay documents preserve those settings
 and reject incompatible schema versions.
 
-The [performance milestone document](milestones/performance.md) defines five 1,000-unit contract
-groups, including a sustained genuine 500-vs-500 mixed-unit battle and saturated focus, tiny-area,
-and bridge queues, and the limits of the evidence each one provides.
+The [performance milestone document](milestones/performance.md) separates 1,000-unit stress
+contracts from capacity-valid crowd correctness scenarios. It includes a sustained genuine
+500-vs-500 mixed-unit battle, a 999-unit focus workload, and 400-unit tiny-area and bridge scenarios
+whose formations fit their maps while still exposing congestion and overlap.
 
 ## 41.3 Current implementation limitations
 
@@ -430,3 +433,8 @@ Geometry editing replaces an entire point, route, or region rather than individu
 Map-defined semantic regions and multi-region automation semantics are not implemented. LM Studio
 and other language providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor
 remain outside the implemented phase.
+
+Dense large-group movement can currently collapse unit centers far beyond the accepted overlap
+limit, especially after formations settle or opposing traffic compresses at a choke. The revised
+crowd contracts keep map capacity separate from routing completeness and expose this as an
+unresolved movement defect rather than accepting visual stacking for throughput.
