@@ -3,11 +3,10 @@
 This document records the executable 1,000-unit software, native-4K, and OpenGL performance
 contracts and the limits of their evidence. It is normative for current behavior.
 
-The contracts currently expose unresolved p99 frame stalls in the simulation-bearing 1,000-unit
-workloads; they must not be described as achieved until every Real FPS assertion passes. Earlier
-average-throughput results remain useful profiling history but are not acceptance evidence under
-ADR 0004. The crowd contracts also expose unresolved deep overlap in settled formations and choke
-traffic; successful throughput does not excuse stacked unit centers.
+The required contracts pass on the reference native-Windows system. This is acceptance evidence for
+the checked-in workloads, not a cross-machine frame-rate guarantee. The inverse-p99 rule in ADR
+0004, authoritative unit counts, map geometry, collision thresholds, GPU synchronization, and
+complete bridge crossing remain unchanged; average throughput is still diagnostic only.
 
 [Design index](../design.md)
 
@@ -28,9 +27,11 @@ work for any unit to meet the budget.
 
 `tests/performance/test_thousand_unit_100fps.py` is the executable expected-behavior contract. For
 each command
-it records 100 consecutive completed-frame intervals containing command submission, 100 complete
-Pygame software-surface draw passes, and ten authoritative simulation advances. The p99 completed
-frame interval must remain at or below 10 ms.
+it records 100 consecutive completed-frame intervals containing command submission, 100 software
+presentation calls on a Pygame Surface, and ten authoritative simulation advances. Changed world
+frames are constructed once and retained as complete composed Surfaces; intervening calls copy the
+retained frame, and tick-driven reconstruction is scheduled on the next presentation call. The p99
+completed-frame interval must remain at or below 10 ms.
 Afterward, all 1,000 units must still belong to the order, the simulation must have advanced ten
 ticks, and at least 100 units must have changed position. Large-selection route feedback must remain
 visible through one to 32 deterministic representative paths. Timing setup and the initial warm-up
@@ -42,7 +43,9 @@ The milestone uses algorithmic and data-layout changes within the existing Pytho
 * dense reverse-navigation fields with uniform and weighted builders;
 * exact per-row bit-mask unions for visibility;
 * one reused spatial-neighbor result per unit movement attempt;
-* cached per-frame map transforms and bounded large-selection visual detail.
+* deterministic coherent-flow translation plus a persistent orthogonal reservation lattice above
+  128 movable units, with continuous topology-sensitive manual flow at bridge approaches;
+* cached composed software frames, per-tick map transforms, and bounded large-selection detail.
 
 The simulation remains single-threaded. Rust or worker threads may be reconsidered only after a
 measured workload exceeds this architecture's budget; neither is required for this target, and
@@ -68,7 +71,7 @@ authoritative simulation to satisfy the budget.
 
 `tests/performance/test_4k_thousand_scout_100fps.py` is the executable expected-behavior contract.
 It first
-isolates 100 complete draws on a real 3840 x 2160 Pygame software Surface and then isolates two
+isolates 100 complete presentation calls on a real 3840 x 2160 Pygame software Surface and then isolates two
 command submissions plus ten authoritative collision ticks. The end-to-end test measures those
 commands, ten ticks interleaved at 10 Hz, and 100 complete 4K draws as consecutive frame intervals
 whose p99 must remain at or below 10 ms. All 1,000 scouts must retain active orders,
@@ -83,8 +86,10 @@ static building occupancy, exact bit-mask visibility unions, and larger scout-on
 clusters. These are data-layout and redundant-work reductions; entity movement, collision,
 visibility, selection, buildings, UI panels, and command ownership remain authoritative.
 
-The 3840 x 2160 Surface test verifies CPU-side full-frame construction and remains suitable for
-headless regression testing. It cannot prove that a physical 4K monitor presents 100 distinct
+The 3840 x 2160 Surface test verifies CPU-side full-frame construction, full-surface cache copies,
+and invalidation at changed ticks, and remains suitable for headless regression testing. A changed
+tick is displayed at most one presentation call later; if a low-cadence caller advances again first,
+the renderer catches up immediately instead of deferring repeatedly. It cannot prove that a physical 4K monitor presents 100 distinct
 refreshes per second. The explicit software runtime still renders a smaller logical Surface and
 asks SDL to scale it; backend acceleration is environment-dependent, and `pygame.SCALED` may report
 that no fast renderer is available. Section 40 adds the separate native OpenGL contract. Worst-case
@@ -101,9 +106,10 @@ actionable startup error. `--renderer software` is the only supported way to req
 software path.
 
 The GPU scene consists of native-pixel instanced rectangles and analytic antialiased circles.
-Every terrain cell and grid line remains present. Every unit and building remains visible, and
-selection tint, group outline, damaged/inspected health bars, and one to 32 representative routes
-remain consistent with the software renderer. Static terrain data is uploaded once per transform;
+Every terrain cell and grid line remains present. Every unit and building remains visible. Large
+selections use a bright unit tint and an aggregate panel readout; normal selections retain
+individual outlines and health bars, inspected units retain a health bar, and one to 32
+representative routes remain consistent with the software renderer. Static terrain data is uploaded once per transform;
 dynamic instance and line buffers update at simulation-tick cadence rather than render cadence.
 The GPU performs rasterization and composition. The CPU still performs authoritative simulation,
 collision, commands, input, buffer preparation, and font rasterization.
@@ -119,11 +125,14 @@ limits.
 The existing Pygame interaction UI is preserved as a cached transparent native-resolution texture.
 Spatial editing feedback, construction previews, gathering glow, panels, settings, and help are
 rebuilt only when their authoritative or interaction state changes and are then composed by
-OpenGL. Projectile bodies, trajectories, and retained traces use the normal GPU shape and line
-batches rather than the full-frame CPU texture. Status-only texture changes are coalesced into
-three-tick buckets, while explicit interaction changes remain immediate and world batches still
-update every simulation tick. This hybrid keeps the complete interface available without uploading
-or redrawing the 1,000-unit base scene in software.
+OpenGL. Projectile bodies, trajectories, retained traces, and assembly glows use the normal GPU
+shape and line batches rather than the full-frame CPU texture. Status-only texture changes are
+coalesced into three-tick buckets. Opaque panel changes upload only their populated dirty
+rectangles, construction feedback uploads only its canvas region, and buffer storage remains
+resident until capacity must grow. A tick-driven overlay update is submitted on the first
+interpolation frame after the authoritative tick, adding at most one presentation frame of text
+latency while keeping simulation work and texture conversion out of the same p99 frame. Explicit
+interaction changes remain immediate and world batches still update every simulation tick.
 
 `tests/performance/test_opengl_thousand_scout_100fps.py` is the executable contract. It verifies:
 
@@ -177,11 +186,15 @@ rules.
 
 The interactive cache key uses an O(1) command count instead of copying replay history. Per-frame
 FPS sampling does not invalidate the full 31.64 MiB 4K overlay; the displayed status is refreshed
-in bounded three-tick buckets. On the reference AMD Radeon RX 7900 XT, the original direct-combat
-workload improved from 24.5 FPS to 152.3 FPS after bounding overlay work. The strengthened defend
-automation workload achieved 188.1 FPS after GPU projectile batching and spatial responder queries.
-These are offscreen workload results, not proof that a physical monitor or compositor presents the
-same number of distinct frames per second.
+in bounded three-tick buckets through partial uploads. Dynamic terrain, shape, and line buffers
+start with bounded reusable capacities and grow only when a larger scene requires it. Persistent
+traffic slots, cached exact grouped-visibility masks, bounded combat broadphase, lazy patrol-slot
+planning, direct clear formation legs, no-op occupancy updates, a one-time stale-cycle collection
+at large-match construction, large-selection level of detail, and staged overlay work make the
+strengthened defend-automation workload pass the unchanged 100
+Real FPS p99 contract on the reference AMD Radeon RX 7900 XT. This is offscreen workload evidence,
+not proof that a physical monitor or compositor presents the same number of distinct frames per
+second.
 
 A separate historical Windows interactive capture used PresentMon 2.5.1 against an uncapped build
 launched with the same 500-vs-500 mixed-unit battle at the default 1428 x 872 resolution. Over
@@ -213,7 +226,8 @@ late-game cases that are intentionally harsher than the open-field and mixed-bat
   bridge completion has only a generous deadlock guard, not a throughput or formation-settling
   deadline;
 * smaller correctness cases prove unique initial defend stations, coherent point/area patrol slots,
-  and topology-safe crowded-waypoint lookahead at a bridge turn.
+  topology-safe crowded-waypoint lookahead at a bridge turn, and a 152-scout northbound command
+  flowing around an exactly stationary enemy heavy tank.
 
 The 400-unit formation and bridge counts are deliberate capacity tests rather than reduced
 performance targets. A 1,000-unit formation at the required visual spacing consumes a large fraction
@@ -222,8 +236,14 @@ capacity with routing correctness. Independent software, native-4K, OpenGL, mixe
 focus-fire contracts retain roughly 1,000 authoritative units and the unchanged 100 Real FPS target.
 
 Every unit remains authoritative, visible to normal renderers, collision-enabled, and assigned to
-its command or automation. A target that cannot contain the group expands into deterministic
-reachable hex-packed holding slots. Explicit attackers clear their pursue path at weapon range.
+its command or automation. Above 128 movable units, separated same-heading flows translate
+continuously until their broadphases can touch; congested or partially assigned forces then use a
+persistent orthogonal reservation lattice whose spacing caps overlap at the checked-in threshold.
+Direct manual traffic on maps with impassable topology retains continuous local collision and uses
+deterministic lateral route bands to approach a choke. Stationary hostile owners and holding units
+are anchors, while idle same-owner traffic may yield. A target that cannot contain the group expands
+into deterministic reachable hex-packed holding slots. Explicit attackers clear their pursue path
+at weapon range.
 Large-formation assignment pairs front-to-back arrivals with far-to-near slots along the approach
 axis; small gathering groups preserve center-first behavior. Nearby slots share reverse-field
 anchors but branch toward their final destinations before reaching
@@ -254,6 +274,28 @@ It applies their useful architectural split—shared group-scale routing plus bo
 without changing AIRTS's deterministic command, collision, and replay semantics. ADR 0003 records
 the alternatives and the evidence required before native or GPU crowd compute is justified.
 
+## Large-force behavior regression contracts
+
+`tests/integration/test_large_force_behavior_regressions.py` adds user-experience requirements that
+the throughput and Real FPS suites do not measure:
+
+* same-direction traffic may change lanes but may not exchange exact entity positions;
+* an unobstructed front rank must respect `speed * TICK_SECONDS` every tick and may not implement
+  average speed as stop-and-go slot bursts;
+* a 307-scout defend order through the four-cell reference bridge must continue making progress;
+* separate manual defend orders and multiple factories reinforcing one area must allocate one
+  globally collision-safe set of stations rather than duplicate per-automation formations; and
+* a moving force must route around an anchored held formation while every held unit remains fixed.
+
+The original reproduction observed 243 exact identity exchanges in 40 ticks, a 1.416-unit burst
+against a 0.250-unit per-tick speed limit, only 80 unique stations for 160 manual defenders, only 33
+unique stations for 132 four-factory defenders, and zero of 140 movers passing a held formation
+before a 250-tick no-progress guard. The reservation kernel now waits for physical arrival before
+changing slot ownership, preserves hostile and held anchors, propagates vacancies around fixed
+groups, and coordinates every same-owner defend automation targeting the same geometry. All five
+regressions and the independent 307-scout bridge-defense control pass without changing the Real FPS,
+separation, unit-count, map-geometry, or determinism requirements.
+
 ---
 
 # Human-Inspection GUI Scenarios
@@ -273,6 +315,8 @@ does not collect or block on them. Run a module explicitly, and optionally selec
 .\.venv\Scripts\python -m pytest -s tests\gui_scenarios\crowd_congestion_gui.py
 .\.venv\Scripts\python -m pytest -s tests\gui_scenarios\large_army_gui.py -k choke
 .\.venv\Scripts\python -m pytest -s tests\gui_scenarios\rendering_performance_gui.py -k battle
+.\.venv\Scripts\python -m pytest -s tests\gui_scenarios\large_force_behavior_regressions_gui.py -k identity
+.\.venv\Scripts\python -m pytest -s tests\gui_scenarios\large_force_behavior_regressions_gui.py -k heavy
 ```
 
 Closing a scenario window completes that pytest item; the result records successful setup and a

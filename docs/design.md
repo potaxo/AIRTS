@@ -396,21 +396,23 @@ hubs, command centers, and resource generators.
 The runtime currently supports:
 
 * fixed 10 Hz deterministic simulation with a 1,000 FPS-ceiling, GPU-interpolated frontend and an
-  invariant inverse-p99-frame-time acceptance contract whose current 1,000-unit workloads expose
-  unresolved p99 stalls below the 100 Real FPS target;
+  invariant inverse-p99-frame-time acceptance contract whose required 1,000-unit software and
+  hardware workloads pass the 100 Real FPS target on the reference Windows system;
 * direct move, stop, hold, and explicit attack commands with manual override;
 * point, polyline, rectangle, and freehand grounding; typed selection; region naming; whole-object
   geometry replacement; and route/region deletion;
 * patrol, defend, production, construction, reinforcement, repair-and-return, and economy
   automations with inspectable lifecycle, priority, pause, resume, cancellation, and event history;
-* weighted four-direction routing, collision-safe overflow and patrol formations, saturation-aware
-  route recovery, local physical collision and push, opportunistic projectile combat,
-  visibility/exploration state, resource income, production, and builder construction;
+* weighted four-direction routing, collision-safe overflow and patrol formations, a deterministic
+  large-force traffic lattice with fixed-unit anchors and topology-preserving bridge flow, local
+  physical collision and push, opportunistic projectile combat, dense bit-mask visibility,
+  resource income, production, and builder construction;
 * versioned complete-state saves, deterministic replay verification, JSON Lines event export,
   configurable deterministic enemy generation, and custom map loading;
-* a native OpenGL 3.3 default renderer with GPU-batched projectile feedback, fixed-tick position
-  interpolation, selectable window resolution, a 1,000 FPS submission ceiling, and bounded UI-texture
-  refreshes, plus an explicitly selected bounded software renderer.
+* a native OpenGL 3.3 default renderer with GPU-batched projectile and assembly feedback,
+  fixed-tick position interpolation, persistent dynamic buffers, partial UI-texture uploads,
+  selectable window resolution, and a 1,000 FPS submission ceiling, plus an explicitly selected
+  software renderer with complete-frame caching.
 
 Starting resources are one integer balance per owner. Each resource generator adds 1,000 resources
 every ten simulation ticks. Ambient enemy generation defaults to one mobile enemy per second with a
@@ -434,7 +436,14 @@ Map-defined semantic regions and multi-region automation semantics are not imple
 and other language providers, voice, MCP, scouting reports, multiplayer, Unity, and a map editor
 remain outside the implemented phase.
 
-Dense large-group movement can currently collapse unit centers far beyond the accepted overlap
-limit, especially after formations settle or opposing traffic compresses at a choke. The revised
-crowd contracts keep map capacity separate from routing completeness and expose this as an
-unresolved movement defect rather than accepting visual stacking for throughput.
+The large-force controller deliberately uses deterministic coherent translation and orthogonal
+slot reservations rather than continuous reciprocal-velocity optimization. Packed lane changes can
+therefore look grid-like. A reservation changes logical ownership only after the body reaches its
+current slot, and every physical step remains bounded by `speed * TICK_SECONDS`; this prevents
+identity exchanges and stop-and-go jumps. Hostile idle units and held units are exact anchors,
+while route bands and vacancy propagation let commanded traffic pass them. Defend automations that
+share an owner and target coordinate one global collision-safe station set, including defenders
+produced by separate factories. Large formations may still adopt a collision-safe reached position
+inside their declared overflow envelope instead of churning forever toward one exact packed slot.
+ORCA, native crowd code, and GPU simulation remain future options unless a checked-in sustained
+workload demonstrates that the deterministic CPU kernel is insufficient.

@@ -574,6 +574,74 @@ def assign_formation_slots(
     return dict(zip(ordered_ids, ordered_slots, strict=True))
 
 
+def minimum_cost_slot_assignment(
+    entity_positions: Mapping[str, Point],
+    slots: tuple[Point, ...],
+) -> dict[str, Point]:
+    """Match entities to slots with deterministic minimum total squared travel."""
+
+    count = len(entity_positions)
+    if count != len(slots):
+        raise ValueError("formation entity and slot counts must match")
+    ordered_ids = tuple(sorted(entity_positions))
+    ordered_slots = tuple(sorted(slots, key=lambda point: (point.y, point.x)))
+    costs = tuple(
+        tuple(
+            (entity_positions[entity_id].x - slot.x) ** 2
+            + (entity_positions[entity_id].y - slot.y) ** 2
+            for slot in ordered_slots
+        )
+        for entity_id in ordered_ids
+    )
+    row_potential = [0.0] * (count + 1)
+    column_potential = [0.0] * (count + 1)
+    column_match = [0] * (count + 1)
+    predecessor = [0] * (count + 1)
+    for row in range(1, count + 1):
+        column_match[0] = row
+        minimum = [float("inf")] * (count + 1)
+        used = [False] * (count + 1)
+        column = 0
+        while True:
+            used[column] = True
+            matched_row = column_match[column]
+            delta = float("inf")
+            next_column = 0
+            for candidate_column in range(1, count + 1):
+                if used[candidate_column]:
+                    continue
+                cost = (
+                    costs[matched_row - 1][candidate_column - 1]
+                    - row_potential[matched_row]
+                    - column_potential[candidate_column]
+                )
+                if cost < minimum[candidate_column]:
+                    minimum[candidate_column] = cost
+                    predecessor[candidate_column] = column
+                if minimum[candidate_column] < delta:
+                    delta = minimum[candidate_column]
+                    next_column = candidate_column
+            for candidate_column in range(count + 1):
+                if used[candidate_column]:
+                    row_potential[column_match[candidate_column]] += delta
+                    column_potential[candidate_column] -= delta
+                else:
+                    minimum[candidate_column] -= delta
+            column = next_column
+            if column_match[column] == 0:
+                break
+        while True:
+            previous_column = predecessor[column]
+            column_match[column] = column_match[previous_column]
+            column = previous_column
+            if column == 0:
+                break
+    return {
+        ordered_ids[column_match[column] - 1]: ordered_slots[column - 1]
+        for column in range(1, count + 1)
+    }
+
+
 def patrol_formation_waypoint(
     parameters: PatrolParameters,
     entity_ids: tuple[str, ...],

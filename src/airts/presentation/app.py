@@ -261,6 +261,11 @@ class AirtsApp:
         self._large_unit_renderable = False
         self._path_render_key: tuple[object, ...] | None = None
         self._path_render_points: tuple[tuple[tuple[int, int], ...], ...] = ()
+        self._software_draw_key: tuple[object, ...] | None = None
+        self._software_draw_tick: int | None = None
+        self._software_deferred_tick: int | None = None
+        self._software_frame_surface: pygame.Surface | None = None
+        self._software_cache_pending = False
         self._scaled_display_active = False
         self._frame_tile_size: float | None = None
         self._frame_map_pixel_size: tuple[int, int] | None = None
@@ -1328,6 +1333,33 @@ class AirtsApp:
             return
 
     def _draw(self, screen: pygame.Surface) -> None:
+        draw_key: tuple[object, ...] = (
+            id(screen),
+            screen.get_size(),
+            self.simulation.tick,
+            self._opengl_overlay_key(),
+        )
+        if self._software_cache_pending:
+            self._software_frame_surface = screen.copy()
+            self._software_cache_pending = False
+            if draw_key == self._software_draw_key:
+                return
+        if draw_key == self._software_draw_key:
+            assert self._software_frame_surface is not None
+            screen.blit(self._software_frame_surface, (0, 0))
+            return
+        same_target = (
+            self._software_draw_key is not None and self._software_draw_key[:2] == draw_key[:2]
+        )
+        if (
+            same_target
+            and self._software_draw_tick != self.simulation.tick
+            and self._software_deferred_tick is None
+        ):
+            self._software_deferred_tick = self.simulation.tick
+            assert self._software_frame_surface is not None
+            screen.blit(self._software_frame_surface, (0, 0))
+            return
         tile_size = min(
             self.canvas_rect.width / self.simulation.game_map.width,
             self.canvas_rect.height / self.simulation.game_map.height,
@@ -1363,6 +1395,13 @@ class AirtsApp:
             self._frame_map_pixel_size = None
             self._frame_map_origin = None
             self._frame_selected_entities = None
+        self._software_draw_key = draw_key
+        self._software_draw_tick = self.simulation.tick
+        self._software_deferred_tick = None
+        if self._software_frame_surface is None:
+            self._software_frame_surface = screen.copy()
+        else:
+            self._software_cache_pending = True
 
     def _draw_interface(self, screen: pygame.Surface) -> None:
         self._draw_command_bar(screen)
@@ -1385,9 +1424,55 @@ class AirtsApp:
             screen.set_clip(self.canvas_rect)
             self._draw_spatial_input(screen)
             self._draw_construction(screen)
-            self._draw_assembly_glows(screen)
             screen.set_clip(previous_clip)
             self._draw_interface(screen)
+        finally:
+            self._frame_selected_entities = None
+
+    def _draw_opengl_partial_overlay(
+        self,
+        screen: pygame.Surface,
+        regions: tuple[pygame.Rect, ...],
+    ) -> None:
+        """Refresh selected overlay rectangles without rebuilding the native canvas."""
+
+        refresh_canvas = any(region.colliderect(self.canvas_rect) for region in regions)
+        refresh_left = any(region.colliderect(self.left_panel_rect) for region in regions)
+        refresh_right = any(region.colliderect(self.right_panel_rect) for region in regions)
+        refresh_commands = any(region.colliderect(self.command_bar_rect) for region in regions)
+        if refresh_canvas:
+            for region in regions:
+                canvas_region = region.clip(self.canvas_rect)
+                if canvas_region.width and canvas_region.height:
+                    screen.fill((0, 0, 0, 0), canvas_region)
+        self._prune_removed_entities()
+        self._frame_selected_entities = tuple(
+            self.simulation.entities[entity_id] for entity_id in self.selected_entities
+        )
+        try:
+            if refresh_canvas:
+                previous_clip = screen.get_clip()
+                screen.set_clip(self.canvas_rect)
+                if any(
+                    automation.kind is AutomationKind.CONSTRUCTION
+                    for automation in self.simulation.live_automations
+                ):
+                    self._draw_construction(screen)
+                screen.set_clip(previous_clip)
+            if refresh_right or refresh_commands:
+                self._draw_interface(screen)
+            elif refresh_left:
+                self._command_buttons[:] = [
+                    button for button in self._command_buttons if button[1] != "help"
+                ]
+                self._draw_panel(
+                    screen,
+                    background_regions=tuple(
+                        region.clip(self.left_panel_rect)
+                        for region in regions
+                        if region.colliderect(self.left_panel_rect)
+                    ),
+                )
         finally:
             self._frame_selected_entities = None
 
@@ -1434,7 +1519,121 @@ class AirtsApp:
             tuple(self.canvas_rect),
             tuple(self.command_bar_rect),
             pointer,
+            self._opengl_canvas_overlay_key(),
         )
+
+    def _opengl_partial_overlay_regions(
+        self,
+        previous: tuple[object, ...],
+        current: tuple[object, ...],
+    ) -> tuple[pygame.Rect, ...] | None:
+        """Return the exact UI regions affected by inexpensive state-only changes."""
+
+        if len(previous) != len(current):
+            return None
+        changed = {
+            index
+            for index, (old_value, new_value) in enumerate(zip(previous, current, strict=True))
+            if old_value != new_value
+        }
+        left_panel_changes = {1, 2, 4, 5, 6, 13, 14, 22}
+        right_panel_changes = {15}
+        canvas_changes = {32}
+        if not changed or not changed <= (
+            left_panel_changes | right_panel_changes | canvas_changes
+        ):
+            return None
+        regions: list[pygame.Rect] = []
+        if changed & left_panel_changes:
+            if changed & {5, 22}:
+                regions.append(self.left_panel_rect.copy())
+            else:
+                regions.extend(self._opengl_dynamic_overlay_regions())
+        if changed & (right_panel_changes | {6}):
+            context_height = min(self.right_panel_rect.height, 420)
+            regions.append(
+                pygame.Rect(
+                    self.right_panel_rect.x,
+                    self.right_panel_rect.y,
+                    self.right_panel_rect.width,
+                    context_height,
+                )
+            )
+        if 6 in changed:
+            bar = self.command_bar_rect
+            regions.append(pygame.Rect(bar.x, bar.y, bar.width, min(78, bar.height)))
+        if changed & canvas_changes:
+            regions.extend(self._opengl_canvas_regions_from_key(previous[32]))
+            regions.extend(self._opengl_canvas_regions_from_key(current[32]))
+        return tuple(regions)
+
+    def _opengl_dynamic_overlay_regions(self) -> tuple[pygame.Rect, ...]:
+        """Return the populated left-panel bands whose values change with ticks."""
+
+        panel = self.left_panel_rect
+        y = 14 + 28 + 25 + len(self._wrap(self.notice, 46)) * 18 + 7
+        y += 38
+        y += 20 + 24
+        if self.simulation.entities.get(self.inspected_entity_id or "") is not None:
+            selection_lines = 4
+        elif self.selected_entities:
+            selection_lines = 2
+        else:
+            selection_lines = 1
+        selection_bottom = y + selection_lines * 17 + 3
+        y += selection_lines * 17 + 5 + 25
+        list_top = y
+        list_bottom = max(
+            list_top + self.AUTOMATION_ROW_HEIGHT,
+            panel.bottom - round(180 * self.ui_scale),
+        )
+        visible_rows = max(1, (list_bottom - list_top) // self.AUTOMATION_ROW_HEIGHT)
+        live_automations = self.simulation.live_automations
+        live_rows = min(len(live_automations), visible_rows)
+        automation_height = live_rows * self.AUTOMATION_ROW_HEIGHT
+        if self.selected_automation_id in self.simulation.automations:
+            automation_height += 60
+        top_bottom = max(selection_bottom, list_top + automation_height + 3)
+        return (
+            pygame.Rect(panel.x, 38, panel.width, top_bottom - 38),
+            pygame.Rect(
+                panel.x,
+                list_bottom - 3,
+                panel.width,
+                panel.bottom - list_bottom + 3,
+            ),
+        )
+
+    def _opengl_canvas_overlay_key(self) -> tuple[tuple[object, ...], ...]:
+        """Describe transient canvas pixels independently from ordinary tick updates."""
+
+        items: list[tuple[object, ...]] = []
+        for automation in self.simulation.live_automations:
+            if automation.kind is AutomationKind.CONSTRUCTION:
+                parameters = automation.parameters
+                assert isinstance(parameters, ConstructionParameters)
+                items.append(
+                    (
+                        "construction",
+                        automation.automation_id,
+                        parameters.construction_value,
+                        tuple(self.canvas_rect),
+                    )
+                )
+                continue
+        return tuple(items)
+
+    def _opengl_canvas_regions_from_key(self, key: object) -> tuple[pygame.Rect, ...]:
+        if not isinstance(key, tuple):
+            return ()
+        regions: list[pygame.Rect] = []
+        for item in key:
+            if not isinstance(item, tuple) or not item:
+                continue
+            rectangle = item[3]
+            if isinstance(rectangle, tuple) and len(rectangle) == 4:
+                regions.append(pygame.Rect(rectangle))
+        return tuple(regions)
 
     def _prune_removed_entities(self) -> None:
         existing = self.simulation.entities.keys()
@@ -2047,11 +2246,17 @@ class AirtsApp:
             self._command_buttons.append((rectangle, action))
             x += width + 9
 
-    def _draw_panel(self, screen: pygame.Surface) -> None:
+    def _draw_panel(
+        self,
+        screen: pygame.Surface,
+        *,
+        background_regions: tuple[pygame.Rect, ...] | None = None,
+    ) -> None:
         if self._font is None or self._small_font is None:
             raise RuntimeError("fonts not initialized")
         panel = self.left_panel_rect
-        pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
+        for region in (panel,) if background_regions is None else background_regions:
+            pygame.draw.rect(screen, self.PANEL_BACKGROUND, region)
         x = 16
         y = 14
         self._text(screen, "AIRTS — Phase 5", (x, y), (245, 245, 245))

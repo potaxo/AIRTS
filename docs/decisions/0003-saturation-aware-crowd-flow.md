@@ -31,9 +31,14 @@ Primary sources:
 
 ## Decision
 
-AIRTS keeps authoritative movement deterministic and CPU-resident. Large groups continue to use
-cached reverse navigation fields for global direction and the existing spatial broadphase for local
-steering and collision. Saturation behavior changes as follows:
+AIRTS keeps authoritative movement deterministic and CPU-resident. At more than 128 movable units,
+the controller first translates separated same-heading flows continuously when their candidate
+bounds cannot contact. It otherwise uses one persistent orthogonal reservation lattice whose
+spacing is 91% of the largest pair contact diameter, directly bounding overlap. Direct manual
+traffic on impassable topology retains continuous local collision handling and receives up to eight
+deterministic lateral route bands at command time; this keeps bridge approaches wide without
+letting local avoidance cut across water. Smaller groups retain continuous local steering and
+physical collision. Saturation behavior is:
 
 * undersized defense targets expand into unique reachable hex-packed holding slots;
 * large-formation slots are assigned by approach order while small gathering groups remain
@@ -42,7 +47,16 @@ steering and collision. Saturation behavior changes as follows:
 * explicit attackers stop their pursue path once the ordered target is in weapon range;
 * crowded waypoint lookahead preserves terrain topology by requiring a passable cached corridor on
   the current grid axis;
-* moving queue members are handled by local steering, collision pressure, and bounded yielding;
+* stationary hostile owners and holding units are exact anchors, while idle same-owner units may
+  yield to an ordered force;
+* slot occupancy is retained between ticks and invalidated when authoritative docking, entity
+  membership, or topology changes;
+* a queue advances by recursively reserving a vacant neighbor, but logical slot ownership changes
+  only after the previous reservation has been reached physically;
+* physical displacement is always capped by the unit's per-tick speed, and reservations never swap
+  two entity identities;
+* defend automations owned by the same player and aimed at the same target coordinate their station
+  allocation across manual commands and production factories;
 * only settled units are fed back into dynamic military-penalty A*;
 * delayed checks use stable per-entity phases, and all stalled/final-approach searches are bounded.
 
@@ -62,8 +76,9 @@ checked-in sustained workload.
 Tiny areas describe the defended or patrolled objective, not a promise that every assigned unit can
 fit inside the geometry. Overflow forces visibly occupy nearby reachable space. Large area patrols
 advance coherently instead of distributing members across opposing phases. Bridge queues may wait
-locally rather than attempt futile alternate A* routes, but units are never removed from collision
-or simulation.
+locally rather than attempt futile alternate A* routes, but all 400 checked-in units cross and no
+unit is removed from collision or simulation. A stationary heavy tank remains an exact anchor while
+a 152-scout ordered force flows around it, eliminating the prior heavy-only oscillation.
 
 The executable acceptance tests keep roughly 1,000 units in independent Real FPS and focus-fire
 stress workloads. Capacity-specific formation and bridge correctness use 400 units: the defense
@@ -75,3 +90,12 @@ quality—not Python path-search waste—is the next measured limiter. ClearPath
 parallelism is considered
 only after a CPU reference
 solver and deterministic replay comparison exist.
+
+Follow-up user testing exposed exact slot exchanges, oversized catch-up jumps, fixed-holder
+barriers, duplicate independently planned defend stations, scout freezes, and idle-heavy jitter.
+The amended kernel removes logical slot swapping, applies the physical speed cap before ownership
+can advance, treats held and hostile idle units as immutable anchors, partitions topology-sensitive
+approaches into lateral route bands, and allocates shared-target defense stations globally. The
+checked-in behavior regressions require identity continuity, bounded per-tick displacement,
+fixed-holder bypass, a stationary heavy, globally coordinated area stations, deterministic replay,
+complete bridge crossing, and the unchanged Real FPS contracts.

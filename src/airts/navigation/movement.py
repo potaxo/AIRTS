@@ -9,6 +9,7 @@ from airts.world.map_model import EntityKind
 
 NEIGHBOR_RADIUS = 2.25
 PREFERRED_SEPARATION = 1.15
+SETTLED_FORMATION_SPACING = 0.902
 _PASSING_ANGLES = (22.5, -22.5, 45.0, -45.0, 67.5, -67.5, 90.0, -90.0)
 _PASSING_ROTATIONS = tuple((cos(radians(angle)), sin(radians(angle))) for angle in _PASSING_ANGLES)
 _UNIT_MASSES = {

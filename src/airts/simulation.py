@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from gc import collect as collect_garbage
 from math import ceil, floor, sqrt
 
 from airts.automations import (
@@ -48,6 +49,7 @@ from airts.commands import (
 from airts.control import ControlAuthority
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
+from airts.navigation.movement import SETTLED_FORMATION_SPACING
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.navigation.spatial_index import SpatialIndex
 from airts.spatial import GroundingSelection, SpatialStore
@@ -76,6 +78,7 @@ type LocalCollider = tuple[str, Point, float, bool]
 
 
 class Simulation:
+    LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
     TICKS_PER_SECOND = 10
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
     NO_PROGRESS_YIELD_TICKS = 30
@@ -114,7 +117,15 @@ class Simulation:
             raise ValueError("enemy_spawn_interval_ticks must be positive")
         if enemy_spawn_cap < 0:
             raise ValueError("enemy_spawn_cap cannot be negative")
+        if len(game_map.entities) >= self.LARGE_SCENE_GC_ENTITY_THRESHOLD:
+            # Starting a large match is a natural non-frame boundary.  Drain cycles retained by a
+            # previous scenario here so an unrelated generation-2 collection cannot become a live
+            # simulation or presentation p99 stall several ticks later.
+            collect_garbage()
         self.game_map = game_map
+        self._all_terrain_passable = all(
+            terrain.passable for row in game_map.terrain for terrain in row
+        )
         self.random_seed = random_seed
         self.ambient_enemy_spawns = ambient_enemy_spawns
         self.enemy_spawn_interval_ticks = enemy_spawn_interval_ticks
@@ -156,6 +167,14 @@ class Simulation:
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
         self._blocked_recoveries_this_tick = 0
+        self._open_force_slots: (
+            tuple[
+                float,
+                dict[str, tuple[int, int]],
+                dict[tuple[int, int], str],
+            ]
+            | None
+        ) = None
         self._building_cells_cache: frozenset[Cell] | None = None
         self._routes = RoutingService(
             game_map,
@@ -296,6 +315,7 @@ class Simulation:
             self._spawn_ambient_enemy()
             self._drive_automations()
             self._move_entities()
+            automation_runtime.settle_automation_formations(self)
             self._drive_projectiles()
             self._drive_combat()
             self._update_visibility()
@@ -682,8 +702,27 @@ class Simulation:
             self, entity, candidate, entity_radius, local_colliders
         )
 
-    def _resolve_unit_collisions(self, unit_index: SpatialIndex) -> None:
-        movement_system.resolve_unit_collisions(self, unit_index)
+    def _resolve_unit_collisions(
+        self,
+        unit_index: SpatialIndex,
+        contact_ids: tuple[str, ...] | None = None,
+    ) -> None:
+        movement_system.resolve_unit_collisions(self, unit_index, contact_ids)
+
+    def _relax_unit_spacing(
+        self,
+        entity_ids: tuple[str, ...],
+        required_spacing: float,
+        center: Point,
+        maximum_radius: float,
+    ) -> None:
+        movement_system.relax_unit_spacing(
+            self,
+            entity_ids,
+            required_spacing,
+            center,
+            maximum_radius,
+        )
 
     def _separate_overlapping_colliders(
         self,
@@ -940,7 +979,16 @@ class Simulation:
         self._movement_blocked.discard(entity.entity_id)
         self._blocked_ticks.pop(entity.entity_id, None)
         self._reset_movement_liveness(entity, clear_stop=True)
-        entity.path = list(path.waypoints)
+        entity.path = list(
+            movement_system.simplify_waypoints(
+                self,
+                entity.position,
+                path.waypoints,
+                path.cost,
+            )
+            if source in {"human", "combat"}
+            else path.waypoints
+        )
         entity.path_cost = path.cost
         entity.move_target = destination if entity.path else None
         entity.state = state if entity.path else self._state_for_assignment(entity.entity_id)
@@ -1126,7 +1174,11 @@ class Simulation:
             # Keep settled formations outside the solver's 0.03 contact-pressure margin. Exact
             # diameter packing makes a stationary 1,000-unit formation pay dense collision work
             # forever even though every destination is unique.
-            packing_radius = unit_radius + 0.02
+            packing_radius = (
+                max(unit_radius + 0.02, SETTLED_FORMATION_SPACING / 2)
+                if unit_radius <= 0.31
+                else unit_radius + 0.02
+            )
             horizontal_spacing = packing_radius * 2
             vertical_spacing = sqrt(3) * packing_radius
             minimum_row = floor(-center.y / vertical_spacing) - 1
@@ -1136,7 +1188,7 @@ class Simulation:
                 y = center.y + row * vertical_spacing
                 if not 0 <= y < self.game_map.height:
                     continue
-                row_offset = unit_radius if row % 2 else 0.0
+                row_offset = packing_radius if row % 2 else 0.0
                 minimum_column = floor((-center.x - row_offset) / horizontal_spacing) - 1
                 maximum_column = (
                     ceil((self.game_map.width - center.x - row_offset) / horizontal_spacing) + 1

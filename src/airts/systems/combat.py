@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import isclose
+from math import ceil, floor, isclose
 from typing import TYPE_CHECKING
 
 from airts.automations import AutomationKind
@@ -24,6 +24,11 @@ def drive_combat(simulation: Simulation) -> None:
     positions_by_owner: dict[str, dict[str, Point]] = {}
     for entity_id, entity in simulation.entities.items():
         positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = entity.selection_position
+    if len(positions_by_owner) <= 1:
+        for entity in simulation.entities.values():
+            if entity.attack_cooldown > 0:
+                entity.attack_cooldown -= 1
+        return
     owner_indexes = {
         owner_id: SpatialIndex(positions) for owner_id, positions in positions_by_owner.items()
     }
@@ -33,7 +38,25 @@ def drive_combat(simulation: Simulation) -> None:
         )
         for owner_id in owner_indexes
     }
-    for entity_id in sorted(tuple(simulation.entities)):
+    owner_bounds = {
+        owner_id: (
+            min(point.x for point in positions.values()),
+            min(point.y for point in positions.values()),
+            max(point.x for point in positions.values()),
+            max(point.y for point in positions.values()),
+        )
+        for owner_id, positions in positions_by_owner.items()
+    }
+    hostile_bounds = {
+        owner_id: tuple(
+            owner_bounds[other_id] for other_id in sorted(owner_bounds) if other_id != owner_id
+        )
+        for owner_id in owner_bounds
+    }
+    # Persistence deliberately serializes entity mappings by stable ID.  Combat
+    # therefore has to use the same order as a freshly loaded simulation rather
+    # than depending on the construction history of the live dict.
+    for entity_id in sorted(simulation.entities):
         attacker = simulation.entities.get(entity_id)
         if attacker is None or attacker.kind.profile.attack_damage <= 0:
             continue
@@ -51,25 +74,26 @@ def drive_combat(simulation: Simulation) -> None:
             ordered_target = None
             attacker.attack_target_id = None
         attack_range = attacker.kind.profile.attack_range
-        ordered_target_distance = (
-            attacker.selection_position.distance_to(ordered_target.selection_position)
+        attack_range_squared = attack_range * attack_range
+        ordered_target_distance_squared = (
+            _squared_distance(attacker.selection_position, ordered_target.selection_position)
             if ordered_target is not None
             else None
         )
         if (
             ordered_target is not None
             and not attacker.pursue_target
-            and ordered_target_distance is not None
-            and ordered_target_distance > attack_range
+            and ordered_target_distance_squared is not None
+            and ordered_target_distance_squared > attack_range_squared
         ):
             ordered_target = None
             attacker.attack_target_id = None
-            ordered_target_distance = None
+            ordered_target_distance_squared = None
         if (
             attacker.pursue_target
             and ordered_target is not None
-            and ordered_target_distance is not None
-            and ordered_target_distance <= attack_range
+            and ordered_target_distance_squared is not None
+            and ordered_target_distance_squared <= attack_range_squared
             and (attacker.path or attacker.move_target is not None)
         ):
             attacker.path.clear()
@@ -80,8 +104,8 @@ def drive_combat(simulation: Simulation) -> None:
             attacker.pursue_target
             and ordered_target is not None
             and not attacker.path
-            and ordered_target_distance is not None
-            and ordered_target_distance > attack_range
+            and ordered_target_distance_squared is not None
+            and ordered_target_distance_squared > attack_range_squared
             and simulation.game_map.cell_for(attacker.position)
             not in {
                 simulation.game_map.cell_for(point)
@@ -90,13 +114,23 @@ def drive_combat(simulation: Simulation) -> None:
             and simulation._routes.claim_combat_route()
         ):
             chase_target(simulation, attacker, ordered_target)
-        firing_target = (
-            ordered_target
-            if ordered_target is not None
-            and ordered_target_distance is not None
-            and ordered_target_distance <= attack_range
-            else nearest_enemy_in_range(simulation, attacker, hostile_indexes[attacker.owner_id])
-        )
+        firing_target: Entity | None
+        if (
+            ordered_target is not None
+            and ordered_target_distance_squared is not None
+            and ordered_target_distance_squared <= attack_range_squared
+        ):
+            firing_target = ordered_target
+        elif any(
+            _squared_distance_to_bounds(attacker.selection_position, bounds)
+            <= attack_range * attack_range
+            for bounds in hostile_bounds[attacker.owner_id]
+        ):
+            firing_target = nearest_enemy_in_range(
+                simulation, attacker, hostile_indexes[attacker.owner_id]
+            )
+        else:
+            firing_target = None
         if firing_target is None:
             continue
         if not attacker.pursue_target:
@@ -250,6 +284,16 @@ def _squared_distance(first: Point, second: Point) -> float:
     return offset_x * offset_x + offset_y * offset_y
 
 
+def _squared_distance_to_bounds(
+    point: Point,
+    bounds: tuple[float, float, float, float],
+) -> float:
+    minimum_x, minimum_y, maximum_x, maximum_y = bounds
+    offset_x = max(minimum_x - point.x, 0.0, point.x - maximum_x)
+    offset_y = max(minimum_y - point.y, 0.0, point.y - maximum_y)
+    return offset_x * offset_x + offset_y * offset_y
+
+
 def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> None:
     """Route an ordered attacker to a valid interaction point."""
 
@@ -258,9 +302,33 @@ def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> No
     try:
         point, path = simulation._routes.shared_path_to_any(
             attacker.position,
-            simulation._interaction_points(target),
+            _firing_approach_points(simulation, attacker, target),
             simulation._building_cells(),
         )
     except PathfindingError:
         return
     simulation._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
+
+
+def _firing_approach_points(
+    simulation: Simulation,
+    attacker: Entity,
+    target: Entity,
+) -> tuple[Point, ...]:
+    """Return a shared passable firing ring instead of four congested adjacent cells."""
+
+    center = target.selection_position
+    attack_range = attacker.kind.profile.attack_range
+    outer_radius = max(0.5, attack_range - 0.25)
+    inner_radius = max(0.0, outer_radius - 1.0)
+    target_cells = target.occupied_cells
+    points = tuple(
+        Point(x + 0.5, y + 0.5)
+        for y in range(floor(center.y - outer_radius), ceil(center.y + outer_radius) + 1)
+        for x in range(floor(center.x - outer_radius), ceil(center.x + outer_radius) + 1)
+        if simulation.game_map.contains_cell((x, y))
+        and simulation.game_map.is_cell_passable((x, y))
+        and (x, y) not in target_cells
+        and inner_radius <= Point(x + 0.5, y + 0.5).distance_to(center) <= outer_radius
+    )
+    return points or simulation._interaction_points(target)

@@ -9,6 +9,7 @@ from typing import Any, Protocol, cast
 
 import pygame
 
+from airts.automations import AutomationKind, DefendParameters, target_center
 from airts.geometry import Point
 from airts.simulation import Simulation
 from airts.world.entities import Entity
@@ -19,6 +20,10 @@ type FloatColor = tuple[float, float, float, float]
 
 SHAPE_FLOATS = 16
 LINE_FLOATS = 6
+
+_INITIAL_TERRAIN_BUFFER_BYTES = 512 * 1024
+_INITIAL_SHAPE_BUFFER_BYTES = 256 * 1024
+_INITIAL_LINE_BUFFER_BYTES = 256 * 1024
 
 _GPU_RESOURCE_ATTRIBUTES = (
     "_overlay_texture",
@@ -56,6 +61,21 @@ _ENTITY_COLORS: dict[EntityKind, Color] = {
     EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
 }
 
+_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
+    kind: (color[0] / 255, color[1] / 255, color[2] / 255, 1.0)
+    for kind, color in _ENTITY_COLORS.items()
+}
+_LARGE_SELECTED_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
+    kind: (
+        min(255, color[0] + 45) / 255,
+        min(255, color[1] + 45) / 255,
+        min(255, color[2] + 45) / 255,
+        1.0,
+    )
+    for kind, color in _ENTITY_COLORS.items()
+}
+_ENEMY_FLOAT_COLOR: FloatColor = (218 / 255, 78 / 255, 78 / 255, 1.0)
+
 _PROJECTILE_COLORS: dict[EntityKind, Color] = {
     EntityKind.SCOUT: (120, 225, 255),
     EntityKind.LIGHT_TANK: (255, 232, 105),
@@ -92,6 +112,20 @@ class OpenGLRenderState(Protocol):
     def _opengl_overlay_key(self) -> tuple[object, ...]: ...
 
     def _draw_opengl_overlay(self, screen: pygame.Surface) -> None: ...
+
+    def _draw_opengl_partial_overlay(
+        self,
+        screen: pygame.Surface,
+        regions: tuple[pygame.Rect, ...],
+    ) -> None: ...
+
+    def _opengl_partial_overlay_regions(
+        self,
+        previous: tuple[object, ...],
+        current: tuple[object, ...],
+    ) -> tuple[pygame.Rect, ...] | None: ...
+
+    def _opengl_dynamic_overlay_regions(self) -> tuple[pygame.Rect, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +186,7 @@ class OpenGLFrameBuilder:
         self._terrain_shape_count = 0
         self._frame_key: tuple[object, ...] | None = None
         self._frame: OpenGLFrame | None = None
+        self._selection_key: frozenset[str] | None = None
 
     def build(
         self,
@@ -183,6 +218,10 @@ class OpenGLFrameBuilder:
                 tile_size,
             )
 
+        selection_key = self._selection_key
+        if selection_key is None or selection_key != app.selected_entities:
+            selection_key = frozenset(app.selected_entities)
+            self._selection_key = selection_key
         frame_key: tuple[object, ...] = (
             id(simulation),
             simulation.tick,
@@ -190,7 +229,7 @@ class OpenGLFrameBuilder:
             framebuffer_size,
             origin,
             tile_size,
-            frozenset(app.selected_entities),
+            selection_key,
             app.inspected_entity_id,
             len(simulation.entities),
         )
@@ -289,18 +328,19 @@ class OpenGLFrameBuilder:
         unit_count = 0
         building_count = 0
         selected_unit_count = 0
-        selected_bounds: tuple[float, float, float, float] | None = None
-        previous_selected_bounds: tuple[float, float, float, float] | None = None
 
         for entity_id, entity in simulation.entities.items():
             selected = entity_id in selected_entities
-            color = _ENTITY_COLORS[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
-            if selected and large_selection and entity.category is EntityCategory.UNIT:
-                color = (
-                    min(255, color[0] + 45),
-                    min(255, color[1] + 45),
-                    min(255, color[2] + 45),
-                )
+            color = (
+                _LARGE_SELECTED_ENTITY_FLOAT_COLORS[entity.kind]
+                if entity.owner_id == "player"
+                and selected
+                and large_selection
+                and entity.category is EntityCategory.UNIT
+                else _ENTITY_FLOAT_COLORS[entity.kind]
+                if entity.owner_id == "player"
+                else _ENEMY_FLOAT_COLOR
+            )
             if entity.category is EntityCategory.BUILDING:
                 width, height = entity.kind.profile.footprint
                 half_width = width * tile_size / 2
@@ -314,7 +354,7 @@ class OpenGLFrameBuilder:
                     values,
                     center=center,
                     half_size=(half_width, half_height),
-                    color=_float_color(color),
+                    color=color,
                     circle=False,
                     outline_width=2.0,
                     outline_color=_float_color((35, 42, 49)),
@@ -345,7 +385,7 @@ class OpenGLFrameBuilder:
                     center=center,
                     previous_center=previous_center,
                     half_size=(unit_radius, unit_radius),
-                    color=_float_color(color),
+                    color=color,
                     circle=True,
                 )
                 if (selected and not large_selection) or (
@@ -364,29 +404,8 @@ class OpenGLFrameBuilder:
                 unit_count += 1
                 if selected:
                     selected_unit_count += 1
-                    bounds = (
-                        center[0] - unit_radius,
-                        center[1] - unit_radius,
-                        center[0] + unit_radius,
-                        center[1] + unit_radius,
-                    )
-                    selected_bounds = _union_bounds(selected_bounds, bounds)
-                    previous_bounds = (
-                        previous_center[0] - unit_radius,
-                        previous_center[1] - unit_radius,
-                        previous_center[0] + unit_radius,
-                        previous_center[1] + unit_radius,
-                    )
-                    previous_selected_bounds = _union_bounds(
-                        previous_selected_bounds,
-                        previous_bounds,
-                    )
 
-            if (
-                show_full_health_bars
-                or entity.health < entity.kind.profile.max_health
-                or entity_id == app.inspected_entity_id
-            ):
+            if show_full_health_bars or entity_id == app.inspected_entity_id:
                 maximum_width = max(12.0, tile_size * 1.4)
                 health_width = maximum_width * entity.health / entity.kind.profile.max_health
                 health_y = center[1] - 10.5
@@ -409,27 +428,6 @@ class OpenGLFrameBuilder:
                     color=_float_color((74, 218, 111)),
                     circle=False,
                 )
-
-        if large_selection and selected_bounds is not None:
-            left, top, right, bottom = selected_bounds
-            previous_group_center = (
-                (
-                    (previous_selected_bounds[0] + previous_selected_bounds[2]) / 2,
-                    (previous_selected_bounds[1] + previous_selected_bounds[3]) / 2,
-                )
-                if previous_selected_bounds is not None
-                else ((left + right) / 2, (top + bottom) / 2)
-            )
-            _append_shape(
-                values,
-                center=((left + right) / 2, (top + bottom) / 2),
-                previous_center=previous_group_center,
-                half_size=((right - left) / 2 + 3, (bottom - top) / 2 + 3),
-                color=(0.0, 0.0, 0.0, 0.0),
-                circle=False,
-                outline_width=1.0,
-                outline_color=_float_color((245, 245, 245)),
-            )
 
         inspected = simulation.entities.get(app.inspected_entity_id or "")
         interaction_range = (
@@ -464,6 +462,40 @@ class OpenGLFrameBuilder:
                 outline_color=_float_color(
                     (105, 232, 172) if inspected.kind is EntityKind.BUILDER else (255, 218, 100)
                 ),
+            )
+
+        for automation in simulation.live_automations:
+            if (
+                automation.kind is not AutomationKind.DEFEND
+                or not isinstance(automation.parameters, DefendParameters)
+                or not automation.parameters.gathering_point
+                or not automation.entity_ids
+            ):
+                continue
+            parameters = automation.parameters
+            world_center = target_center(parameters.target)
+            center = (
+                origin_x + world_center.x * tile_size,
+                origin_y + world_center.y * tile_size,
+            )
+            radius = max(8.0, (parameters.assembly_radius + 0.8) * tile_size)
+            _append_shape(
+                values,
+                center=center,
+                half_size=(radius, radius),
+                color=(92 / 255, 177 / 255, 1.0, 20 / 255),
+                circle=True,
+                outline_width=2.0,
+                outline_color=(135 / 255, 205 / 255, 1.0, 72 / 255),
+            )
+            _append_shape(
+                values,
+                center=center,
+                half_size=(max(1.0, radius - 5.0), max(1.0, radius - 5.0)),
+                color=(0.0, 0.0, 0.0, 0.0),
+                circle=True,
+                outline_width=2.0,
+                outline_color=(190 / 255, 230 / 255, 1.0, 35 / 255),
             )
 
         return (
@@ -601,6 +633,8 @@ class OpenGLRenderer:
         self._uploaded_frame: OpenGLFrame | None = None
         self._uploaded_terrain: bytes | None = None
         self._overlay_key: tuple[object, ...] | None = None
+        self._overlay_tick: int | None = None
+        self._overlay_regions: tuple[pygame.Rect, ...] = ()
         self._overlay_surface: pygame.Surface | None = None
         self._overlay_texture: Any = None
         self._overlay_vertex_array: Any = None
@@ -631,9 +665,18 @@ class OpenGLRenderer:
             self._quad_buffer = context.buffer(
                 array("f", (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)).tobytes()
             )
-            self._terrain_buffer = context.buffer(reserve=4, dynamic=True)
-            self._shape_buffer = context.buffer(reserve=4, dynamic=True)
-            self._line_buffer = context.buffer(reserve=4, dynamic=True)
+            self._terrain_buffer = context.buffer(
+                reserve=_INITIAL_TERRAIN_BUFFER_BYTES,
+                dynamic=True,
+            )
+            self._shape_buffer = context.buffer(
+                reserve=_INITIAL_SHAPE_BUFFER_BYTES,
+                dynamic=True,
+            )
+            self._line_buffer = context.buffer(
+                reserve=_INITIAL_LINE_BUFFER_BYTES,
+                dynamic=True,
+            )
             self._overlay_quad_buffer = context.buffer(
                 array(
                     "f",
@@ -807,6 +850,8 @@ class OpenGLRenderer:
 
         self._release_gpu_resources()
         self._overlay_surface = None
+        self._overlay_tick = None
+        self._overlay_regions = ()
         self._uploaded_frame = None
         self._uploaded_terrain = None
 
@@ -843,13 +888,34 @@ class OpenGLRenderer:
             self._overlay_texture.repeat_x = False
             self._overlay_texture.repeat_y = False
             self._overlay_key = None
-        if overlay_key != self._overlay_key:
+            self._overlay_tick = None
+        defer_tick_refresh = (
+            self._overlay_key is not None
+            and self._overlay_tick != frame.tick
+            and app.render_alpha <= 0.0
+        )
+        if overlay_key != self._overlay_key and not defer_tick_refresh:
             assert self._overlay_surface is not None
             assert self._overlay_texture is not None
-            self._overlay_surface.fill((0, 0, 0, 0))
-            app._draw_opengl_overlay(self._overlay_surface)
-            self._overlay_texture.write(pygame.image.tobytes(self._overlay_surface, "RGBA", True))
+            partial_regions = _partial_overlay_regions(app, self._overlay_key, overlay_key)
+            if partial_regions is not None:
+                dirty_regions = _merge_overlay_regions((*self._overlay_regions, *partial_regions))
+                app._draw_opengl_partial_overlay(self._overlay_surface, dirty_regions)
+                _write_overlay_regions(
+                    self._overlay_texture,
+                    self._overlay_surface,
+                    dirty_regions,
+                    frame.framebuffer_size,
+                )
+            else:
+                self._overlay_surface.fill((0, 0, 0, 0))
+                app._draw_opengl_overlay(self._overlay_surface)
+                self._overlay_texture.write(
+                    pygame.image.tobytes(self._overlay_surface, "RGBA", True)
+                )
+            self._overlay_regions = app._opengl_dynamic_overlay_regions()
             self._overlay_key = overlay_key
+            self._overlay_tick = frame.tick
         assert self._overlay_texture is not None
         self._overlay_texture.use(location=0)
         self._overlay_vertex_array.render(mode=self._module.TRIANGLE_STRIP, vertices=4)
@@ -866,9 +932,67 @@ def _load_moderngl() -> Any:
 
 
 def _replace_buffer(buffer: Any, data: bytes) -> None:
-    buffer.orphan(max(4, len(data)))
+    required_size = max(4, len(data))
+    current_size = buffer.size
+    if not isinstance(current_size, int) or current_size < required_size:
+        current_size = current_size if isinstance(current_size, int) else 4
+        buffer.orphan(max(required_size, current_size * 2, 4_096))
     if data:
         buffer.write(data)
+
+
+def _partial_overlay_regions(
+    app: OpenGLRenderState,
+    previous: tuple[object, ...] | None,
+    current: tuple[object, ...],
+) -> tuple[pygame.Rect, ...] | None:
+    if previous is None or len(previous) != 2 or len(current) != 2:
+        return None
+    previous_key = previous[1]
+    current_key = current[1]
+    if not isinstance(previous_key, tuple) or not isinstance(current_key, tuple):
+        return None
+    return app._opengl_partial_overlay_regions(previous_key, current_key)
+
+
+def _merge_overlay_regions(regions: tuple[pygame.Rect, ...]) -> tuple[pygame.Rect, ...]:
+    """Coalesce overlapping dirty rectangles before CPU conversion and GPU upload."""
+
+    merged: list[pygame.Rect] = []
+    for region in regions:
+        candidate = region.copy()
+        index = 0
+        while index < len(merged):
+            if candidate.colliderect(merged[index]) or candidate.contains(merged[index]):
+                candidate.union_ip(merged.pop(index))
+                index = 0
+            else:
+                index += 1
+        merged.append(candidate)
+    return tuple(merged)
+
+
+def _write_overlay_regions(
+    texture: Any,
+    surface: pygame.Surface,
+    regions: tuple[pygame.Rect, ...],
+    framebuffer_size: tuple[int, int],
+) -> None:
+    bounds = surface.get_rect()
+    for region in regions:
+        clipped = region.clip(bounds)
+        if not clipped.width or not clipped.height:
+            continue
+        pixels = pygame.image.tobytes(surface.subsurface(clipped), "RGBA", True)
+        texture.write(
+            pixels,
+            viewport=(
+                clipped.x,
+                framebuffer_size[1] - clipped.bottom,
+                clipped.width,
+                clipped.height,
+            ),
+        )
 
 
 def _float_color(color: Color) -> FloatColor:
@@ -910,20 +1034,6 @@ def _append_line_vertex(
     color: FloatColor,
 ) -> None:
     values.extend((x, y, *color))
-
-
-def _union_bounds(
-    current: tuple[float, float, float, float] | None,
-    addition: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    if current is None:
-        return addition
-    return (
-        min(current[0], addition[0]),
-        min(current[1], addition[1]),
-        max(current[2], addition[2]),
-        max(current[3], addition[3]),
-    )
 
 
 _SHAPE_VERTEX_SHADER = """

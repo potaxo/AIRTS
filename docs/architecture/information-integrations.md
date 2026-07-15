@@ -26,6 +26,11 @@ Last-known information should include:
 
 The model must not receive hidden enemy locations during normal evaluation.
 
+The implemented large-scene visibility update remains exact: sources with the same owner, cell,
+and sight radius share cached row masks, and those masks are unioned into authoritative visible and
+explored bit sets. Grouping removes repeated raster work without approximating sight geometry or
+changing save, replay, or information-authority semantics.
+
 ---
 
 # 25. Simulation-Time Model
@@ -71,7 +76,8 @@ native 4K terrain, analytic antialiased unit circles, buildings, health feedback
 and bounded route lines instead of an enlarged low-resolution image. Terrain and grid instances
 are uploaded only when the map transform changes. Entity instances carry previous and current
 authoritative centers and route vertices are rebuilt at most once per simulation tick or relevant
-UI change. Those buffers remain resident for intervening render frames. A vertex-shader uniform
+UI change. Those buffers begin with bounded reusable terrain, shape, and line capacities, grow only
+for a larger scene, and remain resident for intervening render frames. A vertex-shader uniform
 interpolates unit, health, selection, range, and projectile centers between fixed ticks without a
 per-render CPU rebuild or simulation mutation. Interpolation adds up to one fixed tick of visual
 latency and never feeds presentation state back into geometry, combat, replay, or commands. The
@@ -81,8 +87,10 @@ line draw.
 Pygame font output and infrequent interaction feedback are rasterized into a cached transparent
 native-resolution texture and composited by OpenGL. Per-frame FPS samples do not invalidate this
 full-frame texture; status-only refreshes are coalesced to one update per three simulation ticks.
-Explicit interaction changes remain immediate. Projectile bodies, trajectories, and retained
-traces are packed into the native GPU shape and line batches, so combat feedback updates with the
+Opaque panel regions and transient construction regions are redrawn and uploaded independently,
+and their tick-driven upload is scheduled on the first interpolation frame after simulation work.
+Explicit interaction changes remain immediate. Projectile bodies, trajectories, retained traces,
+and assembly glows are packed into the native GPU shape and line batches, so combat feedback updates with the
 world frame without software rasterization or a full RGBA overlay upload. This does not make the
 application "GPU only": the simulation, commands, input, frame-data preparation, and font
 rasterization remain CPU work, while the GPU owns scene rasterization, antialiasing, projectile
@@ -114,15 +122,17 @@ Entity hit testing uses the visible occupied footprint for buildings rather than
 point. Large focus-fire groups share deterministic reverse navigation fields to the target's valid
 interaction perimeter so selecting a building does not trigger one full search per attacker.
 When more than 128 units are selected, the renderer preserves selection feedback with a brighter
-unit color and one group outline, omits redundant full-health bars, and draws at most 32 evenly
-sampled authoritative routes. Damaged-unit and inspected-unit health bars remain visible. An
+unit color and an aggregate panel readout, omits per-unit outlines and redundant health bars, and
+draws at most 32 evenly sampled authoritative routes. The inspected-unit health bar remains visible. An
 inspected route is retained in the representative set. This is visual level of detail only: every
 selected unit remains selected, simulated, collision-enabled, visible, and owned by its command.
-For large selections, unit and building screen transforms, health-bar geometry, group bounds, and
-representative route transforms are rebuilt at most once per simulation tick or relevant UI-state
-change. Normal buildings and damaged or inspected health feedback remain part of every complete
-frame. The explicit software backend retains its scaled-terrain, cached-sprite, and batched-blit
-optimizations as an independent regression and compatibility path.
+For large selections, unit and building screen transforms and representative route transforms are
+rebuilt at most once per simulation tick or relevant UI-state change. Normal buildings and
+inspected health feedback remain part of every complete frame. The explicit software backend
+retains a complete composed Surface, copies it for unchanged presentation calls, and reconstructs
+a changed tick on the following presentation call. A second tick before that call forces an
+immediate catch-up. This bounded one-frame staging is presentation-only and never changes simulation
+or command timing.
 
 It should eventually display:
 

@@ -30,6 +30,8 @@ class OccupancyGrid:
     ) -> None:
         if entity_id not in self._entity_cells:
             raise OccupancyError(f"entity is not placed: {entity_id}")
+        if self._entity_cells[entity_id] == cells:
+            return
         self._validate_available(entity_id, cells, allowed_conflicts)
         self.remove(entity_id)
         self._set_cells(entity_id, cells)
@@ -70,7 +72,11 @@ class OccupancyGrid:
         for cell in cells:
             if not (0 <= cell[0] < self.width and 0 <= cell[1] < self.height):
                 raise OccupancyError(f"cell outside occupancy grid: {cell}")
-            conflicts = self._cells.get(cell, set()).difference({entity_id}, allowed_conflicts)
+            conflicts = tuple(
+                occupant_id
+                for occupant_id in self._cells.get(cell, ())
+                if occupant_id != entity_id and occupant_id not in allowed_conflicts
+            )
             if conflicts:
                 conflict = min(conflicts)
                 raise OccupancyError(f"cell {cell} is occupied by {conflict}")

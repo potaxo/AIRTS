@@ -20,6 +20,7 @@ from airts.events import EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget
 from airts.navigation.movement import collision_radius
 from airts.navigation.pathfinding import PathfindingError
+from airts.systems.command_handlers import coordinate_shared_defend_stations
 from airts.validation import (
     ValidationFailure,
     ValidationPhase,
@@ -458,6 +459,7 @@ def assign_produced_defender(
         )
         simulation._activate(defend, (entity_id,))
         parameters.defend_automation_id = defend.automation_id
+        coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     if entity_id not in defend.entity_ids:
         defend.entity_ids.append(entity_id)
@@ -485,9 +487,11 @@ def assign_produced_defender(
         for defender_id in defend.entity_ids:
             simulation._assign(defender_id, defend)
             simulation._initialize_runtime_entity(defend, defender_id)
+        coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     simulation._assign(entity_id, defend)
     simulation._initialize_runtime_entity(defend, entity_id)
+    coordinate_shared_defend_stations(simulation, target, production.owner_id)
 
 
 def attach_production_defense(
@@ -537,6 +541,7 @@ def attach_production_defense(
         for entity_id in produced_ids:
             simulation._assign(entity_id, defend)
             simulation._initialize_runtime_entity(defend, entity_id)
+        coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     parameters.defend_automation_id = None
     for entity_id in produced_ids:

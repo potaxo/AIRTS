@@ -346,6 +346,16 @@ class RoutingService:
             cell_penalties=cell_penalties,
         )
 
+    def local_path(
+        self,
+        start: Point,
+        goal: Point,
+        blocked: frozenset[Cell] = frozenset(),
+    ) -> PathResult:
+        """Use a cheap deterministic clear L-corridor before falling back to A*."""
+
+        return find_local_path(self.game_map, start, goal, blocked)
+
     def clear(self) -> None:
         self._shared.clear()
 
@@ -409,6 +419,68 @@ def find_path(
             priority = cost + _heuristic(neighbor, goal_cell)
             heappush(frontier, (priority, cost, neighbor[1], neighbor[0], neighbor))
     raise PathfindingError("NO_PATH")
+
+
+def find_local_path(
+    game_map: GameMap,
+    start: Point,
+    goal: Point,
+    blocked: frozenset[Cell] = frozenset(),
+) -> PathResult:
+    """Route a short branch without allocating a heap when an axis corridor is clear."""
+
+    if not game_map.is_passable(start):
+        raise PathfindingError("START_NOT_PASSABLE")
+    if not game_map.is_passable(goal):
+        raise PathfindingError("TARGET_NOT_PASSABLE")
+    start_cell = game_map.cell_for(start)
+    goal_cell = game_map.cell_for(goal)
+    effective_blocked = blocked.difference({start_cell})
+    if goal_cell in effective_blocked:
+        raise PathfindingError("TARGET_OCCUPIED")
+    if start_cell == goal_cell:
+        waypoints: tuple[Point, ...] = () if start == goal else (goal,)
+        return PathResult((start_cell,), waypoints, 0.0)
+
+    candidates: list[tuple[float, tuple[Cell, ...]]] = []
+    for horizontal_first in (True, False):
+        cells = _axis_cells(start_cell, goal_cell, horizontal_first=horizontal_first)
+        if any(
+            cell in effective_blocked or not game_map.is_cell_passable(cell) for cell in cells[1:]
+        ):
+            continue
+        cost = sum(game_map.terrain_at_cell(cell).movement_cost for cell in cells[1:])
+        candidates.append((cost, cells))
+    if not candidates:
+        return find_path(game_map, start, goal, blocked)
+    cost, cells = min(candidates, key=lambda item: (item[0], item[1]))
+    waypoints = tuple(
+        goal if cell == goal_cell else Point(cell[0] + 0.5, cell[1] + 0.5) for cell in cells[1:]
+    )
+    return PathResult(cells, waypoints, cost)
+
+
+def _axis_cells(
+    start: Cell,
+    goal: Cell,
+    *,
+    horizontal_first: bool,
+) -> tuple[Cell, ...]:
+    x, y = start
+    cells = [start]
+    axes: tuple[tuple[int, bool], ...] = ((goal[0], True), (goal[1], False))
+    if not horizontal_first:
+        axes = tuple(reversed(axes))
+    for target, horizontal in axes:
+        current = x if horizontal else y
+        step = 1 if target > current else -1
+        for value in range(current + step, target + step, step):
+            if horizontal:
+                x = value
+            else:
+                y = value
+            cells.append((x, y))
+    return tuple(cells)
 
 
 def _heuristic(current: Cell, goal: Cell) -> float:

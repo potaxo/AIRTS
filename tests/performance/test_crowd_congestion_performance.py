@@ -6,7 +6,7 @@ from statistics import median
 from time import perf_counter
 
 from airts.automations import DefendParameters
-from airts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand
+from airts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand, MoveCommand
 from airts.geometry import Point, rectangle_region
 from airts.map_model import load_map_data
 from airts.simulation import Simulation
@@ -177,6 +177,57 @@ def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
     simulation._skip_crowded_waypoints(mover)
 
     assert mover.path[0] == Point(57.5, 35.5)
+
+
+def test_large_scout_move_flows_past_a_stationary_enemy_heavy_without_jitter() -> None:
+    scout_count = 152
+    scout_ids = tuple(f"scout_{index:04d}" for index in range(scout_count))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "stationary_heavy_anchor",
+                "name": "Stationary Heavy Anchor",
+                "width": 44,
+                "height": 44,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    *(
+                        {
+                            "id": entity_id,
+                            "kind": "scout",
+                            "owner": "player",
+                            "position": [8.5 + index % 19, 26.5 + index // 19],
+                        }
+                        for index, entity_id in enumerate(scout_ids)
+                    ),
+                    {
+                        "id": "stationary_heavy",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [17.5, 20.5],
+                    },
+                ],
+            }
+        ),
+        random_seed=91,
+    )
+    simulation.entities["stationary_heavy"].health = 1_000_000
+    starts = {entity_id: simulation.entities[entity_id].position for entity_id in scout_ids}
+    heavy_start = simulation.entities["stationary_heavy"].position
+
+    assert simulation.execute(MoveCommand(scout_ids, Point(17.5, 4.5))).accepted
+    for _ in range(50):
+        simulation.advance()
+        assert simulation.entities["stationary_heavy"].position == heavy_start
+
+    progressed = sum(
+        starts[entity_id].y - simulation.entities[entity_id].position.y >= 8.0
+        for entity_id in scout_ids
+        if entity_id in simulation.entities
+    )
+    assert progressed >= 145, (
+        f"only {progressed} of {scout_count} scouts made northward progress around the anchor"
+    )
 
 
 def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks() -> None:
