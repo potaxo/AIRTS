@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from airts.geometry import Point
-from airts.map_model import (
+from airts.world.map_model import (
     EntityCategory,
     MapValidationError,
     Terrain,

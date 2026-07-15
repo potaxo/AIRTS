@@ -11,17 +11,17 @@ import pygame
 import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.app import AirtsApp
 from airts.commands import MoveCommand
 from airts.geometry import Point
-from airts.map_model import load_map_data
-from airts.opengl_renderer import (
+from airts.presentation.app import AirtsApp
+from airts.presentation.opengl_renderer import (
     SHAPE_FLOATS,
     OpenGLFrameBuilder,
     OpenGLRenderer,
     OpenGLRendererError,
 )
 from airts.simulation import Simulation
+from airts.world.map_model import load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000
@@ -156,20 +156,20 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer() -> None:
 
     with (
         patch.object(app, "_configure_opengl_video_backend"),
-        patch("airts.app.pygame.display.init"),
-        patch("airts.app.pygame.font.init"),
-        patch("airts.app.pygame.display.gl_set_attribute") as gl_set_attribute,
-        patch("airts.app.pygame.display.set_mode", return_value=Mock()) as set_mode,
-        patch("airts.app.OpenGLRenderer.from_active_context", return_value=renderer),
-        patch("airts.app.pygame.display.set_caption"),
-        patch("airts.app.pygame.font.Font", side_effect=(Mock(), Mock())),
-        patch("airts.app.pygame.time.Clock", return_value=clock),
-        patch("airts.app.pygame.event.get", return_value=()),
-        patch("airts.app.pygame.event.clear"),
-        patch("airts.app.pygame.font.quit"),
-        patch("airts.app.pygame.display.quit"),
-        patch("airts.app.pygame.quit"),
-        patch("airts.app.pygame.display.flip") as flip,
+        patch("airts.presentation.app.pygame.display.init"),
+        patch("airts.presentation.app.pygame.font.init"),
+        patch("airts.presentation.app.pygame.display.gl_set_attribute") as gl_set_attribute,
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=Mock()) as set_mode,
+        patch("airts.presentation.app.OpenGLRenderer.from_active_context", return_value=renderer),
+        patch("airts.presentation.app.pygame.display.set_caption"),
+        patch("airts.presentation.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.presentation.app.pygame.time.Clock", return_value=clock),
+        patch("airts.presentation.app.pygame.event.get", return_value=()),
+        patch("airts.presentation.app.pygame.event.clear"),
+        patch("airts.presentation.app.pygame.font.quit"),
+        patch("airts.presentation.app.pygame.display.quit"),
+        patch("airts.presentation.app.pygame.quit"),
+        patch("airts.presentation.app.pygame.display.flip") as flip,
         patch.object(app, "_draw") as software_draw,
     ):
         app.run(max_frames=1)
@@ -190,19 +190,19 @@ def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back() ->
     app = AirtsApp(_head_on_scout_simulation()[0])
     with (
         patch.object(app, "_configure_opengl_video_backend"),
-        patch("airts.app.pygame.display.init"),
-        patch("airts.app.pygame.font.init"),
-        patch("airts.app.pygame.display.gl_set_attribute"),
-        patch("airts.app.pygame.display.set_mode", return_value=Mock()),
+        patch("airts.presentation.app.pygame.display.init"),
+        patch("airts.presentation.app.pygame.font.init"),
+        patch("airts.presentation.app.pygame.display.gl_set_attribute"),
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=Mock()),
         patch(
-            "airts.app.OpenGLRenderer.from_active_context",
+            "airts.presentation.app.OpenGLRenderer.from_active_context",
             side_effect=OpenGLRendererError("OpenGL 3.3 context failed"),
         ),
-        patch("airts.app.pygame.event.clear"),
-        patch("airts.app.pygame.font.quit"),
-        patch("airts.app.pygame.display.quit"),
-        patch("airts.app.pygame.quit"),
-        patch("airts.app.pygame.display.flip") as flip,
+        patch("airts.presentation.app.pygame.event.clear"),
+        patch("airts.presentation.app.pygame.font.quit"),
+        patch("airts.presentation.app.pygame.display.quit"),
+        patch("airts.presentation.app.pygame.quit"),
+        patch("airts.presentation.app.pygame.display.flip") as flip,
         patch.object(app, "_draw") as software_draw,
     ):
         with pytest.raises(OpenGLRendererError, match="OpenGL 3.3 context failed"):
@@ -220,7 +220,7 @@ def test_standalone_opengl_context_uses_the_platform_backend_by_default() -> Non
     module.create_context.return_value = context
 
     with (
-        patch("airts.opengl_renderer._load_moderngl", return_value=module),
+        patch("airts.presentation.opengl_renderer._load_moderngl", return_value=module),
         patch.object(OpenGLRenderer, "__init__", return_value=None) as initialize,
     ):
         renderer = OpenGLRenderer.from_standalone_context()

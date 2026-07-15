@@ -248,8 +248,9 @@ command forms a firing envelope instead of converging on four neighboring cells.
 still opportunistically fire at enemies in range regardless of their current movement automation.
 Large patrol groups traverse route vertices in the same direction with deterministic collision-safe
 formation spacing rather than assigning members to opposing flows. Unit occupancy must defer
-unit-unit exclusion to physical colliders; stationary units remain pushable and may yield laterally
-when forward pressure is obstructed.
+unit-unit exclusion to physical colliders. Ordinary idle units may yield laterally to same-owner
+ordered traffic, while hostile idle units, held units, and defenders physically docked at their
+assigned station are exact anchors.
 
 Projectile simulation is independent of presentation scale. Every launched projectile stores its
 current position and last known target destination. It tracks a live hostile target, but target
@@ -263,10 +264,15 @@ one linked military gathering defense without resetting existing defenders. Its 
 are allocated from the selected area's center outward over all reachable map space; there is no
 fixed automation unit cap. The visible gathering glow grows with the occupied radius, and new
 deployment routes are budgeted per tick. Stations use collision-aware dense packing, preserve
-center-first filling, and are recalculated when assigned force size changes so the visible radius
-contracts as well as expands. Defend-line stations are distributed by distance across the full
-polyline rather than concentrated at its vertices. Section 37 defines factory reservation, queue
-priority, and explicit defense-attachment lifecycle.
+center-first filling, and use stable identity retention when assigned force size changes. Every
+live defender keeps its previous unique station while that station remains in the new compact slot
+set; only newcomers or survivors displaced by contraction are deterministically assigned to free
+slots. Same-owner defenses targeting the same geometry perform this retention over their combined
+membership, so separate factories cannot globally turn established defenders around. The visible
+radius therefore contracts as well as expands without station churn on ordinary growth.
+Defend-line stations are distributed by distance across the full polyline rather than concentrated
+at its vertices. Section 37 defines factory reservation, queue priority, and explicit
+defense-attachment lifecycle.
 
 Static patrol, defend, repair, production-rally, and combat routes pass through one deterministic
 routing service. It reuses bounded navigation fields for shared destinations and admits automation
@@ -307,6 +313,13 @@ Homogeneous scout crowds use one drive-pressure pass and two overlap passes beca
 separate its full radius in one correction; mixed or heavier forces retain two and three passes,
 respectively, under the physical-collision and heavy-choke regressions. Static building
 cells are materialized once per movement tick, and local comparisons use squared distances.
+While lattice spacing remains valid, surviving large-force members retain their reservation,
+departed members are removed, and only new members receive nearest safe free slots. Docking makes a
+defender an anchor without flushing unrelated reservations. Topology changes still clear the
+cache, and off-grid physical steps are checked against terrain and building occupancy before state
+changes. A deterministic slice performs reservations for very large open forces, and only planned
+or still-in-transit bodies receive physical updates; logical arrival, speed caps, and canonical
+iteration remain unchanged.
 Contested final-approach rerouting is reserved for actual stationary blockers and shares the same
 stalled-route budget;
 moving head-on traffic continues through physical steering rather than triggering a path search
@@ -324,6 +337,14 @@ Blocked-unit recovery is budgeted across ticks. These optimizations reduce repea
 without adding map-specific bridge or road rules or stopping opposing formations as a group.
 The initial implementation remains single-threaded so identical state and commands cannot diverge
 because of worker scheduling.
+
+Defend station maps are serialized; the traffic lattice is derived and rebuilt deterministically
+after save/load or replay. Stable retention is not a fresh global minimum-distance assignment, so a
+new unit may travel farther to a free station in exchange for preserving established motion and
+bounded work. ADR 0006 owns this tradeoff. Focused contracts cover continuous four-factory growth
+from 296 to 304 unique stations without moving an established station, compact radius contraction,
+a casualty leaving 159 globally unique stations with at most one survivor remap, stale-slot
+building safety, identity continuity, complete 400-unit bridge crossing, overlap, and Real FPS.
 
 Examples:
 

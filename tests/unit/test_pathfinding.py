@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from airts.geometry import Point
-from airts.map_model import Terrain, load_example_map, load_map_data
-from airts.pathfinding import Pathfinder, PathfindingError, RoutingService, find_path
+from airts.navigation.pathfinding import Pathfinder, PathfindingError, RoutingService, find_path
+from airts.world.map_model import Terrain, load_example_map, load_map_data
 
 
 def test_pathfinding_routes_deterministically_through_a_gap() -> None:

@@ -7,8 +7,8 @@ from collections.abc import Callable
 from airts.commands import CreatePatrolCommand, MoveCommand
 from airts.events import EventType
 from airts.geometry import Point, PolylineTarget
-from airts.map_model import GameMap, load_map_data
 from airts.simulation import Simulation
+from airts.world.map_model import GameMap, load_map_data
 
 
 def test_manual_movement_reaches_target_on_fixed_ticks(

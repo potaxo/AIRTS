@@ -5,12 +5,22 @@ from __future__ import annotations
 from statistics import median
 from time import perf_counter
 
+import pygame
+from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
+
 from airts.automations import DefendParameters
-from airts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand, MoveCommand
+from airts.commands import (
+    AttackCommand,
+    CreateDefendCommand,
+    CreatePatrolCommand,
+    CreateProductionCommand,
+    MoveCommand,
+)
 from airts.geometry import Point, rectangle_region
-from airts.map_model import load_map_data
+from airts.navigation.spatial_index import SpatialIndex
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.spatial_index import SpatialIndex
+from airts.world.map_model import EntityKind, load_map_data
 
 LARGE_FORMATION_UNIT_COUNT = 400
 BRIDGE_UNIT_COUNT = 400
@@ -18,6 +28,9 @@ MINIMUM_SETTLED_SCOUT_SPACING = 0.90
 MAXIMUM_MOVING_OVERLAP_FRACTION = 0.10
 SCOUT_CONTACT_DISTANCE = 0.60
 BRIDGE_EAST_BANK_X = 63.5
+DYNAMIC_DEFENSE_DISPLAY_SIZE = (1_920, 1_080)
+DYNAMIC_DEFENSE_FRAME_COUNT = 100
+DYNAMIC_DEFENSE_TARGET_FPS = 100
 
 
 def _crowd_simulation(
@@ -78,6 +91,121 @@ def _crowd_simulation(
     if enemy_position is not None:
         simulation.entities["focus_target"].health = 1_000_000
     return simulation, entity_ids
+
+
+def test_four_continuous_factories_defend_without_stutter_or_deep_overlap() -> None:
+    """Repeated production must not globally rematch, stack, or stall a 300-unit defense."""
+
+    defender_ids = tuple(f"defender_{index:03d}" for index in range(296))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "dynamic_factory_defense_real_fps",
+                "name": "Dynamic Factory Defense Real FPS",
+                "width": 80,
+                "height": 64,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    *(
+                        {
+                            "id": entity_id,
+                            "kind": "scout",
+                            "owner": "player",
+                            "position": [3.5 + index % 20, 5.5 + index // 20],
+                        }
+                        for index, entity_id in enumerate(defender_ids)
+                    ),
+                    *(
+                        {
+                            "id": f"factory_{index}",
+                            "kind": "factory",
+                            "owner": "player",
+                            "position": [3 + index * 6, 50],
+                        }
+                        for index in range(4)
+                    ),
+                ],
+            }
+        ),
+        random_seed=113,
+    )
+    simulation.resources["player"] = 1_000_000
+    target = rectangle_region(Point(40, 8), Point(68, 35))
+    defend_result = simulation.execute(
+        CreateDefendCommand(defender_ids, target, gathering_point=True)
+    )
+    assert defend_result.accepted
+    defend = simulation.automations[defend_result.automation_id or ""]
+    assert isinstance(defend.parameters, DefendParameters)
+    original_stations = dict(defend.parameters.stations)
+    production_results = tuple(
+        simulation.execute(
+            CreateProductionCommand(
+                f"factory_{index}",
+                EntityKind.SCOUT,
+                1,
+                defend_target=target,
+                continuous=True,
+            )
+        )
+        for index in range(4)
+    )
+    assert all(result.accepted for result in production_results)
+
+    pygame.font.init()
+    app = AirtsApp(simulation)
+    app.resize_layout(DYNAMIC_DEFENSE_DISPLAY_SIZE)
+    app._font = pygame.font.Font(None, round(24 * app.ui_scale))
+    app._small_font = pygame.font.Font(None, round(19 * app.ui_scale))
+    app.selected_entities = set(defender_ids)
+    surface = pygame.Surface(DYNAMIC_DEFENSE_DISPLAY_SIZE)
+    app._draw(surface)
+    minimum_separation = float("inf")
+    probe = RealFpsProbe()
+    for frame in range(DYNAMIC_DEFENSE_FRAME_COUNT):
+        if frame % (DYNAMIC_DEFENSE_TARGET_FPS // Simulation.TICKS_PER_SECOND) == 0:
+            simulation.advance()
+            live_ids = tuple(
+                entity_id for entity_id, entity in simulation.entities.items() if entity.is_movable
+            )
+            index = SpatialIndex(
+                {entity_id: simulation.entities[entity_id].position for entity_id in live_ids}
+            )
+            for first_id, second_id in index.candidate_pairs(SCOUT_CONTACT_DISTANCE):
+                minimum_separation = min(
+                    minimum_separation,
+                    simulation.entities[first_id].position.distance_to(
+                        simulation.entities[second_id].position
+                    ),
+                )
+        app._draw(surface)
+        probe.frame_completed()
+
+    shared_stations = {
+        entity_id: parameters.stations[entity_id]
+        for automation in simulation.automations.values()
+        if isinstance((parameters := automation.parameters), DefendParameters)
+        and parameters.target == target
+        for entity_id in automation.entity_ids
+    }
+    assert simulation.tick == Simulation.TICKS_PER_SECOND
+    assert len(shared_stations) == 304
+    assert len(set(shared_stations.values())) == len(shared_stations)
+    assert all(
+        shared_stations[entity_id] == station for entity_id, station in original_stations.items()
+    )
+    assert minimum_separation >= SCOUT_CONTACT_DISTANCE * (1.0 - MAXIMUM_MOVING_OVERLAP_FRACTION)
+    building_cells = simulation._building_cells()
+    assert all(
+        simulation._cells_at(entity, entity.position).isdisjoint(building_cells)
+        for entity in simulation.entities.values()
+        if entity.is_movable
+    )
+    assert_real_fps(
+        probe,
+        DYNAMIC_DEFENSE_TARGET_FPS,
+        "four-factory dynamic 300-scout defense",
+    )
 
 
 def _minimum_unit_separation(

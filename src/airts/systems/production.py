@@ -18,9 +18,9 @@ from airts.automations import (
 from airts.commands import CommandResult, CreateProductionBatchCommand, CreateProductionCommand
 from airts.events import EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget
-from airts.navigation.movement import collision_radius
+from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
-from airts.systems.command_handlers import coordinate_shared_defend_stations
+from airts.systems.automation_runtime import coordinate_shared_defend_stations
 from airts.validation import (
     ValidationFailure,
     ValidationPhase,

@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
-from airts.map_model import GameMap, load_map_data
+from airts.world.map_model import GameMap, load_map_data
 
 
 @pytest.fixture

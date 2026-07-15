@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-from importlib import import_module
 from pathlib import Path
 
 import airts
@@ -32,20 +31,22 @@ PACKAGE_RULES = {
         "airts.simulation",
     },
 }
-LEGACY_EXPORTS = {
-    "app": ("presentation.app", "AirtsApp"),
-    "entities": ("world.entities", "Entity"),
-    "map_model": ("world.map_model", "GameMap"),
-    "movement": ("navigation.movement", "collision_radius"),
-    "occupancy": ("world.occupancy", "OccupancyGrid"),
-    "opengl_renderer": ("presentation.opengl_renderer", "OpenGLRenderer"),
-    "pathfinding": ("navigation.pathfinding", "RoutingService"),
-    "persistence": ("adapters.persistence", "load_simulation"),
-    "projectiles": ("world.projectiles", "Projectile"),
-    "replay": ("adapters.replay", "load_replay"),
-    "spatial_index": ("navigation.spatial_index", "SpatialIndex"),
-    "visibility": ("world.visibility", "VisibilitySystem"),
-}
+REMOVED_TOP_LEVEL_MODULES = frozenset(
+    {
+        "app",
+        "entities",
+        "map_model",
+        "movement",
+        "occupancy",
+        "opengl_renderer",
+        "pathfinding",
+        "persistence",
+        "projectiles",
+        "replay",
+        "spatial_index",
+        "visibility",
+    }
+)
 
 
 def test_simulation_remains_the_public_package_facade() -> None:
@@ -65,24 +66,32 @@ def test_package_dependencies_point_toward_domain_code() -> None:
 
 def test_internal_source_uses_canonical_package_imports() -> None:
     violations: list[str] = []
-    wrappers = {SOURCE / f"{legacy}.py" for legacy in LEGACY_EXPORTS}
-    legacy_imports = {f"airts.{legacy}" for legacy in LEGACY_EXPORTS}
+    removed_imports = {f"airts.{module}" for module in REMOVED_TOP_LEVEL_MODULES}
     for path in sorted(SOURCE.rglob("*.py")):
-        if path in wrappers:
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for module_name, line in _runtime_imports(tree.body):
-            if _matches_any(module_name, legacy_imports):
+            if _matches_any(module_name, removed_imports):
                 violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
 
 
-def test_legacy_import_paths_reexport_canonical_objects() -> None:
-    for legacy, (canonical, export_name) in LEGACY_EXPORTS.items():
-        legacy_module = import_module(f"airts.{legacy}")
-        canonical_module = import_module(f"airts.{canonical}")
-        assert legacy_module is canonical_module
-        assert getattr(legacy_module, export_name) is getattr(canonical_module, export_name)
+def test_removed_top_level_modules_do_not_return() -> None:
+    assert not [
+        module for module in sorted(REMOVED_TOP_LEVEL_MODULES) if (SOURCE / f"{module}.py").exists()
+    ]
+
+
+def test_source_module_names_are_unambiguous() -> None:
+    paths_by_name: dict[str, list[Path]] = {}
+    for path in SOURCE.rglob("*.py"):
+        if path.name != "__init__.py":
+            paths_by_name.setdefault(path.name, []).append(path.relative_to(SOURCE))
+    duplicates = {name: paths for name, paths in sorted(paths_by_name.items()) if len(paths) > 1}
+    assert not duplicates
+
+
+def test_repository_root_has_no_python_scripts() -> None:
+    assert not sorted(ROOT.glob("*.py"))
 
 
 def test_every_fps_performance_contract_uses_the_real_fps_rule() -> None:

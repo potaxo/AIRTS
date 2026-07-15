@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from airts.commands import CreateDefendCommand, CreatePatrolCommand, MoveCommand
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.map_model import EntityKind, load_map_data
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000

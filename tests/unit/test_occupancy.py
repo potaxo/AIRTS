@@ -8,9 +8,9 @@ import pytest
 
 from airts.commands import MoveCommand
 from airts.geometry import Point
-from airts.map_model import GameMap, load_map_data
-from airts.occupancy import OccupancyError, OccupancyGrid
 from airts.simulation import Simulation
+from airts.world.map_model import GameMap, load_map_data
+from airts.world.occupancy import OccupancyError, OccupancyGrid
 
 
 def test_occupancy_move_is_atomic_on_conflict() -> None:

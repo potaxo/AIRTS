@@ -1,1 +1,1 @@
-"""Deterministic routing, steering, and spatial indexing."""
+"""Deterministic routing, collision geometry, and spatial indexing."""

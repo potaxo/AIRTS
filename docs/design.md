@@ -366,11 +366,11 @@ runtime, and controls; `AGENTS.md` owns validation commands.
 | Direct, automation, and spatial command validation | `src/airts/systems/command_handlers.py` and `src/airts/systems/spatial_commands.py` |
 | Automation schemas and deterministic geometry planning | `src/airts/automations.py` |
 | Automation lifecycle, ownership, and behavior execution | `src/airts/systems/automation_lifecycle.py` and `src/airts/systems/automation_runtime.py` |
-| Movement, collision, and blocked-unit recovery | `src/airts/systems/movement.py` |
+| Movement and blocked-unit recovery | `src/airts/systems/movement.py` |
 | Combat targeting and projectile resolution | `src/airts/systems/combat.py` |
 | Construction, production, economy, and enemy generation | Focused modules under `src/airts/systems/` |
 | Entity profiles, maps, occupancy, visibility, and projectiles | Focused authoritative modules under `src/airts/world/` |
-| Routing, steering support, and spatial indexing | Focused deterministic modules under `src/airts/navigation/` |
+| Routing, collision and steering support, and spatial indexing | Focused deterministic modules under `src/airts/navigation/`, including `navigation/collision.py` |
 | Geometry and named spatial references | `src/airts/geometry.py` and `src/airts/spatial.py` |
 | Versioned save/load and deterministic command replay | `src/airts/adapters/persistence.py` and `src/airts/adapters/replay.py` |
 | Input, inspection, panels, and the explicit software renderer | `src/airts/presentation/app.py` |
@@ -380,9 +380,12 @@ The dependency direction remains simulation core outward to adapters. `Simulatio
 orchestrates internal systems; those systems have no runtime dependency back to the facade and do
 not import Pygame or a model provider. UI actions submit the same command objects used by replay and
 future language adapters. Renderer code reads authoritative state but does not advance or mutate
-domain behavior. The public `airts.simulation.Simulation` import and facade remain stable.
-The former top-level implementation paths remain compatibility re-exports for downstream callers;
-AIRTS's own source imports the canonical package paths. Tests are grouped by intent under
+domain behavior. The public `airts.simulation.Simulation` import and `airts.Simulation` alias
+remain stable. Moved implementation modules have one canonical package path; the former top-level
+compatibility re-exports are removed, and the authoritative movement controller and navigation
+collision primitives have distinct unambiguous names. Architecture tests prevent removed paths,
+duplicate source basenames, or repository-root Python scripts from returning. ADR 0005 records the
+bounded prototype migration and its tradeoff. Tests are grouped by intent under
 `tests/unit/`, `tests/integration/`, `tests/movement/`, `tests/performance/`, and
 `tests/architecture/`. Optional blocking human-inspection workloads live under
 `tests/gui_scenarios/` in files that deliberately do not match pytest's normal discovery pattern.
@@ -403,10 +406,11 @@ The runtime currently supports:
   geometry replacement; and route/region deletion;
 * patrol, defend, production, construction, reinforcement, repair-and-return, and economy
   automations with inspectable lifecycle, priority, pause, resume, cancellation, and event history;
-* weighted four-direction routing, collision-safe overflow and patrol formations, a deterministic
-  large-force traffic lattice with fixed-unit anchors and topology-preserving bridge flow, local
-  physical collision and push, opportunistic projectile combat, dense bit-mask visibility,
-  resource income, production, and builder construction;
+* weighted four-direction routing, collision-safe overflow and patrol formations, stable shared
+  defense stations, an incremental deterministic large-force traffic lattice with fixed-unit
+  anchors and topology-preserving bridge flow, local physical collision and push, opportunistic
+  projectile combat, dense bit-mask visibility, resource income, production, and builder
+  construction;
 * versioned complete-state saves, deterministic replay verification, JSON Lines event export,
   configurable deterministic enemy generation, and custom map loading;
 * a native OpenGL 3.3 default renderer with GPU-batched projectile and assembly feedback,
@@ -443,7 +447,14 @@ current slot, and every physical step remains bounded by `speed * TICK_SECONDS`;
 identity exchanges and stop-and-go jumps. Hostile idle units and held units are exact anchors,
 while route bands and vacancy propagation let commanded traffic pass them. Defend automations that
 share an owner and target coordinate one global collision-safe station set, including defenders
-produced by separate factories. Large formations may still adopt a collision-safe reached position
-inside their declared overflow envelope instead of churning forever toward one exact packed slot.
+produced by separate factories. Membership growth and casualty removal preserve every still-valid
+established station; contraction retains the compact slot prefix and deterministically rematches
+only displaced survivors across all matching defenses. The traffic lattice likewise retains
+surviving slot ownership when membership changes,
+adds only new traffic, and clears completely on topology invalidation rather than on ordinary
+docking. Candidate motion is revalidated against terrain and building occupancy. These stable
+incremental rules are specified by ADR 0006 and remain derived deterministically across save/load
+and replay. Large formations may still adopt a collision-safe reached position inside their
+declared overflow envelope instead of churning forever toward one exact packed slot.
 ORCA, native crowd code, and GPU simulation remain future options unless a checked-in sustained
 workload demonstrates that the deterministic CPU kernel is insufficient.

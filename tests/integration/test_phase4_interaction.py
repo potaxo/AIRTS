@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from airts.app import AirtsApp
+from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import load_replay, run_replay, save_replay
 from airts.commands import (
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
@@ -20,10 +21,9 @@ from airts.commands import (
 )
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
-from airts.map_model import GameMap
-from airts.persistence import load_simulation, save_simulation
-from airts.replay import load_replay, run_replay, save_replay
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.world.map_model import GameMap
 
 
 def test_spatial_references_have_stable_ids_unique_names_and_edit_in_place(

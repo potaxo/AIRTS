@@ -25,7 +25,7 @@ from airts.automations import (
 from airts.commands import command_from_dict, command_to_dict
 from airts.events import Event, EventLog, EventType
 from airts.geometry import Point, target_from_dict
-from airts.navigation.movement import collision_radius
+from airts.navigation.collision import collision_radius
 from airts.simulation import Simulation
 from airts.spatial import (
     GroundingSelection,

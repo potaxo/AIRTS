@@ -8,9 +8,9 @@ from airts.automations import AutomationStatus
 from airts.commands import CreatePatrolCommand, MoveCommand
 from airts.events import EventType
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.map_model import EntityKind, load_map_data
-from airts.movement import collision_radius, steering_candidates
+from airts.navigation.collision import collision_radius, steering_candidates
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
 
 
 def _swarm_simulation(positions: dict[str, tuple[float, float]]) -> Simulation:

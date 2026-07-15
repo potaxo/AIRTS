@@ -12,8 +12,8 @@ from airts.commands import (
     MoveCommand,
 )
 from airts.geometry import Point, rectangle_region
-from airts.map_model import EntityKind, load_map_data
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
 
 
 def _river_terrain() -> dict[str, object]:
@@ -247,6 +247,27 @@ def test_overlapping_manual_defend_orders_share_collision_safe_area_stations() -
     )
     assert minimum_separation >= 0.90
 
+    previous_stations = {
+        entity_id: station
+        for item in parameters
+        if isinstance(item, DefendParameters)
+        for entity_id, station in item.stations.items()
+    }
+    assert simulation.remove_entity(second_ids[-1], "CASUALTY_REGRESSION").accepted
+    live_stations = {
+        entity_id: station
+        for result in results
+        for item in (simulation.automations[result.automation_id or ""].parameters,)
+        if isinstance(item, DefendParameters)
+        for entity_id, station in item.stations.items()
+    }
+    assert len(live_stations) == 159
+    assert len(set(live_stations.values())) == len(live_stations)
+    changed = sum(
+        previous_stations[entity_id] != station for entity_id, station in live_stations.items()
+    )
+    assert changed <= 1, f"one casualty globally rematched {changed} surviving defenders"
+
 
 def test_multiple_factories_share_one_collision_safe_defense_formation() -> None:
     """Factories reinforcing one area must not allocate duplicate independent stations."""
@@ -345,6 +366,177 @@ def test_multiple_factories_share_one_collision_safe_defense_formation() -> None
         f"factory defenders formed a route-like line with spans x={x_span:.2f}, y={y_span:.2f}"
     )
     assert max(x_span, y_span) / min(x_span, y_span) <= 2.5
+
+
+def test_continuous_factory_reinforcements_preserve_existing_defend_stations() -> None:
+    """A newly produced unit must not turn the whole existing defense around."""
+
+    defender_ids = tuple(f"defender_{index:03d}" for index in range(296))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "stable_factory_reinforcements",
+                "name": "Stable factory reinforcements",
+                "width": 80,
+                "height": 64,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    *(
+                        {
+                            "id": entity_id,
+                            "kind": "scout",
+                            "owner": "player",
+                            "position": [3.5 + index % 20, 5.5 + index // 20],
+                        }
+                        for index, entity_id in enumerate(defender_ids)
+                    ),
+                    *(
+                        {
+                            "id": f"factory_{index}",
+                            "kind": "factory",
+                            "owner": "player",
+                            "position": [3 + index * 6, 50],
+                        }
+                        for index in range(4)
+                    ),
+                ],
+            }
+        ),
+        random_seed=113,
+    )
+    simulation.resources["player"] = 1_000_000
+    target = rectangle_region(Point(40, 8), Point(68, 35))
+    defend_result = simulation.execute(
+        CreateDefendCommand(defender_ids, target, gathering_point=True)
+    )
+    assert defend_result.accepted
+    defend = simulation.automations[defend_result.automation_id or ""]
+    assert isinstance(defend.parameters, DefendParameters)
+    original_stations = dict(defend.parameters.stations)
+    original_positions = {
+        entity_id: simulation.entities[entity_id].position for entity_id in defender_ids
+    }
+    original_distances = {
+        entity_id: simulation.entities[entity_id].position.distance_to(station)
+        for entity_id, station in original_stations.items()
+    }
+
+    production_results = tuple(
+        simulation.execute(
+            CreateProductionCommand(
+                f"factory_{index}",
+                EntityKind.SCOUT,
+                1,
+                defend_target=target,
+                continuous=True,
+            )
+        )
+        for index in range(4)
+    )
+    assert all(result.accepted for result in production_results)
+
+    simulation.advance(80)
+
+    current_stations = {
+        entity_id: parameters.stations[entity_id]
+        for automation in simulation.automations.values()
+        if automation.kind.value == "defend"
+        and isinstance((parameters := automation.parameters), DefendParameters)
+        and parameters.target == target
+        for entity_id in automation.entity_ids
+    }
+    assert len(current_stations) == 360
+    assert len(set(current_stations.values())) == len(current_stations)
+    changed_stations = {
+        entity_id: (station, current_stations[entity_id])
+        for entity_id, station in original_stations.items()
+        if current_stations[entity_id] != station
+    }
+    assert not changed_stations, (
+        f"{len(changed_stations)} established defenders were reassigned when reinforcements "
+        f"spawned; first change: {next(iter(changed_stations.items()), None)}"
+    )
+    progressing = sum(
+        simulation.entities[entity_id].position.distance_to(station) < original_distances[entity_id]
+        for entity_id, station in original_stations.items()
+    )
+    assert progressing >= 250, f"only {progressing}/296 established defenders made progress"
+    materially_moved = sum(
+        simulation.entities[entity_id].position.distance_to(original_positions[entity_id]) >= 5.0
+        for entity_id in defender_ids
+    )
+    assert materially_moved >= 250, (
+        f"only {materially_moved}/296 established defenders escaped their initial block"
+    )
+
+
+def test_large_force_never_moves_an_idle_friendly_through_a_factory() -> None:
+    """A stale traffic slot cannot turn a pathless friendly into an implicit mover."""
+
+    mover_ids = tuple(f"mover_{index:03d}" for index in range(160))
+    idle_start = Point(10.947213595499958, 43.27639320225002)
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "idle_factory_collision_regression",
+                "name": "Idle factory collision regression",
+                "width": 100,
+                "height": 64,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "factory",
+                        "kind": "factory",
+                        "owner": "player",
+                        "position": [11, 43],
+                    },
+                    {
+                        "id": "idle_victim",
+                        "kind": "scout",
+                        "owner": "player",
+                        "position": [idle_start.x, idle_start.y],
+                    },
+                    *(
+                        {
+                            "id": entity_id,
+                            "kind": "scout",
+                            "owner": "player",
+                            "position": [20.5 + index % 40, 2.5 + index // 40],
+                        }
+                        for index, entity_id in enumerate(mover_ids)
+                    ),
+                ],
+            }
+        ),
+        random_seed=127,
+    )
+    assert simulation.execute(MoveCommand(mover_ids, Point(80.5, 30.5))).accepted
+    source_slots = {
+        entity_id: (
+            int(simulation.entities[entity_id].position.x),
+            int(simulation.entities[entity_id].position.y),
+        )
+        for entity_id in mover_ids
+    }
+    source_slots["idle_victim"] = (12, 42)
+    simulation._open_force_slots = (
+        1.0,
+        source_slots,
+        {slot: entity_id for entity_id, slot in source_slots.items()},
+    )
+    idle_cells = simulation.occupancy.cells_for("idle_victim")
+
+    simulation.advance()
+
+    assert simulation.entities["idle_victim"].position == idle_start
+    assert simulation.occupancy.cells_for("idle_victim") == idle_cells
+    building_cells = simulation._building_cells()
+    assert all(
+        simulation._cells_at(entity, entity.position).isdisjoint(building_cells)
+        for entity in simulation.entities.values()
+        if entity.is_movable
+    )
+    assert "factory" in simulation.occupancy.occupants((11, 43))
 
 
 def test_large_force_routes_around_a_held_group_without_moving_the_holders() -> None:

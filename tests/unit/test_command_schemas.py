@@ -23,7 +23,7 @@ from airts.commands import (
     command_to_dict,
 )
 from airts.geometry import Point, PointTarget, PolylineTarget
-from airts.map_model import EntityKind
+from airts.world.map_model import EntityKind
 
 
 @pytest.mark.parametrize(

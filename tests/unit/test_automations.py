@@ -16,8 +16,8 @@ from airts.commands import (
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, PolygonRegion, PolylineTarget, SpatialTarget
-from airts.map_model import GameMap
 from airts.simulation import Simulation
+from airts.world.map_model import GameMap
 
 
 @pytest.mark.parametrize(

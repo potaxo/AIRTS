@@ -49,7 +49,7 @@ from airts.commands import (
 from airts.control import ControlAuthority
 from airts.events import EventLog, EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
-from airts.navigation.movement import SETTLED_FORMATION_SPACING
+from airts.navigation.collision import SETTLED_FORMATION_SPACING
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.navigation.spatial_index import SpatialIndex
 from airts.spatial import GroundingSelection, SpatialStore
@@ -1217,6 +1217,7 @@ class Simulation:
         return cached[:count]
 
     def _invalidate_navigation_cache(self) -> None:
+        self._open_force_slots = None
         self._building_cells_cache = None
         self._routes.clear()
         self._gathering_slot_cache.clear()

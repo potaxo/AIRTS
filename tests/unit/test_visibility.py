@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from airts.commands import MoveCommand
 from airts.geometry import Point
-from airts.map_model import load_map_data
 from airts.simulation import Simulation
-from airts.visibility import VisibilityState
+from airts.world.map_model import load_map_data
+from airts.world.visibility import VisibilityState
 
 
 def test_visibility_is_player_specific_and_exploration_persists() -> None:

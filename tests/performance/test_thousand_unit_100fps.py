@@ -9,12 +9,12 @@ import pygame
 import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.app import AirtsApp
 from airts.automations import AutomationKind, AutomationStatus
 from airts.commands import CommandResult, CreateDefendCommand, CreatePatrolCommand, MoveCommand
 from airts.geometry import Point, rectangle_region
-from airts.map_model import load_map_data
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.world.map_model import load_map_data
 
 UNIT_COUNT = 1_000
 TARGET_FPS = 100
@@ -161,7 +161,7 @@ def test_thousand_selected_unit_paths_are_visible_but_bounded() -> None:
     app, surface = _rendering_app(simulation, entity_ids)
 
     assert result.accepted
-    with patch("airts.app.pygame.draw.lines", wraps=pygame.draw.lines) as draw_lines:
+    with patch("airts.presentation.app.pygame.draw.lines", wraps=pygame.draw.lines) as draw_lines:
         app._draw(surface)
 
     route_calls = [

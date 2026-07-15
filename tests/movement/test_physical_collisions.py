@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from airts.automations import AutomationStatus
 from airts.commands import CreatePatrolCommand, MoveCommand
-from airts.entities import UnitState
 from airts.events import EventType
 from airts.geometry import Point, PolylineTarget
-from airts.map_model import EntityKind, load_map_data
-from airts.movement import collision_radius, unit_mass
+from airts.navigation.collision import collision_radius, unit_mass
 from airts.simulation import Simulation
+from airts.world.entities import UnitState
+from airts.world.map_model import EntityKind, load_map_data
 
 
 def _collision_simulation(

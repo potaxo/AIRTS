@@ -15,14 +15,14 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
-    assign_formation_slots,
     build_patrol_waypoints,
     patrol_formation_waypoint,
+    retain_formation_slots,
     target_center,
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
-from airts.navigation.movement import SETTLED_FORMATION_SPACING, collision_radius
+from airts.navigation.collision import SETTLED_FORMATION_SPACING, collision_radius
 from airts.navigation.pathfinding import PathfindingError, PathResult
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import UnitState
@@ -580,7 +580,6 @@ def _dock_formation_entity(
         raise RuntimeError(f"invalid defend deployment slot for {entity_id}: {station}")
     simulation.occupancy.move(entity_id, cells, movable_ids)
     entity.position = station
-    simulation._open_force_slots = None
     entity.path.clear()
     entity.move_target = None
     entity.state = UnitState.DEFENDING
@@ -846,6 +845,8 @@ def refresh_gathering_formation(simulation: Simulation, automation: Automation) 
     parameters = _defend_parameters(automation)
     if not parameters.gathering_point and not parameters.deployment_slots:
         return
+    if coordinate_shared_defend_stations(simulation, parameters.target, automation.owner_id):
+        return
     if not automation.entity_ids:
         parameters.stations.clear()
         parameters.deployment_slots = ()
@@ -857,38 +858,101 @@ def refresh_gathering_formation(simulation: Simulation, automation: Automation) 
     slots = simulation._gathering_slots(parameters.target, len(automation.entity_ids), radius)
     center = target_center(parameters.target)
     previous_stations = parameters.stations
-    if len(automation.entity_ids) > 128:
-        stations = assign_formation_slots(
-            {
-                entity_id: simulation.entities[entity_id].position
-                for entity_id in automation.entity_ids
-            },
-            slots,
-            center,
-        )
-    else:
-        ordered_ids = sorted(
-            automation.entity_ids,
-            key=lambda entity_id: (
-                previous_stations.get(
-                    entity_id, simulation.entities[entity_id].position
-                ).distance_to(center),
-                entity_id,
-            ),
-        )
-        stations = dict(zip(ordered_ids, slots, strict=True))
+    stations = retain_formation_slots(
+        {entity_id: simulation.entities[entity_id].position for entity_id in automation.entity_ids},
+        slots,
+        center,
+        previous_stations,
+    )
     parameters.deployment_slots = slots
     parameters.stations = stations
     parameters.assembly_radius = max(point.distance_to(center) for point in slots)
     for entity_id in sorted(automation.entity_ids):
         if simulation.assignments.get(entity_id) != automation.automation_id:
             continue
-        if previous_stations.get(entity_id) == parameters.stations[entity_id]:
+        if previous_stations.get(entity_id) == stations[entity_id]:
             continue
         entity = simulation.entities[entity_id]
         entity.path.clear()
         entity.move_target = None
         simulation._reset_movement_liveness(entity, clear_stop=True)
+
+
+def coordinate_shared_defend_stations(
+    simulation: Simulation,
+    target: SpatialTarget,
+    owner_id: str,
+) -> bool:
+    """Reconcile one compact collision-safe slot set across matching live defenses."""
+
+    defenses = tuple(
+        automation
+        for automation in sorted(
+            simulation.automations.values(),
+            key=lambda item: item.automation_id,
+        )
+        if automation.kind is AutomationKind.DEFEND
+        and automation.owner_id == owner_id
+        and not automation.status.terminal
+        and isinstance(automation.parameters, DefendParameters)
+        and automation.parameters.target == target
+    )
+    if len(defenses) <= 1:
+        return False
+    entity_ids = tuple(
+        entity_id
+        for automation in defenses
+        for entity_id in automation.entity_ids
+        if entity_id in simulation.entities
+        and simulation.assignments.get(entity_id) == automation.automation_id
+    )
+    if not entity_ids:
+        for automation in defenses:
+            parameters = _defend_parameters(automation)
+            parameters.stations.clear()
+            parameters.deployment_slots = ()
+            parameters.assembly_radius = 0.0
+        return True
+    radius = max(collision_radius(simulation.entities[entity_id].kind) for entity_id in entity_ids)
+    slots = simulation._gathering_slots(target, len(entity_ids), radius)
+    previous_stations = {
+        entity_id: station
+        for automation in defenses
+        for entity_id, station in _defend_parameters(automation).stations.items()
+        if entity_id in entity_ids
+    }
+    stations = retain_formation_slots(
+        {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids},
+        slots,
+        target_center(target),
+        previous_stations,
+    )
+    center = target_center(target)
+    for automation in defenses:
+        parameters = _defend_parameters(automation)
+        previous = parameters.stations
+        assigned_ids = tuple(
+            entity_id
+            for entity_id in automation.entity_ids
+            if entity_id in stations
+            and simulation.assignments.get(entity_id) == automation.automation_id
+        )
+        parameters.stations = {entity_id: stations[entity_id] for entity_id in assigned_ids}
+        parameters.deployment_slots = tuple(
+            parameters.stations[entity_id] for entity_id in assigned_ids
+        )
+        parameters.assembly_radius = max(
+            (parameters.stations[entity_id].distance_to(center) for entity_id in assigned_ids),
+            default=0.0,
+        )
+        for entity_id in assigned_ids:
+            if previous.get(entity_id) == parameters.stations[entity_id]:
+                continue
+            entity = simulation.entities[entity_id]
+            entity.path.clear()
+            entity.move_target = None
+            simulation._reset_movement_liveness(entity, clear_stop=True)
+    return True
 
 
 def initialize_runtime_entity(

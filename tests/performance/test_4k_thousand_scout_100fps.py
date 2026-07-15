@@ -7,11 +7,11 @@ from time import perf_counter
 import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.app import AirtsApp
 from airts.commands import CommandResult, MoveCommand
 from airts.geometry import Point
-from airts.map_model import load_map_data
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.world.map_model import load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000

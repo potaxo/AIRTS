@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from airts.adapters.replay import ReplayData, ReplayError, load_replay, run_replay, save_replay
 from airts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
@@ -14,9 +15,8 @@ from airts.commands import (
     MoveCommand,
 )
 from airts.geometry import Point, PointTarget
-from airts.map_model import EntityKind, GameMap, load_example_map
-from airts.replay import ReplayData, ReplayError, load_replay, run_replay, save_replay
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, GameMap, load_example_map
 
 
 def test_recorded_commands_reproduce_state_and_events(

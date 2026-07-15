@@ -18,9 +18,9 @@ from airts.commands import (
     MoveCommand,
 )
 from airts.geometry import Point, PolygonRegion, PolylineTarget, rectangle_region
-from airts.map_model import load_map_data
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.world.map_model import load_map_data
 
 
 def _show(

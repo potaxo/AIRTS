@@ -37,8 +37,9 @@ from airts.commands import (
 from airts.control import ControlAuthority
 from airts.events import EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
-from airts.navigation.movement import collision_radius
+from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError, PathResult
+from airts.systems.automation_runtime import coordinate_shared_defend_stations
 from airts.validation import (
     ValidationFailure,
     ValidationPhase,
@@ -669,116 +670,6 @@ def _stations_have_clearance(stations: tuple[Point, ...], minimum_spacing: float
                     return False
         buckets.setdefault((bucket_x, bucket_y), []).append(station)
     return True
-
-
-def coordinate_shared_defend_stations(
-    simulation: Simulation,
-    target: SpatialTarget,
-    owner_id: str,
-) -> None:
-    """Allocate one compact collision-safe station set across matching live defenses."""
-
-    defenses = tuple(
-        automation
-        for automation in sorted(
-            simulation.automations.values(),
-            key=lambda item: item.automation_id,
-        )
-        if automation.kind is AutomationKind.DEFEND
-        and automation.owner_id == owner_id
-        and not automation.status.terminal
-        and isinstance(automation.parameters, DefendParameters)
-        and automation.parameters.target == target
-    )
-    if len(defenses) <= 1:
-        return
-    entity_ids = tuple(
-        entity_id
-        for automation in defenses
-        for entity_id in automation.entity_ids
-        if entity_id in simulation.entities
-        and simulation.assignments.get(entity_id) == automation.automation_id
-    )
-    if not entity_ids:
-        return
-    radius = max(collision_radius(simulation.entities[entity_id].kind) for entity_id in entity_ids)
-    slots = simulation._gathering_slots(target, len(entity_ids), radius)
-    stations = _assign_nearest_shared_slots(
-        {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids},
-        slots,
-        target_center(target),
-    )
-    center = target_center(target)
-    for automation in defenses:
-        parameters = defend_parameters(automation)
-        previous = parameters.stations
-        assigned_ids = tuple(
-            entity_id
-            for entity_id in automation.entity_ids
-            if entity_id in stations
-            and simulation.assignments.get(entity_id) == automation.automation_id
-        )
-        parameters.stations = {entity_id: stations[entity_id] for entity_id in assigned_ids}
-        parameters.deployment_slots = tuple(
-            parameters.stations[entity_id] for entity_id in assigned_ids
-        )
-        parameters.assembly_radius = max(
-            (parameters.stations[entity_id].distance_to(center) for entity_id in assigned_ids),
-            default=0.0,
-        )
-        for entity_id in assigned_ids:
-            if previous.get(entity_id) == parameters.stations[entity_id]:
-                continue
-            entity = simulation.entities[entity_id]
-            entity.path.clear()
-            entity.move_target = None
-            simulation._reset_movement_liveness(entity, clear_stop=True)
-
-
-def _assign_nearest_shared_slots(
-    entity_positions: dict[str, Point],
-    slots: tuple[Point, ...],
-    center: Point,
-) -> dict[str, Point]:
-    """Match a changing shared defense without leaving avoidable station permutations."""
-
-    available_entities = set(entity_positions)
-    available_slots = set(range(len(slots)))
-    assigned: dict[str, Point] = {}
-    for _, entity_id, slot_index in sorted(
-        (
-            (
-                entity_positions[entity_id].distance_to(_expanded_shared_slot(slot, center, 0.95)),
-                entity_id,
-                slot_index,
-            )
-            for entity_id in entity_positions
-            for slot_index, slot in enumerate(slots)
-        ),
-        key=lambda item: (item[0], item[1], item[2]),
-    ):
-        if entity_id not in available_entities or slot_index not in available_slots:
-            continue
-        assigned[entity_id] = slots[slot_index]
-        available_entities.remove(entity_id)
-        available_slots.remove(slot_index)
-        if not available_entities:
-            break
-    if available_entities or available_slots:
-        raise RuntimeError("shared defend station matching did not produce a bijection")
-    return assigned
-
-
-def _expanded_shared_slot(slot: Point, center: Point, radius: float) -> Point:
-    offset_x = slot.x - center.x
-    offset_y = slot.y - center.y
-    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-    if distance <= 1e-9:
-        return Point(slot.x - radius, slot.y)
-    return Point(
-        slot.x + offset_x * radius / distance,
-        slot.y + offset_y * radius / distance,
-    )
 
 
 def create_reinforcement(

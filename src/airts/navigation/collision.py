@@ -1,4 +1,4 @@
-"""Deterministic local swarm steering layered over authoritative navigation paths."""
+"""Deterministic unit collision geometry and local steering candidates."""
 
 from __future__ import annotations
 

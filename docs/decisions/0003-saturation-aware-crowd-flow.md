@@ -1,6 +1,6 @@
 # ADR 0003: Use saturation-aware shared crowd flow before per-agent ORCA
 
-**Status:** Accepted
+**Status:** Accepted; cache-invalidation and formation-rematching clauses amended by ADR 0006
 
 ## Context
 
@@ -59,6 +59,14 @@ physical collision. Saturation behavior is:
   allocation across manual commands and production factories;
 * only settled units are fed back into dynamic military-penalty A*;
 * delayed checks use stable per-entity phases, and all stalled/final-approach searches are bounded.
+
+The blanket docking and membership invalidation in the preceding list records the first persistent
+lattice policy and is superseded by
+[ADR 0006](0006-stable-incremental-crowd-state.md). Surviving members now retain reservations when
+spacing is unchanged, docking creates an anchor without flushing unrelated traffic, and only new or
+displaced members are assigned. Topology changes and unsafe candidates still invalidate derived
+traffic state. ADR 0006 also requires valid shared-defense stations to remain attached to the same
+entity across membership growth instead of globally rematching the formation.
 
 Expanded defenses keep their deterministic initial slots, but saturation may make an exact lattice
 coordinate counterproductive. For groups larger than 128 units, a congestion-stopped unit inside

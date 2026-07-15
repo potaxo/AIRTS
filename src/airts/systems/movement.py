@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from math import ceil, floor
+from math import ceil
 from typing import TYPE_CHECKING
 
+from airts.automations import AutomationKind, DefendParameters
 from airts.events import EventType
 from airts.geometry import Point
-from airts.navigation.movement import (
+from airts.navigation.collision import (
     NEIGHBOR_RADIUS,
     collision_radius,
     steering_candidates,
@@ -251,7 +252,10 @@ def move_entities(simulation: Simulation) -> None:
                 )
     if contact_ids and not continuous_topology_force:
         simulation._resolve_unit_collisions(unit_index, tuple(sorted(contact_ids)))
-    simulation._track_movement_progress()
+    track_movement_progress(
+        simulation,
+        movable_entities if continuous_topology_force else None,
+    )
 
 
 def _move_large_force(
@@ -275,6 +279,7 @@ def _move_large_force(
         and (
             entity.owner_id not in active_owner_ids
             or (entity.state is UnitState.HOLDING and not entity.congestion_stopped)
+            or _is_docked_defender(simulation, entity_id, entity)
         )
     )
     has_fixed_units = bool(anchored_ids)
@@ -331,66 +336,82 @@ def _move_large_force(
         )
     )
     cached_slots = simulation._open_force_slots
-    if (
+    cache_matches = (
         cached_slots is not None
         and abs(cached_slots[0] - spacing) <= 1e-9
-        and cached_slots[1].keys() == dict.fromkeys(traffic_ids).keys()
-    ):
+        and len(cached_slots[1]) == len(traffic_ids)
+        and all(entity_id in cached_slots[1] for entity_id in traffic_ids)
+    )
+    if cache_matches and cached_slots is not None:
         source_slots = cached_slots[1]
         occupant_by_slot = cached_slots[2]
     else:
-        occupied: set[tuple[int, int]] = set()
-        source_slots = {}
-        occupant_by_slot = {}
+        source_slots = (
+            {
+                entity_id: cached_slots[1][entity_id]
+                for entity_id in traffic_ids
+                if entity_id in cached_slots[1]
+            }
+            if cached_slots is not None and abs(cached_slots[0] - spacing) <= 1e-9
+            else {}
+        )
+        occupied = set(source_slots.values())
+        if len(occupied) != len(source_slots):
+            raise RuntimeError("large-force traffic cache contains duplicate source slots")
+        if (
+            not source_slots
+            and spacing == 1.0
+            and simulation._all_terrain_passable
+            and not has_fixed_units
+        ):
+            direct_slots = {
+                entity_id: (
+                    round(movable_entities[entity_id].position.x - origin),
+                    round(movable_entities[entity_id].position.y - origin),
+                )
+                for entity_id in traffic_ids
+            }
+            if len(set(direct_slots.values())) == len(direct_slots) and all(
+                simulation.game_map.is_passable(
+                    candidate := _large_force_slot_point(slot, spacing, origin)
+                )
+                and simulation._cells_at(movable_entities[entity_id], candidate).isdisjoint(
+                    static_occupant_cells
+                )
+                and _large_force_step_is_passable(
+                    simulation,
+                    movable_entities[entity_id].position,
+                    candidate,
+                    static_occupant_cells,
+                )
+                for entity_id, slot in direct_slots.items()
+            ):
+                source_slots = direct_slots
+                occupied = set(direct_slots.values())
         maximum_ring = (
             ceil(max(simulation.game_map.width, simulation.game_map.height) / spacing) + 2
         )
-        direct_slots = {
-            entity_id: (
-                floor((movable_entities[entity_id].position.x - origin) / spacing + 0.5),
-                floor((movable_entities[entity_id].position.y - origin) / spacing + 0.5),
-            )
-            for entity_id in traffic_ids
-        }
-        direct_slot_points = {
-            entity_id: _large_force_slot_point(direct_slots[entity_id], spacing, origin)
-            for entity_id in traffic_ids
-        }
-        use_direct_slots = (
-            spacing == 1.0
-            and simulation._all_terrain_passable
-            and not has_fixed_units
-            and len(set(direct_slots.values())) == len(traffic_ids)
-            and all(
-                simulation.game_map.contains(direct_slot_points[entity_id])
-                and simulation.game_map.cell_for(direct_slot_points[entity_id])
-                not in static_occupant_cells
-                for entity_id in traffic_ids
-            )
-        )
         for entity_id in traffic_ids:
+            if entity_id in source_slots:
+                continue
             entity = movable_entities[entity_id]
-            source_slots[entity_id] = (
-                direct_slots[entity_id]
-                if use_direct_slots
-                else _nearest_large_force_slot(
-                    simulation,
-                    entity,
-                    entity.position,
-                    spacing,
-                    origin,
-                    occupied,
-                    fixed_index,
-                    movable_entities,
-                    collision_radii,
-                    maximum_radius,
-                    static_occupant_cells,
-                    maximum_ring,
-                    has_fixed_units,
-                )
+            source_slots[entity_id] = _nearest_large_force_slot(
+                simulation,
+                entity,
+                entity.position,
+                spacing,
+                origin,
+                occupied,
+                fixed_index,
+                movable_entities,
+                collision_radii,
+                maximum_radius,
+                static_occupant_cells,
+                maximum_ring,
+                has_fixed_units,
             )
             occupied.add(source_slots[entity_id])
-            occupant_by_slot[source_slots[entity_id]] = entity_id
+        occupant_by_slot = {slot: entity_id for entity_id, slot in source_slots.items()}
         simulation._open_force_slots = (spacing, source_slots, occupant_by_slot)
 
     ordered_ids = tuple(
@@ -500,7 +521,22 @@ def _move_large_force(
         movable_entities[entity_id].congestion_stopped = False
         reserve_next_slot(entity_id)
 
-    for entity_id in traffic_ids:
+    # A large open force deliberately reserves only a deterministic slice of its lattice each
+    # tick. Units outside that slice usually remain exactly on their source slot; revisiting all
+    # thousand bodies dominated p99 even though there was no motion to apply. Recursive queue
+    # reservations add every affected follower to ``planned``, while newly admitted off-grid
+    # bodies are detected by their physical/source mismatch.
+    motion_ids = tuple(
+        entity_id
+        for entity_id in traffic_ids
+        if entity_id in planned
+        or _squared_distance(
+            movable_entities[entity_id].position,
+            _large_force_slot_point(source_slots[entity_id], spacing, origin),
+        )
+        > 1e-12
+    )
+    for entity_id in motion_ids:
         entity = movable_entities[entity_id]
         destination = _large_force_slot_point(source_slots[entity_id], spacing, origin)
         distance = entity.position.distance_to(destination)
@@ -533,14 +569,31 @@ def _move_large_force(
                 collision_radii[entity_id],
                 local_colliders,
             )
+        crossed_cell = int(candidate.x) != int(entity.position.x) or int(candidate.y) != int(
+            entity.position.y
+        )
+        candidate_cells = (
+            simulation._cells_at(entity, candidate)
+            if crossed_cell
+            else simulation.occupancy.cells_for(entity_id)
+        )
+        if candidate != entity.position and (
+            (crossed_cell and not simulation.game_map.is_passable(candidate))
+            or (crossed_cell and not candidate_cells.isdisjoint(static_occupant_cells))
+            or (
+                distance > spacing + 1e-9
+                and _passable_segment_cells(simulation, entity.position, candidate) is None
+            )
+        ):
+            simulation._open_force_slots = None
+            entity.collision_pressure += 1
+            continue
         if candidate != entity.position:
-            if int(candidate.x) != int(entity.position.x) or int(candidate.y) != int(
-                entity.position.y
-            ):
+            if crossed_cell:
                 try:
                     simulation.occupancy.move(
                         entity_id,
-                        simulation._cells_at(entity, candidate),
+                        candidate_cells,
                         movable_ids,
                     )
                 except OccupancyError as error:
@@ -552,6 +605,12 @@ def _move_large_force(
         simulation._blocked_ticks.pop(entity_id, None)
         if entity.path:
             _advance_large_force_path(simulation, entity, spacing)
+    if has_fixed_units:
+        traffic_index = SpatialIndex(
+            {entity_id: movable_entities[entity_id].position for entity_id in traffic_ids},
+            bucket_size=1.0,
+        )
+        separate_overlapping_colliders(simulation, traffic_ids, traffic_index)
 
 
 def _move_separated_coherent_flows(
@@ -908,6 +967,8 @@ def _nearest_large_force_slot(
             cells = simulation._cells_at(entity, candidate)
             if static_occupant_cells and not cells.isdisjoint(static_occupant_cells):
                 continue
+            if _passable_segment_cells(simulation, desired, candidate) is None:
+                continue
             if not has_fixed_units or _large_force_slot_clears_fixed_units(
                 simulation,
                 entity.entity_id,
@@ -1000,10 +1061,7 @@ def track_movement_progress(
 ) -> None:
     """Temporarily yield orders that are not getting closer to their waypoint."""
 
-    large_force = (
-        movable_entities is not None
-        or sum(entity.is_movable for entity in simulation.entities.values()) > 128
-    )
+    large_force = movable_entities is not None
     if large_force:
         entities = (
             simulation.entities.values() if movable_entities is None else movable_entities.values()
@@ -1952,3 +2010,14 @@ def _movement_order_key(entity: Entity) -> tuple[int, float, str]:
     if not entity.path:
         return 1, 0.0, entity.entity_id
     return 0, entity.position.distance_to(entity.path[0]), entity.entity_id
+
+
+def _is_docked_defender(simulation: Simulation, entity_id: str, entity: Entity) -> bool:
+    automation = simulation.automations.get(simulation.assignments.get(entity_id, ""))
+    if (
+        automation is None
+        or automation.kind is not AutomationKind.DEFEND
+        or not isinstance(automation.parameters, DefendParameters)
+    ):
+        return False
+    return automation.parameters.stations.get(entity_id) == entity.position

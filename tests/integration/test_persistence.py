@@ -8,15 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
 from airts.commands import (
     CreatePatrolCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
 )
 from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
-from airts.map_model import EntityKind, GameMap, load_example_map
-from airts.persistence import PersistenceError, load_simulation, save_simulation
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, GameMap, load_example_map
 
 
 def test_save_load_round_trip_preserves_active_runtime_and_continuation(

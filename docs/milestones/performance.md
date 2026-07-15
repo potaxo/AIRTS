@@ -43,8 +43,9 @@ The milestone uses algorithmic and data-layout changes within the existing Pytho
 * dense reverse-navigation fields with uniform and weighted builders;
 * exact per-row bit-mask unions for visibility;
 * one reused spatial-neighbor result per unit movement attempt;
-* deterministic coherent-flow translation plus a persistent orthogonal reservation lattice above
-  128 movable units, with continuous topology-sensitive manual flow at bridge approaches;
+* deterministic coherent-flow translation plus an incrementally retained orthogonal reservation
+  lattice above 128 movable units, with continuous topology-sensitive manual flow at bridge
+  approaches and physical updates limited to planned or still-in-transit members;
 * cached composed software frames, per-tick map transforms, and bounded large-selection detail.
 
 The simulation remains single-threaded. Rust or worker threads may be reconsidered only after a
@@ -187,9 +188,10 @@ rules.
 The interactive cache key uses an O(1) command count instead of copying replay history. Per-frame
 FPS sampling does not invalidate the full 31.64 MiB 4K overlay; the displayed status is refreshed
 in bounded three-tick buckets through partial uploads. Dynamic terrain, shape, and line buffers
-start with bounded reusable capacities and grow only when a larger scene requires it. Persistent
-traffic slots, cached exact grouped-visibility masks, bounded combat broadphase, lazy patrol-slot
-planning, direct clear formation legs, no-op occupancy updates, a one-time stale-cycle collection
+start with bounded reusable capacities and grow only when a larger scene requires it. Incrementally
+retained traffic slots, cached exact grouped-visibility masks, bounded combat broadphase, lazy
+patrol-slot planning, direct clear formation legs, no-op occupancy updates, a one-time stale-cycle
+collection
 at large-match construction, large-selection level of detail, and staged overlay work make the
 strengthened defend-automation workload pass the unchanged 100
 Real FPS p99 contract on the reference AMD Radeon RX 7900 XT. This is offscreen workload evidence,
@@ -241,9 +243,11 @@ continuously until their broadphases can touch; congested or partially assigned 
 persistent orthogonal reservation lattice whose spacing caps overlap at the checked-in threshold.
 Direct manual traffic on maps with impassable topology retains continuous local collision and uses
 deterministic lateral route bands to approach a choke. Stationary hostile owners and holding units
-are anchors, while idle same-owner traffic may yield. A target that cannot contain the group expands
-into deterministic reachable hex-packed holding slots. Explicit attackers clear their pursue path
-at weapon range.
+are anchors, as are defenders physically docked at their stations, while idle same-owner traffic
+may yield. Surviving traffic identities retain reservations across membership changes when spacing
+is unchanged; new identities alone receive free slots, while topology changes clear the cache. A
+target that cannot contain the group expands into deterministic reachable hex-packed holding slots.
+Explicit attackers clear their pursue path at weapon range.
 Large-formation assignment pairs front-to-back arrivals with far-to-near slots along the approach
 axis; small gathering groups preserve center-first behavior. Nearby slots share reverse-field
 anchors but branch toward their final destinations before reaching
@@ -284,7 +288,10 @@ the throughput and Real FPS suites do not measure:
   average speed as stop-and-go slot bursts;
 * a 307-scout defend order through the four-cell reference bridge must continue making progress;
 * separate manual defend orders and multiple factories reinforcing one area must allocate one
-  globally collision-safe set of stations rather than duplicate per-automation formations; and
+  globally collision-safe set of stations rather than duplicate per-automation formations, and one
+  casualty must leave 159 unique stations with at most one surviving defender remapped;
+* continuous factory reinforcements must keep every valid established station while assigning only
+  newcomers, and a stale traffic reservation may not move an idle unit through a building; and
 * a moving force must route around an anchored held formation while every held unit remains fixed.
 
 The original reproduction observed 243 exact identity exchanges in 40 ticks, a 1.416-unit burst
@@ -292,9 +299,25 @@ against a 0.250-unit per-tick speed limit, only 80 unique stations for 160 manua
 unique stations for 132 four-factory defenders, and zero of 140 movers passing a held formation
 before a 250-tick no-progress guard. The reservation kernel now waits for physical arrival before
 changing slot ownership, preserves hostile and held anchors, propagates vacancies around fixed
-groups, and coordinates every same-owner defend automation targeting the same geometry. All five
-regressions and the independent 307-scout bridge-defense control pass without changing the Real FPS,
-separation, unit-count, map-geometry, or determinism requirements.
+groups, incrementally retains valid traffic slots, and coordinates same-owner defend automations
+targeting the same geometry on creation and reinforcement. Stable formation matching preserves
+valid station identities and assigns only new or displaced members. The seven regressions and the
+independent 307-scout bridge-defense control pass without changing Real FPS, separation,
+unit-count, map-geometry, or determinism requirements.
+
+## Dynamic continuous-production defense contract
+
+`test_four_continuous_factories_defend_without_stutter_or_deep_overlap` starts 296 scouts in one
+gathering defense and attaches four continuously producing factories to the same target. Across 100
+complete 1920 x 1080 software frames and ten authoritative ticks, eight reinforcements grow the
+shared force to 304. All stations must remain unique, every original station must retain its entity,
+moving separation may not fall below 90% of scout contact distance, no unit may enter a building,
+and the shared inverse-p99 rule must report at least 100 Real FPS.
+
+The tradeoff is that a newcomer takes a deterministic free station instead of triggering a fresh
+global minimum-distance match. The 1,000-unit gathering tests separately require the packed radius
+to expand and contract, so retention cannot preserve obsolete outer stations. ADR 0006 owns this
+policy and its cache invalidation boundaries.
 
 ---
 

@@ -77,9 +77,10 @@ is not. Avoid generic dumping grounds such as `utils`, `helpers`, or `manager`, 
 subpackage only when it represents a durable boundary.
 
 Refactor one responsibility at a time behind stable interfaces. Establish the test baseline first,
-preserve public imports, commands, persistence and replay schemas, tick and event order, and seeded
-determinism, then run focused tests before the full suite. A flag-day rewrite requires an explicit
-milestone and migration contract.
+preserve the documented `airts.Simulation` facade, commands, persistence and replay schemas, tick
+and event order, and seeded determinism, then run focused tests before the full suite. Internal
+implementation paths are not parallel public facades: moved code has one canonical package owner.
+A flag-day rewrite requires an explicit milestone and migration contract.
 
 ## 31.2 Repository ownership
 
@@ -96,9 +97,19 @@ milestone and migration contract.
 | `tests/performance/` | Explicit workload and frame-rate contracts |
 | `tests/architecture/` | Dependency and documentation structure policies |
 
-The old top-level module paths for moved implementations are compatibility re-exports. New AIRTS
-code must import canonical package paths; the shims may be removed only through an explicit public
-API migration. This structure expresses ownership, not a target file size, and packages should
-remain shallow until a new durable boundary is demonstrated.
+The old top-level compatibility modules have been removed under ADR 0005. Application and renderer
+code is imported from `airts.presentation`; world state from `airts.world`; routing, collision
+primitives, and spatial indexing from `airts.navigation`; authoritative tick behavior from
+`airts.systems`; and persistence or replay from `airts.adapters`. In particular,
+`airts.systems.movement` owns movement behavior while `airts.navigation.collision` owns collision
+radii and steering candidates. No second `movement.py` or top-level re-export may obscure that
+boundary.
+
+`tests/architecture/test_architecture_boundaries.py` enforces dependency direction, canonical
+imports, absence of the removed modules, unique source basenames, a clean repository root, and the
+stable `Simulation` facade. This structure expresses ownership, not a target file size, and
+packages should remain shallow until a new durable boundary is demonstrated. Removing the
+transitional imports is a bounded prototype source migration, not permission to change command,
+save, replay, event, or deterministic behavior.
 
 ---

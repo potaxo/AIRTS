@@ -22,11 +22,11 @@ from airts.commands import (
     ResumeAutomationCommand,
     StopCommand,
 )
-from airts.entities import UnitState
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, rectangle_region
-from airts.map_model import EntityKind, GameMap, load_map_data
 from airts.simulation import Simulation
+from airts.world.entities import UnitState
+from airts.world.map_model import EntityKind, GameMap, load_map_data
 
 
 def _runtime_map() -> GameMap:

@@ -1,6 +1,6 @@
 # ADR 0001: Preserve a modular monolith with a stable Simulation facade
 
-**Status:** Accepted
+**Status:** Accepted; compatibility-re-export clause superseded by ADR 0005
 
 ## Context
 
@@ -25,6 +25,11 @@ Canonical implementation ownership is expressed by five shallow packages: `airts
 `airts.navigation`, `airts.systems`, `airts.adapters`, and `airts.presentation`. Existing top-level
 imports for moved modules remain compatibility re-exports, while internal source uses canonical
 paths. Executable architecture tests enforce the dependency direction and compatibility identity.
+
+The preceding compatibility-re-export clause records the original migration policy and is
+superseded by [ADR 0005](0005-canonical-module-ownership.md). Canonical ownership and the stable
+`Simulation` facade remain accepted, but the transitional top-level re-exports have been removed
+and architecture tests now prevent their return.
 
 ## Consequences
 

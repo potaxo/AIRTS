@@ -8,12 +8,8 @@ from unittest.mock import patch
 import pygame
 import pytest
 
-from airts.app import (
-    REAL_FPS_FRAME_TIME_PERCENTILE,
-    AirtsApp,
-    PresentationProfiler,
-    real_fps_from_frame_times,
-)
+from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import load_replay, run_replay, save_replay
 from airts.automations import (
     AutomationKind,
     AutomationStatus,
@@ -28,11 +24,15 @@ from airts.commands import (
     CreateProductionCommand,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.map_model import EntityKind, load_map_data
-from airts.persistence import load_simulation, save_simulation
-from airts.projectiles import Projectile
-from airts.replay import load_replay, run_replay, save_replay
+from airts.presentation.app import (
+    REAL_FPS_FRAME_TIME_PERCENTILE,
+    AirtsApp,
+    PresentationProfiler,
+    real_fps_from_frame_times,
+)
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
+from airts.world.projectiles import Projectile
 
 
 def _simulation() -> Simulation:
@@ -549,7 +549,7 @@ def test_double_click_selection_helper_selects_same_kind_in_current_view() -> No
 def test_double_click_entity_selects_all_visible_friendly_entities_of_that_kind() -> None:
     app = AirtsApp(_simulation())
     builder = app.simulation.entities["builder"]
-    with patch("airts.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
+    with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
         app._select_entities(builder.position, builder.position)
         app._select_entities(builder.position, builder.position)
 
@@ -766,7 +766,7 @@ def test_projectile_visual_size_is_small_and_stable_across_ui_scales() -> None:
     for size in ((1000, 700), (3840, 2160)):
         app.resize_layout(size)
         surface = pygame.Surface(size)
-        with patch("airts.app.pygame.draw.circle") as circle:
+        with patch("airts.presentation.app.pygame.draw.circle") as circle:
             app._draw_projectiles(surface)
         observed.append(tuple(call.args[3] for call in circle.call_args_list[-2:]))
 
@@ -803,7 +803,7 @@ def test_shift_construction_appends_fifo_jobs_and_keeps_placement_active() -> No
     app._selection_changed()
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
 
-    with patch("airts.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
         app._handle_mouse_down(1, app._screen_point(Point(12, 12)))
         app._handle_mouse_down(1, app._screen_point(Point(16, 16)))
 
@@ -906,7 +906,7 @@ def test_right_click_exits_shift_construction_without_moving_builders() -> None:
     app.selected_entities = {"builder", "builder_2"}
     app._selection_changed()
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
-    with patch("airts.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
         app._handle_mouse_down(1, app._screen_point(Point(6, 10)))
         app._handle_mouse_down(1, app._screen_point(Point(16, 16)))
     assignments = dict(app.simulation.assignments)

@@ -7,7 +7,6 @@ from unittest.mock import Mock, call, patch
 import pygame
 import pytest
 
-from airts.app import AirtsApp, InputMode, RendererBackend
 from airts.automations import AutomationStatus, DefendParameters, ProductionParameters
 from airts.commands import (
     CreateDefendCommand,
@@ -22,8 +21,9 @@ from airts.commands import (
     command_to_dict,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.map_model import EntityKind, load_map_data
+from airts.presentation.app import AirtsApp, InputMode, RendererBackend
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
 
 
 def _interaction_simulation() -> Simulation:
@@ -212,12 +212,16 @@ def test_gathering_glow_radius_grows_with_the_authoritative_assembly_radius() ->
     app = AirtsApp(simulation)
     screen = pygame.Surface(app.WINDOW_SIZE)
 
-    with patch("airts.app.pygame.draw.circle", wraps=pygame.draw.circle) as draw_circle:
+    with patch(
+        "airts.presentation.app.pygame.draw.circle", wraps=pygame.draw.circle
+    ) as draw_circle:
         app._draw_assembly_glows(screen)
     initial_radius = max(call.args[3] for call in draw_circle.call_args_list)
 
     automation.parameters.assembly_radius += 4
-    with patch("airts.app.pygame.draw.circle", wraps=pygame.draw.circle) as draw_circle:
+    with patch(
+        "airts.presentation.app.pygame.draw.circle", wraps=pygame.draw.circle
+    ) as draw_circle:
         app._draw_assembly_glows(screen)
     expanded_radius = max(call.args[3] for call in draw_circle.call_args_list)
 
@@ -263,22 +267,22 @@ def test_window_close_exits_before_another_tick_or_render_and_releases_resources
     screen = Mock()
 
     with (
-        patch("airts.app.pygame.init") as global_init,
-        patch("airts.app.pygame.display.init", side_effect=lifecycle.display_init),
-        patch("airts.app.pygame.font.init", side_effect=lifecycle.font_init),
-        patch("airts.app.pygame.display.set_mode", return_value=screen),
-        patch("airts.app.pygame.display.set_caption"),
-        patch("airts.app.pygame.font.Font", side_effect=(Mock(), Mock())),
-        patch("airts.app.pygame.time.Clock", return_value=clock),
+        patch("airts.presentation.app.pygame.init") as global_init,
+        patch("airts.presentation.app.pygame.display.init", side_effect=lifecycle.display_init),
+        patch("airts.presentation.app.pygame.font.init", side_effect=lifecycle.font_init),
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=screen),
+        patch("airts.presentation.app.pygame.display.set_caption"),
+        patch("airts.presentation.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.presentation.app.pygame.time.Clock", return_value=clock),
         patch(
-            "airts.app.pygame.event.get",
+            "airts.presentation.app.pygame.event.get",
             return_value=(pygame.event.Event(pygame.QUIT),),
         ),
-        patch("airts.app.pygame.event.clear", side_effect=lifecycle.event_clear),
-        patch("airts.app.pygame.font.quit", side_effect=lifecycle.font_quit),
-        patch("airts.app.pygame.display.quit", side_effect=lifecycle.display_quit),
-        patch("airts.app.pygame.quit", side_effect=lifecycle.pygame_quit),
-        patch("airts.app.pygame.display.flip") as flip,
+        patch("airts.presentation.app.pygame.event.clear", side_effect=lifecycle.event_clear),
+        patch("airts.presentation.app.pygame.font.quit", side_effect=lifecycle.font_quit),
+        patch("airts.presentation.app.pygame.display.quit", side_effect=lifecycle.display_quit),
+        patch("airts.presentation.app.pygame.quit", side_effect=lifecycle.pygame_quit),
+        patch("airts.presentation.app.pygame.display.flip") as flip,
         patch.object(app, "_draw") as draw,
     ):
         app.run()
@@ -310,18 +314,18 @@ def test_render_failure_still_releases_pygame_resources_in_order() -> None:
     clock.tick.return_value = 0
 
     with (
-        patch("airts.app.pygame.init"),
-        patch("airts.app.pygame.display.init", side_effect=lifecycle.display_init),
-        patch("airts.app.pygame.font.init", side_effect=lifecycle.font_init),
-        patch("airts.app.pygame.display.set_mode", return_value=Mock()),
-        patch("airts.app.pygame.display.set_caption"),
-        patch("airts.app.pygame.font.Font", side_effect=(Mock(), Mock())),
-        patch("airts.app.pygame.time.Clock", return_value=clock),
-        patch("airts.app.pygame.event.get", return_value=()),
-        patch("airts.app.pygame.event.clear", side_effect=lifecycle.event_clear),
-        patch("airts.app.pygame.font.quit", side_effect=lifecycle.font_quit),
-        patch("airts.app.pygame.display.quit", side_effect=lifecycle.display_quit),
-        patch("airts.app.pygame.quit", side_effect=lifecycle.pygame_quit),
+        patch("airts.presentation.app.pygame.init"),
+        patch("airts.presentation.app.pygame.display.init", side_effect=lifecycle.display_init),
+        patch("airts.presentation.app.pygame.font.init", side_effect=lifecycle.font_init),
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=Mock()),
+        patch("airts.presentation.app.pygame.display.set_caption"),
+        patch("airts.presentation.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.presentation.app.pygame.time.Clock", return_value=clock),
+        patch("airts.presentation.app.pygame.event.get", return_value=()),
+        patch("airts.presentation.app.pygame.event.clear", side_effect=lifecycle.event_clear),
+        patch("airts.presentation.app.pygame.font.quit", side_effect=lifecycle.font_quit),
+        patch("airts.presentation.app.pygame.display.quit", side_effect=lifecycle.display_quit),
+        patch("airts.presentation.app.pygame.quit", side_effect=lifecycle.pygame_quit),
         patch.object(app, "_draw", side_effect=RuntimeError("render failed")),
     ):
         with pytest.raises(RuntimeError, match="render failed"):

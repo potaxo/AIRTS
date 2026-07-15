@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from airts.geometry import Point
-from airts.spatial_index import SpatialIndex
+from airts.navigation.spatial_index import SpatialIndex
 
 
 def test_spatial_index_queries_and_updates_in_stable_id_order() -> None:

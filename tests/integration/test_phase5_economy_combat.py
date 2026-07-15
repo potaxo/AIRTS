@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import load_replay, run_replay, save_replay
 from airts.automations import AutomationKind, AutomationStatus
 from airts.commands import (
     AttackCommand,
@@ -17,11 +19,9 @@ from airts.commands import (
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget
-from airts.map_model import EntityKind, load_map_data
-from airts.persistence import load_simulation, save_simulation
-from airts.projectiles import Projectile
-from airts.replay import load_replay, run_replay, save_replay
 from airts.simulation import Simulation
+from airts.world.map_model import EntityKind, load_map_data
+from airts.world.projectiles import Projectile
 
 
 def _phase5_simulation() -> Simulation:

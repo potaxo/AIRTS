@@ -574,6 +574,36 @@ def assign_formation_slots(
     return dict(zip(ordered_ids, ordered_slots, strict=True))
 
 
+def retain_formation_slots(
+    entity_positions: Mapping[str, Point],
+    slots: tuple[Point, ...],
+    center: Point,
+    previous_stations: Mapping[str, Point],
+) -> dict[str, Point]:
+    """Preserve valid unique stations and assign only genuinely displaced entities."""
+
+    if len(entity_positions) != len(slots):
+        raise ValueError("formation entity and slot counts must match")
+    slot_indices = {slot: index for index, slot in enumerate(slots)}
+    available_indices = set(range(len(slots)))
+    retained: dict[str, Point] = {}
+    displaced: dict[str, Point] = {}
+    for entity_id, position in entity_positions.items():
+        previous = previous_stations.get(entity_id)
+        slot_index = None if previous is None else slot_indices.get(previous)
+        if slot_index is None or slot_index not in available_indices:
+            displaced[entity_id] = position
+            continue
+        assert previous is not None
+        retained[entity_id] = previous
+        available_indices.remove(slot_index)
+    free_slots = tuple(slots[index] for index in sorted(available_indices))
+    retained.update(assign_formation_slots(displaced, free_slots, center))
+    if len(retained) != len(entity_positions) or len(set(retained.values())) != len(retained):
+        raise RuntimeError("stable formation matching did not produce a bijection")
+    return retained
+
+
 def minimum_cost_slot_assignment(
     entity_positions: Mapping[str, Point],
     slots: tuple[Point, ...],
