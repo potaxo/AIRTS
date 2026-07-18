@@ -12,11 +12,7 @@ from airts.automations import (
     AutomationParameters,
     AutomationStatus,
     ConstructionParameters,
-    DefendParameters,
-    PatrolParameters,
     ProductionParameters,
-    ReinforcementParameters,
-    RepairParameters,
     target_center,
 )
 from airts.commands import (
@@ -123,9 +119,6 @@ class Simulation:
             # simulation or presentation p99 stall several ticks later.
             collect_garbage()
         self.game_map = game_map
-        self._all_terrain_passable = all(
-            terrain.passable for row in game_map.terrain for terrain in row
-        )
         self.random_seed = random_seed
         self.ambient_enemy_spawns = ambient_enemy_spawns
         self.enemy_spawn_interval_ticks = enemy_spawn_interval_ticks
@@ -164,17 +157,7 @@ class Simulation:
         self._blocked_ticks: dict[str, int] = {}
         self._push_events_this_tick: set[str] = set()
         self._stalled_repaths_this_tick = 0
-        self._movement_step_attempt_count = 0
-        self._collision_pair_check_count = 0
         self._blocked_recoveries_this_tick = 0
-        self._open_force_slots: (
-            tuple[
-                float,
-                dict[str, tuple[int, int]],
-                dict[tuple[int, int], str],
-            ]
-            | None
-        ) = None
         self._building_cells_cache: frozenset[Cell] | None = None
         self._routes = RoutingService(
             game_map,
@@ -230,30 +213,6 @@ class Simulation:
             None,
         )
 
-    @property
-    def navigation_field_build_count(self) -> int:
-        """Expose shared-navigation work for deterministic performance regression tests."""
-
-        return self._routes.field_build_count
-
-    @property
-    def automation_route_count(self) -> int:
-        """Automation routes admitted by the shared scheduler this tick."""
-
-        return self._routes.automation_route_count
-
-    @property
-    def movement_step_attempt_count(self) -> int:
-        """Movement controllers evaluated during the most recent tick."""
-
-        return self._movement_step_attempt_count
-
-    @property
-    def collision_pair_check_count(self) -> int:
-        """Broadphase pairs evaluated during the most recent tick."""
-
-        return self._collision_pair_check_count
-
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
@@ -308,14 +267,11 @@ class Simulation:
             self._push_events_this_tick.clear()
             self._stalled_repaths_this_tick = 0
             self._routes.begin_tick()
-            self._movement_step_attempt_count = 0
-            self._collision_pair_check_count = 0
             self._blocked_recoveries_this_tick = 0
             self._generate_income()
             self._spawn_ambient_enemy()
             self._drive_automations()
             self._move_entities()
-            automation_runtime.settle_automation_formations(self)
             self._drive_projectiles()
             self._drive_combat()
             self._update_visibility()
@@ -617,25 +573,8 @@ class Simulation:
     def _drive_projectiles(self) -> None:
         combat_system.drive_projectiles(self)
 
-    def _impact_projectile(self, projectile: Projectile, target: Entity) -> None:
-        combat_system.impact_projectile(self, projectile, target)
-
-    def _finish_projectile(self, projectile: Projectile) -> None:
-        combat_system.finish_projectile(self, projectile)
-
-    def _nearest_enemy_in_range(
-        self, attacker: Entity, enemy_indexes: tuple[SpatialIndex, ...]
-    ) -> Entity | None:
-        return combat_system.nearest_enemy_in_range(self, attacker, enemy_indexes)
-
-    def _chase_target(self, attacker: Entity, target: Entity) -> None:
-        combat_system.chase_target(self, attacker, target)
-
     def _move_entities(self) -> None:
         movement_system.move_entities(self)
-
-    def _track_movement_progress(self) -> None:
-        movement_system.track_movement_progress(self)
 
     @staticmethod
     def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
@@ -708,21 +647,6 @@ class Simulation:
         contact_ids: tuple[str, ...] | None = None,
     ) -> None:
         movement_system.resolve_unit_collisions(self, unit_index, contact_ids)
-
-    def _relax_unit_spacing(
-        self,
-        entity_ids: tuple[str, ...],
-        required_spacing: float,
-        center: Point,
-        maximum_radius: float,
-    ) -> None:
-        movement_system.relax_unit_spacing(
-            self,
-            entity_ids,
-            required_spacing,
-            center,
-            maximum_radius,
-        )
 
     def _separate_overlapping_colliders(
         self,
@@ -815,9 +739,6 @@ class Simulation:
     def _refresh_gathering_formation(self, automation: Automation) -> None:
         automation_runtime.refresh_gathering_formation(self, automation)
 
-    def _manual_override(self, entity_id: str) -> None:
-        automation_lifecycle.manual_override(self, entity_id)
-
     def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
         automation_lifecycle.manual_override_many(self, entity_ids)
 
@@ -860,11 +781,6 @@ class Simulation:
         entity_id: str,
     ) -> None:
         production_system.assign_produced_patroller(self, production, parameters, entity_id)
-
-    def _next_reinforcement_station(
-        self, target: SpatialTarget, occupied: tuple[Point, ...]
-    ) -> Point:
-        return automation_runtime.next_reinforcement_station(self, target, occupied)
 
     def _find_spawn_point(self, factory: Entity) -> Point | None:
         return production_system.find_spawn_point(self, factory)
@@ -1016,9 +932,6 @@ class Simulation:
     def _state_for_assignment(self, entity_id: str) -> UnitState:
         return automation_lifecycle.state_for_assignment(self, entity_id)
 
-    def _fail_movement(self, entity: Entity, reason: str, position: Point) -> None:
-        command_handlers.fail_movement(self, entity, reason, position)
-
     def _allocate_destinations(
         self, entity_ids: tuple[str, ...], target: Point
     ) -> dict[str, Point]:
@@ -1087,12 +1000,6 @@ class Simulation:
             for entity_id, entity in self.entities.items()
             if entity_id not in excluding and entity.move_target is not None
         }
-
-    def _blocked_cells_for_mover(
-        self, entity_id: str, excluding: frozenset[str]
-    ) -> frozenset[Cell]:
-        del entity_id, excluding
-        return self._building_cells()
 
     def _nearest_unreserved_destination(self, entity: Entity, target: Point) -> Point | None:
         blocked = set(self.occupancy.blocked_cells(frozenset({entity.entity_id})))
@@ -1171,7 +1078,7 @@ class Simulation:
                     ):
                         reachable.add(neighbor)
                         frontier.append(neighbor)
-            # Keep settled formations outside the solver's 0.03 contact-pressure margin. Exact
+            # Keep settled formations outside the controller's 0.03 contact-pressure margin. Exact
             # diameter packing makes a stationary 1,000-unit formation pay dense collision work
             # forever even though every destination is unique.
             packing_radius = (
@@ -1217,7 +1124,6 @@ class Simulation:
         return cached[:count]
 
     def _invalidate_navigation_cache(self) -> None:
-        self._open_force_slots = None
         self._building_cells_cache = None
         self._routes.clear()
         self._gathering_slot_cache.clear()
@@ -1292,41 +1198,7 @@ class Simulation:
         return ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1))
 
 
-def _reason(error: Exception) -> str:
-    return str(error).upper().replace(" ", "_")
-
-
-def _squared_distance(first: Point, second: Point) -> float:
-    offset_x = first.x - second.x
-    offset_y = first.y - second.y
-    return offset_x * offset_x + offset_y * offset_y
-
-
-def _patrol_parameters(automation: Automation) -> PatrolParameters:
-    if not isinstance(automation.parameters, PatrolParameters):
-        raise TypeError("automation does not have patrol parameters")
-    return automation.parameters
-
-
-def _defend_parameters(automation: Automation) -> DefendParameters:
-    if not isinstance(automation.parameters, DefendParameters):
-        raise TypeError("automation does not have defend parameters")
-    return automation.parameters
-
-
 def _production_parameters(automation: Automation) -> ProductionParameters:
     if not isinstance(automation.parameters, ProductionParameters):
         raise TypeError("automation does not have production parameters")
-    return automation.parameters
-
-
-def _reinforcement_parameters(automation: Automation) -> ReinforcementParameters:
-    if not isinstance(automation.parameters, ReinforcementParameters):
-        raise TypeError("automation does not have reinforcement parameters")
-    return automation.parameters
-
-
-def _repair_parameters(automation: Automation) -> RepairParameters:
-    if not isinstance(automation.parameters, RepairParameters):
-        raise TypeError("automation does not have repair parameters")
     return automation.parameters

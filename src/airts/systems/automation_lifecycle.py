@@ -161,8 +161,6 @@ def activate(
         for previous_id, removed_ids in sorted(previous_groups.items()):
             previous = simulation.automations[previous_id]
             previous.remove_entities(frozenset(removed_ids))
-            simulation._refresh_gathering_formation(previous)
-            simulation._handle_automation_without_entities(previous)
         for entity_id in entity_ids:
             previous_id = previous_ids[entity_id]
             simulation.suspended_assignments.pop(entity_id, None)
@@ -175,6 +173,10 @@ def activate(
                 automation_id=automation.automation_id,
                 authority=authority.name.lower(),
             )
+        for previous_id in sorted(previous_groups):
+            previous = simulation.automations[previous_id]
+            simulation._refresh_gathering_formation(previous)
+            simulation._handle_automation_without_entities(previous)
     simulation._transition(automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
     if assign_entities:
         for entity_id in entity_ids:
@@ -233,6 +235,7 @@ def assign(
     previous_id = simulation.assignments.get(entity_id)
     if previous_id == automation.automation_id:
         return
+    previous_to_refresh: Automation | None = None
     if previous_id is not None:
         if suspend:
             previous = simulation.automations[previous_id]
@@ -244,10 +247,12 @@ def assign(
         else:
             previous = simulation.automations[previous_id]
             previous.remove_entity(entity_id)
-            simulation._refresh_gathering_formation(previous)
-            simulation._handle_automation_without_entities(previous)
+            previous_to_refresh = previous
             simulation.suspended_assignments.pop(entity_id, None)
     simulation.assignments[entity_id] = automation.automation_id
+    if previous_to_refresh is not None:
+        simulation._refresh_gathering_formation(previous_to_refresh)
+        simulation._handle_automation_without_entities(previous_to_refresh)
     simulation.events.record(
         simulation.tick,
         EventType.ASSIGNMENT_CHANGED,

@@ -1,42 +1,30 @@
 # ADR 0001: Preserve a modular monolith with a stable Simulation facade
 
-**Status:** Accepted; compatibility-re-export clause superseded by ADR 0005
+**Status:** Accepted
 
 ## Context
 
-AIRTS needs deterministic domain behavior, multiple control adapters, persistence, replay, and
-high-unit-count performance without the operational complexity of distributed services. The
-original simulation module accumulated command validation, automation execution, movement,
-combat, economy, construction, and production in one class implementation.
+AIRTS needs deterministic domain behavior, direct and future language control adapters,
+persistence, replay, and observable automation without the deployment and synchronization cost of
+distributed services. The original simulation implementation also accumulated unrelated system
+responsibilities in one file.
 
 ## Decision
 
-AIRTS remains one installable Python package. `airts.simulation.Simulation` stays the public,
-authoritative facade and state owner. Cohesive deterministic behavior lives in internal modules
-under `airts.systems`; those modules may depend on domain types but not on Pygame, renderers, or
-language-model providers. Runtime imports point from the facade to systems. Type-only references
-back to `Simulation` are allowed for strict static checking.
+AIRTS remains one installable Python package. `airts.simulation.Simulation` is the public facade,
+authoritative state owner, command boundary, and fixed-tick orchestrator.
 
-Refactoring follows behavior-preserving extractions. Public imports, command schemas, persistence,
-replay, tick order, event order, and seeded determinism remain stable unless an explicit milestone
-changes them.
+Cohesive deterministic behavior lives under `airts.systems`. World state, navigation mechanisms,
+adapters, and presentation have shallow canonical packages described by
+[ADR 0005](0005-canonical-module-ownership.md). Domain systems do not depend on Pygame or a model
+provider, and the simulation runs headlessly.
 
-Canonical implementation ownership is expressed by five shallow packages: `airts.world`,
-`airts.navigation`, `airts.systems`, `airts.adapters`, and `airts.presentation`. Existing top-level
-imports for moved modules remain compatibility re-exports, while internal source uses canonical
-paths. Executable architecture tests enforce the dependency direction and compatibility identity.
-
-The preceding compatibility-re-export clause records the original migration policy and is
-superseded by [ADR 0005](0005-canonical-module-ownership.md). Canonical ownership and the stable
-`Simulation` facade remain accepted, but the transitional top-level re-exports have been removed
-and architecture tests now prevent their return.
+Refactoring proceeds behind the stable facade. Command behavior, persistence and replay schemas,
+tick and event order, and seeded determinism change only through an explicit documented contract.
 
 ## Consequences
 
-Subsystems can be understood and tested independently while deployment remains simple. The facade
-continues to expose some private delegation methods so existing internal collaborators and tests do
-not require a flag-day rewrite. Line count is a review signal, not an architectural boundary;
-modules are split only when responsibilities and reasons to change differ.
-Tests mirror behavior intent rather than the source tree exactly: unit, integration, movement,
-performance, and architecture suites can be selected independently without changing the default
-full-suite command.
+Subsystems can be understood and tested independently while installation and runtime remain simple.
+The facade may expose narrow delegation methods to internal systems, but it does not duplicate their
+implementations. Module size is not an architectural boundary: code is split by responsibility,
+invariant, and reason to change.

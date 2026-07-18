@@ -21,14 +21,39 @@ if TYPE_CHECKING:
 def drive_combat(simulation: Simulation) -> None:
     """Acquire deterministic targets and launch projectiles for armed entities."""
 
-    positions_by_owner: dict[str, dict[str, Point]] = {}
-    for entity_id, entity in simulation.entities.items():
-        positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = entity.selection_position
-    if len(positions_by_owner) <= 1:
-        for entity in simulation.entities.values():
+    entity_values = simulation.entities.values()
+    first_entity = next(iter(entity_values), None)
+    if first_entity is None:
+        return
+    if all(entity.owner_id == first_entity.owner_id for entity in entity_values):
+        for entity in entity_values:
             if entity.attack_cooldown > 0:
                 entity.attack_cooldown -= 1
         return
+    positions_by_owner: dict[str, dict[str, Point]] = {}
+    selection_positions: dict[str, Point] = {}
+    mutable_owner_bounds: dict[str, list[float]] = {}
+    for entity_id, entity in simulation.entities.items():
+        position = entity.selection_position
+        selection_positions[entity_id] = position
+        positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = position
+        bounds = mutable_owner_bounds.get(entity.owner_id)
+        if bounds is None:
+            mutable_owner_bounds[entity.owner_id] = [
+                position.x,
+                position.y,
+                position.x,
+                position.y,
+            ]
+        else:
+            if position.x < bounds[0]:
+                bounds[0] = position.x
+            if position.y < bounds[1]:
+                bounds[1] = position.y
+            if position.x > bounds[2]:
+                bounds[2] = position.x
+            if position.y > bounds[3]:
+                bounds[3] = position.y
     owner_indexes = {
         owner_id: SpatialIndex(positions) for owner_id, positions in positions_by_owner.items()
     }
@@ -39,13 +64,8 @@ def drive_combat(simulation: Simulation) -> None:
         for owner_id in owner_indexes
     }
     owner_bounds = {
-        owner_id: (
-            min(point.x for point in positions.values()),
-            min(point.y for point in positions.values()),
-            max(point.x for point in positions.values()),
-            max(point.y for point in positions.values()),
-        )
-        for owner_id, positions in positions_by_owner.items()
+        owner_id: (bounds[0], bounds[1], bounds[2], bounds[3])
+        for owner_id, bounds in mutable_owner_bounds.items()
     }
     hostile_bounds = {
         owner_id: tuple(
@@ -76,7 +96,10 @@ def drive_combat(simulation: Simulation) -> None:
         attack_range = attacker.kind.profile.attack_range
         attack_range_squared = attack_range * attack_range
         ordered_target_distance_squared = (
-            _squared_distance(attacker.selection_position, ordered_target.selection_position)
+            _squared_distance(
+                selection_positions[entity_id],
+                selection_positions[ordered_target.entity_id],
+            )
             if ordered_target is not None
             else None
         )
@@ -121,13 +144,16 @@ def drive_combat(simulation: Simulation) -> None:
             and ordered_target_distance_squared <= attack_range_squared
         ):
             firing_target = ordered_target
-        elif any(
-            _squared_distance_to_bounds(attacker.selection_position, bounds)
-            <= attack_range * attack_range
-            for bounds in hostile_bounds[attacker.owner_id]
+        elif _hostile_bounds_in_range(
+            selection_positions[entity_id],
+            hostile_bounds[attacker.owner_id],
+            attack_range_squared,
         ):
             firing_target = nearest_enemy_in_range(
-                simulation, attacker, hostile_indexes[attacker.owner_id]
+                simulation,
+                attacker,
+                hostile_indexes[attacker.owner_id],
+                selection_positions,
             )
         else:
             firing_target = None
@@ -148,8 +174,8 @@ def drive_combat(simulation: Simulation) -> None:
             target_entity_id=firing_target.entity_id,
             owner_id=attacker.owner_id,
             weapon_kind=attacker.kind,
-            position=attacker.selection_position,
-            destination=firing_target.selection_position,
+            position=selection_positions[entity_id],
+            destination=selection_positions[firing_target.entity_id],
             damage=attacker.kind.profile.attack_damage,
             speed=speed,
         )
@@ -253,15 +279,20 @@ def nearest_enemy_in_range(
     simulation: Simulation,
     attacker: Entity,
     enemy_indexes: tuple[SpatialIndex, ...],
+    selection_positions: dict[str, Point] | None = None,
 ) -> Entity | None:
     """Return the nearest in-range hostile with stable ID tie-breaking."""
 
     attack_range = attacker.kind.profile.attack_range
+    attacker_position = (
+        attacker.selection_position
+        if selection_positions is None
+        else selection_positions[attacker.entity_id]
+    )
     candidate_ids = tuple(
         entity_id
         for entity_index in enemy_indexes
-        if (entity_id := entity_index.nearest(attacker.selection_position, attack_range))
-        is not None
+        if (entity_id := entity_index.nearest(attacker_position, attack_range)) is not None
     )
     if not candidate_ids:
         return None
@@ -269,8 +300,12 @@ def nearest_enemy_in_range(
         candidate_ids,
         key=lambda entity_id: (
             _squared_distance(
-                attacker.selection_position,
-                simulation.entities[entity_id].selection_position,
+                attacker_position,
+                (
+                    simulation.entities[entity_id].selection_position
+                    if selection_positions is None
+                    else selection_positions[entity_id]
+                ),
             ),
             entity_id,
         ),
@@ -292,6 +327,18 @@ def _squared_distance_to_bounds(
     offset_x = max(minimum_x - point.x, 0.0, point.x - maximum_x)
     offset_y = max(minimum_y - point.y, 0.0, point.y - maximum_y)
     return offset_x * offset_x + offset_y * offset_y
+
+
+def _hostile_bounds_in_range(
+    point: Point,
+    bounds: tuple[tuple[float, float, float, float], ...],
+    range_squared: float,
+) -> bool:
+    """Reject distant hostile owners without a generator on the common two-owner path."""
+
+    if len(bounds) == 1:
+        return _squared_distance_to_bounds(point, bounds[0]) <= range_squared
+    return any(_squared_distance_to_bounds(point, item) <= range_squared for item in bounds)
 
 
 def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> None:

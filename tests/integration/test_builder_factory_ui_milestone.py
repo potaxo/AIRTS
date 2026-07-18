@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pygame
-import pytest
 
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import load_replay, run_replay, save_replay
@@ -24,12 +23,7 @@ from airts.commands import (
     CreateProductionCommand,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.presentation.app import (
-    REAL_FPS_FRAME_TIME_PERCENTILE,
-    AirtsApp,
-    PresentationProfiler,
-    real_fps_from_frame_times,
-)
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 from airts.world.map_model import EntityKind, load_map_data
 from airts.world.projectiles import Projectile
@@ -605,26 +599,6 @@ def test_settings_menu_requests_a_higher_explicit_resolution() -> None:
     pygame.font.quit()
 
 
-def test_presentation_profiler_reports_present_wait_and_frame_pacing() -> None:
-    profiler = PresentationProfiler()
-    metrics = profiler.metrics
-    for frame in range(100):
-        metrics = profiler.record(
-            presented_at=frame * 0.005,
-            frame_ms=5.0,
-            render_ms=1.5,
-            present_ms=2.5,
-            simulation_ms=0.4 if frame % 10 == 0 else 0.0,
-        )
-
-    assert metrics.submit_fps == pytest.approx(200.0)
-    assert metrics.one_percent_low_fps == pytest.approx(200.0)
-    assert metrics.frame_p95_ms == 5.0
-    assert metrics.render_p95_ms == 1.5
-    assert metrics.present_p95_ms == 2.5
-    assert metrics.simulation_p95_ms == 0.4
-
-
 def test_multiple_builders_share_one_job_and_reduce_construction_time() -> None:
     single = _simulation()
     single_result = single.execute(
@@ -702,49 +676,6 @@ def test_construction_preview_reports_validity_before_placement() -> None:
 
     assert valid is not None and valid[0] == Point(14, 14) and valid[1]
     assert blocked is not None and blocked[0] == Point(2, 2) and not blocked[1]
-
-
-def test_presentation_profiler_reports_stutter_sensitive_real_fps() -> None:
-    profiler = PresentationProfiler()
-    metrics = profiler.metrics
-    presented_at = 0.0
-    for frame in range(200):
-        frame_ms = 30.0 if frame % 20 == 0 else 5.0
-        presented_at += frame_ms / 1000.0
-        metrics = profiler.record(
-            presented_at=presented_at,
-            frame_ms=frame_ms,
-            render_ms=1.5,
-            present_ms=2.5,
-            simulation_ms=0.0,
-        )
-
-    assert metrics.submit_fps > 150.0
-    assert metrics.one_percent_low_fps == pytest.approx(1000.0 / 30.0)
-    assert metrics.one_percent_low_fps < metrics.submit_fps / 4.0
-
-
-def test_real_fps_acceptance_rule_remains_inverse_p99_frame_time() -> None:
-    frame_times_ms = [5.0] * 190 + [30.0] * 10
-
-    assert REAL_FPS_FRAME_TIME_PERCENTILE == 0.99
-    assert real_fps_from_frame_times(frame_times_ms) == pytest.approx(1000.0 / 30.0)
-
-
-def test_info_panel_displays_stutter_sensitive_real_fps() -> None:
-    app = AirtsApp(_simulation())
-    app.real_fps = 41.6
-    pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
-    surface = pygame.Surface(app.WINDOW_SIZE)
-
-    with patch.object(app, "_small_text", wraps=app._small_text) as small_text:
-        app._draw_panel(surface)
-
-    rendered = [call.args[1] for call in small_text.call_args_list]
-    assert any("Real FPS   42" in line for line in rendered)
-    pygame.font.quit()
 
 
 def test_projectile_visual_size_is_small_and_stable_across_ui_scales() -> None:

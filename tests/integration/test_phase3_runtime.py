@@ -24,6 +24,7 @@ from airts.commands import (
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, rectangle_region
+from airts.navigation.collision import collision_radius
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map_model import EntityKind, GameMap, load_map_data
@@ -184,20 +185,107 @@ def test_reassigning_a_tank_group_discards_the_empty_older_automation() -> None:
     assert [item.automation_id for item in simulation.live_automations] == [patrol.automation_id]
 
 
+def test_recreating_same_expanded_defense_reassigns_stations_atomically() -> None:
+    simulation = Simulation(_runtime_map())
+    group = ("unit_01", "unit_02", "unit_03")
+    target = rectangle_region(Point(12, 2), Point(13, 3))
+    first = simulation.execute(CreateDefendCommand(group, target))
+    first_automation = simulation.automations[first.automation_id or ""]
+    assert isinstance(first_automation.parameters, DefendParameters)
+    assert first_automation.parameters.deployment_slots
+
+    replacement = simulation.execute(CreateDefendCommand(group, target))
+
+    replacement_automation = simulation.automations[replacement.automation_id or ""]
+    assert replacement.accepted
+    assert first_automation.status is AutomationStatus.CANCELED
+    assert isinstance(replacement_automation.parameters, DefendParameters)
+    assert set(replacement_automation.parameters.stations) == set(group)
+    assert len(set(replacement_automation.parameters.stations.values())) == len(group)
+    assert all(
+        simulation.game_map.is_passable(station)
+        for station in replacement_automation.parameters.stations.values()
+    )
+    assert all(
+        simulation.assignments[entity_id] == replacement.automation_id for entity_id in group
+    )
+
+    simulation.advance()
+
+    assert replacement_automation.status is AutomationStatus.ACTIVE
+
+
+def test_expanded_defense_routes_via_passable_slots_around_impassable_centroid() -> None:
+    entity_ids = tuple(f"unit_{index}" for index in range(4))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "impassable_defend_centroid",
+                "name": "Impassable Defend Centroid",
+                "width": 20,
+                "height": 20,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [[11, 11, 1, 1, "water"]],
+                },
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "kind": "scout",
+                        "position": [1.5, 1.5 + index],
+                    }
+                    for index, entity_id in enumerate(entity_ids)
+                ],
+            }
+        )
+    )
+    target = rectangle_region(Point(10, 10), Point(12, 12))
+
+    created = simulation.execute(CreateDefendCommand(entity_ids, target))
+    automation = simulation.automations[created.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
+    assert created.accepted
+    assert automation.parameters.deployment_slots
+    assert len(set(automation.parameters.stations.values())) == len(entity_ids)
+    assert all(
+        simulation.game_map.is_passable(station)
+        for station in automation.parameters.stations.values()
+    )
+
+    simulation.advance()
+
+    assert automation.status is AutomationStatus.ACTIVE
+    assert all(
+        simulation.entities[entity_id].state is UnitState.DEFENDING for entity_id in entity_ids
+    )
+    assert any(
+        simulation.entities[entity_id].path
+        or simulation.entities[entity_id].position != Point(1.5, 1.5 + index)
+        for index, entity_id in enumerate(entity_ids)
+    )
+
+
 def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:
     simulation = Simulation(_runtime_map())
     created = simulation.execute(
         CreateDefendCommand(("unit_01",), PointTarget(Point(12, 3), radius=2))
     )
+    automation = simulation.automations[created.automation_id or ""]
+    assert isinstance(automation.parameters, DefendParameters)
 
     simulation.advance(40)
 
     assert created.accepted
-    assert Point(12, 3).distance_to(simulation.entities["unit_01"].position) <= 2
+    station = automation.parameters.stations["unit_01"]
+    assert simulation.game_map.is_passable(station)
+    assert (
+        simulation.entities["unit_01"].position.distance_to(station)
+        <= Simulation.DEFEND_FORMATION_TOLERANCE
+    )
     assert simulation.entities["unit_01"].state is UnitState.DEFENDING
 
 
-def test_defend_distributes_units_across_exact_area_stations() -> None:
+def test_defend_distributes_units_across_unique_passable_area_stations() -> None:
     simulation = Simulation(_runtime_map())
     created = simulation.execute(
         CreateDefendCommand(
@@ -211,23 +299,20 @@ def test_defend_distributes_units_across_exact_area_stations() -> None:
     simulation.advance(100)
 
     stations = automation.parameters.stations
-    assert {
-        entity_id: simulation.entities[entity_id].position for entity_id in stations
-    } == stations
-    assert (
-        min(
-            first.distance_to(second)
-            for index, first in enumerate(stations.values())
-            for second in tuple(stations.values())[index + 1 :]
-        )
-        >= 5
+    assert set(stations) == {"unit_01", "unit_02", "unit_03"}
+    assert len(set(stations.values())) == len(stations)
+    assert all(simulation.game_map.is_passable(station) for station in stations.values())
+    assert all(
+        simulation.entities[entity_id].position.distance_to(station)
+        <= Simulation.DEFEND_FORMATION_TOLERANCE
+        for entity_id, station in stations.items()
     )
     assert all(
         simulation.entities[entity_id].state is UnitState.DEFENDING for entity_id in stations
     )
 
 
-def test_gathering_reinforcement_fills_center_before_outer_slots() -> None:
+def test_gathering_reinforcement_assigns_center_before_outer_slots() -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -265,9 +350,15 @@ def test_gathering_reinforcement_fills_center_before_outer_slots() -> None:
     center = Point(6, 6)
     blocker_station = automation.parameters.stations["blocker"]
     incoming_station = automation.parameters.stations["incoming"]
-    assert blocker_station == center
+    assert len(set(automation.parameters.stations.values())) == 2
+    assert all(
+        simulation.game_map.is_passable(station)
+        for station in automation.parameters.stations.values()
+    )
     assert blocker_station.distance_to(center) < incoming_station.distance_to(center)
-    assert simulation.entities["blocker"].position.distance_to(center) < 0.1
+    blocker = simulation.entities["blocker"]
+    assert blocker.position.distance_to(blocker_station) <= collision_radius(blocker.kind)
+    assert blocker.state is UnitState.DEFENDING
     assert not any(
         event.details.get("reason") == "GATHERING_OUTSKIRTS_SETTLED"
         for event in simulation.events.query(
@@ -344,7 +435,8 @@ def test_nearby_defenders_retaliate_then_return_when_attacker_runs_away() -> Non
 
     assert all(
         simulation.entities[entity_id].attack_target_id is None
-        and simulation.entities[entity_id].position == station
+        and simulation.entities[entity_id].position.distance_to(station)
+        <= Simulation.DEFEND_FORMATION_TOLERANCE
         and simulation.entities[entity_id].state is UnitState.DEFENDING
         for entity_id, station in automation.parameters.stations.items()
     )
@@ -367,7 +459,7 @@ def test_cost_free_fixed_tick_production_completes_with_deterministic_ids() -> N
     assert "factory" not in simulation.assignments
 
 
-def test_continuous_factory_production_assigns_units_to_compact_area_defense() -> None:
+def test_continuous_factory_production_assigns_unique_passable_defense_stations() -> None:
     simulation = Simulation(_runtime_map())
     simulation.resources["player"] = 10_000
     defend_target = rectangle_region(Point(14, 2), Point(22, 7))
@@ -400,31 +492,25 @@ def test_continuous_factory_production_assigns_units_to_compact_area_defense() -
         simulation.assignments[entity_id] == defend.automation_id
         for entity_id in parameters.produced_entity_ids
     )
-    assert simulation.navigation_field_build_count <= len(defend.parameters.deployment_slots)
+    initial_stations = dict(defend.parameters.stations)
 
     simulation.advance(10)
     assert parameters.produced_count == 5
     assert production.status is AutomationStatus.ACTIVE
-
-    for index, entity_id in enumerate(parameters.produced_entity_ids):
-        entity = simulation.entities[entity_id]
-        simulation.occupancy.move(entity_id, frozenset({(index, 14)}))
-        entity.position = Point(index + 0.5, 14.5)
-        entity.path.clear()
-        entity.move_target = None
-        entity.congestion_stopped = False
-    field_builds = simulation.navigation_field_build_count
-
-    simulation.advance()
-
-    dispatched = [
-        entity_id
+    assert defend.entity_ids == parameters.produced_entity_ids
+    assert set(defend.parameters.stations) == set(parameters.produced_entity_ids)
+    assert len(set(defend.parameters.stations.values())) == len(parameters.produced_entity_ids)
+    assert all(
+        simulation.game_map.is_passable(station) for station in defend.parameters.stations.values()
+    )
+    assert all(
+        defend.parameters.stations[entity_id] == station
+        for entity_id, station in initial_stations.items()
+    )
+    assert all(
+        simulation.assignments[entity_id] == defend.automation_id
+        and simulation.entities[entity_id].state is UnitState.DEFENDING
         for entity_id in parameters.produced_entity_ids
-        if simulation.entities[entity_id].path
-    ]
-    assert len(dispatched) == Simulation.GATHERING_PATH_BUDGET
-    assert (
-        simulation.navigation_field_build_count - field_builds <= Simulation.GATHERING_PATH_BUDGET
     )
 
 

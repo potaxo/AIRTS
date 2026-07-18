@@ -56,12 +56,6 @@ class Pathfinder:
             OrderedDict()
         )
         self.field_build_count = 0
-        passable_costs = {
-            terrain.movement_cost for row in game_map.terrain for terrain in row if terrain.passable
-        }
-        self._uniform_movement_cost = (
-            next(iter(passable_costs)) if len(passable_costs) == 1 else None
-        )
         self._cell_count = game_map.width * game_map.height
         self._passable_indices = tuple(
             terrain.passable for row in game_map.terrain for terrain in row
@@ -148,20 +142,7 @@ class Pathfinder:
         goal_cells: frozenset[Cell],
         blocked: frozenset[Cell],
     ) -> _NavigationField:
-        if self._uniform_movement_cost is not None:
-            return self._build_uniform_field(
-                goal_cells,
-                blocked,
-                self._uniform_movement_cost,
-            )
-        return self._build_weighted_field(goal_cells, blocked)
-
-    def _build_weighted_field(
-        self,
-        goal_cells: frozenset[Cell],
-        blocked: frozenset[Cell],
-    ) -> _NavigationField:
-        """Build a weighted reverse field over dense integer-indexed map arrays."""
+        """Build one deterministic weighted reverse field for every terrain mix."""
 
         costs = [float("inf")] * self._cell_count
         next_indices = [-1] * self._cell_count
@@ -199,55 +180,6 @@ class Pathfinder:
                 goal_for[predecessor] = goal
                 next_indices[predecessor] = current
                 heappush(frontier, (cost, goal, predecessor))
-        return _NavigationField(
-            costs,
-            next_indices,
-            goal_indices,
-            self.game_map.width,
-        )
-
-    def _build_uniform_field(
-        self,
-        goal_cells: frozenset[Cell],
-        blocked: frozenset[Cell],
-        movement_cost: float,
-    ) -> _NavigationField:
-        """Build an equally weighted reverse field without heap operations."""
-
-        costs = [float("inf")] * self._cell_count
-        next_indices = [-1] * self._cell_count
-        goal_for = [-1] * self._cell_count
-        goal_indices = frozenset(cell[1] * self.game_map.width + cell[0] for cell in goal_cells)
-        for index in goal_indices:
-            costs[index] = 0.0
-            goal_for[index] = index
-        frontier = list(goal_indices)
-        blocked_indices = frozenset(cell[1] * self.game_map.width + cell[0] for cell in blocked)
-        distance = 0
-        while frontier:
-            candidates: dict[int, tuple[int, int]] = {}
-            for current in frontier:
-                goal = goal_for[current]
-                candidate_key = (goal, current)
-                for predecessor in self._neighbor_indices[current]:
-                    if (
-                        goal_for[predecessor] >= 0
-                        or predecessor in blocked_indices
-                        or not self._passable_indices[predecessor]
-                    ):
-                        continue
-                    existing = candidates.get(predecessor)
-                    if existing is None or candidate_key < existing:
-                        candidates[predecessor] = candidate_key
-            if not candidates:
-                break
-            distance += 1
-            frontier = list(candidates)
-            cost = distance * movement_cost
-            for predecessor, (goal, next_index) in candidates.items():
-                costs[predecessor] = cost
-                goal_for[predecessor] = goal
-                next_indices[predecessor] = next_index
         return _NavigationField(
             costs,
             next_indices,

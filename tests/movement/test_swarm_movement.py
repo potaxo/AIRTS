@@ -327,3 +327,95 @@ def test_mixed_unit_four_way_choke_traffic_eventually_clears() -> None:
     assert all(
         not entity.path and entity.move_target is None for entity in simulation.entities.values()
     )
+
+
+def test_saturated_group_advances_without_moving_stationary_tanks() -> None:
+    """A valid crowded order may wait for traffic space, but advancing it must never crash."""
+
+    width = 14
+    height = 10
+    heavy_cells = {(1, y) for y in range(height)}
+    entities: list[dict[str, object]] = []
+    scout_ids: list[str] = []
+    for y in range(height):
+        for x in range(width):
+            if (x, y) in heavy_cells:
+                entities.append(
+                    {
+                        "id": f"heavy_{y:02d}",
+                        "kind": "heavy_tank",
+                        "owner": "player",
+                        # A boundary-positioned heavy safely leaves room for the scout on its
+                        # west side, while covering both adjacent one-unit traffic vertices.
+                        "position": [float(x), y + 0.5],
+                    }
+                )
+                continue
+            entity_id = f"scout_{len(scout_ids):03d}"
+            scout_ids.append(entity_id)
+            entities.append(
+                {
+                    "id": entity_id,
+                    "kind": "scout",
+                    "owner": "player",
+                    "position": [x + (0.25 if (x + 1, y) in heavy_cells else 0.5), y + 0.5],
+                }
+            )
+
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "saturated_source_slots",
+                "name": "Saturated source slots",
+                "width": width,
+                "height": height,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": entities,
+            }
+        )
+    )
+    commanded_ids = tuple(scout_ids)
+    target = Point(
+        sum(simulation.entities[entity_id].position.x for entity_id in commanded_ids)
+        / len(commanded_ids),
+        sum(simulation.entities[entity_id].position.y for entity_id in commanded_ids)
+        / len(commanded_ids),
+    )
+    starting_positions = {
+        entity_id: simulation.entities[entity_id].position for entity_id in simulation.entities
+    }
+
+    result = simulation.execute(MoveCommand(commanded_ids, target))
+    destinations = {
+        entity_id: simulation.entities[entity_id].move_target for entity_id in commanded_ids
+    }
+
+    assert result.accepted
+    assert len(commanded_ids) > 128
+    assert all(simulation.entities[entity_id].path for entity_id in commanded_ids)
+    assert all(destination is not None for destination in destinations.values())
+
+    simulation.advance()
+
+    heavy_ids = tuple(
+        entity_id for entity_id in simulation.entities if entity_id.startswith("heavy")
+    )
+    assert all(
+        simulation.entities[entity_id].position == starting_positions[entity_id]
+        for entity_id in heavy_ids
+    )
+    assert any(
+        simulation.entities[entity_id].position != starting_positions[entity_id]
+        for entity_id in commanded_ids
+    )
+    assert all(
+        simulation.entities[entity_id].path
+        or simulation.entities[entity_id].position == destinations[entity_id]
+        for entity_id in commanded_ids
+    )
+    assert all(
+        simulation.entities[scout_id].position.distance_to(simulation.entities[heavy_id].position)
+        >= collision_radius(EntityKind.SCOUT) + collision_radius(EntityKind.HEAVY_TANK) - 1e-6
+        for scout_id in commanded_ids
+        for heavy_id in heavy_ids
+    )

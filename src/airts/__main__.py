@@ -7,15 +7,13 @@ from pathlib import Path
 
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import load_replay, run_replay, save_replay
-from airts.presentation.app import AirtsApp, RendererBackend
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 from airts.world.map_model import load_example_map, load_map
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run the AIRTS Phase 5 economy and combat runtime."
-    )
+    parser = argparse.ArgumentParser(description="Run the AIRTS research prototype.")
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--map", type=Path, help="Load a map JSON file instead of the example.")
     sources.add_argument("--load-state", type=Path, help="Continue a saved simulation state.")
@@ -29,13 +27,6 @@ def main() -> int:
         "--max-frames",
         type=int,
         help="Exit after this many rendered frames (useful for smoke tests).",
-    )
-    parser.add_argument(
-        "--renderer",
-        choices=tuple(RendererBackend),
-        default=RendererBackend.OPENGL,
-        type=RendererBackend,
-        help="Rendering backend (default: opengl; use software for headless CI).",
     )
     parser.add_argument(
         "--enemy-spawn-seconds",
@@ -74,7 +65,7 @@ def main() -> int:
             enemy_spawn_interval_ticks=spawn_ticks,
             enemy_spawn_cap=arguments.enemy_cap,
         )
-    AirtsApp(simulation, renderer_backend=arguments.renderer).run(arguments.max_frames)
+    AirtsApp(simulation).run(arguments.max_frames)
     if arguments.event_log is not None:
         simulation.events.write_jsonl(arguments.event_log)
     if arguments.save_state is not None:

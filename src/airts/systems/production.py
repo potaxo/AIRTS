@@ -17,7 +17,7 @@ from airts.automations import (
 )
 from airts.commands import CommandResult, CreateProductionBatchCommand, CreateProductionCommand
 from airts.events import EventType
-from airts.geometry import Point, PolygonRegion, PolylineTarget
+from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems.automation_runtime import coordinate_shared_defend_stations
@@ -433,6 +433,10 @@ def assign_produced_defender(
     assert target is not None
     defend = simulation.automations.get(parameters.defend_automation_id or "")
     if defend is None or defend.status.terminal:
+        defend = _compatible_defense(simulation, production.owner_id, target)
+        if defend is not None:
+            parameters.defend_automation_id = defend.automation_id
+    if defend is None or defend.status.terminal:
         gathering_point = isinstance(target, PolygonRegion)
         if gathering_point:
             slots = simulation._gathering_slots(
@@ -492,6 +496,31 @@ def assign_produced_defender(
     simulation._assign(entity_id, defend)
     simulation._initialize_runtime_entity(defend, entity_id)
     coordinate_shared_defend_stations(simulation, target, production.owner_id)
+
+
+def _compatible_defense(
+    simulation: Simulation,
+    owner_id: str,
+    target: SpatialTarget,
+) -> Automation | None:
+    """Reuse one live defense for factories feeding the same destination."""
+
+    gathering_point = isinstance(target, PolygonRegion)
+    return next(
+        (
+            automation
+            for automation in sorted(
+                simulation.automations.values(), key=lambda item: item.automation_id
+            )
+            if automation.kind is AutomationKind.DEFEND
+            and automation.owner_id == owner_id
+            and not automation.status.terminal
+            and isinstance(automation.parameters, DefendParameters)
+            and automation.parameters.target == target
+            and automation.parameters.gathering_point is gathering_point
+        ),
+        None,
+    )
 
 
 def attach_production_defense(

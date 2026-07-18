@@ -10,7 +10,6 @@ from airts.simulation import Simulation
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "airts"
-PERFORMANCE_TESTS = ROOT / "tests" / "performance"
 PACKAGE_RULES = {
     "world": {
         "airts.adapters",
@@ -38,7 +37,6 @@ REMOVED_TOP_LEVEL_MODULES = frozenset(
         "map_model",
         "movement",
         "occupancy",
-        "opengl_renderer",
         "pathfinding",
         "persistence",
         "projectiles",
@@ -92,20 +90,6 @@ def test_source_module_names_are_unambiguous() -> None:
 
 def test_repository_root_has_no_python_scripts() -> None:
     assert not sorted(ROOT.glob("*.py"))
-
-
-def test_every_fps_performance_contract_uses_the_real_fps_rule() -> None:
-    violations: list[str] = []
-    for path in sorted(PERFORMANCE_TESTS.glob("test_*.py")):
-        source = path.read_text(encoding="utf-8")
-        if "TARGET_FPS" not in source:
-            continue
-        if "assert_real_fps(" not in source:
-            violations.append(f"{path.name} does not assert the shared Real FPS metric")
-        for forbidden in ("achieved_fps", "MEASURED_FRAMES /", "/ elapsed"):
-            if forbidden in source:
-                violations.append(f"{path.name} uses forbidden average-FPS logic: {forbidden}")
-    assert not violations, "\n".join(violations)
 
 
 def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:

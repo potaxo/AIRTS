@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import os
-from collections import deque
-from collections.abc import Iterable
-from dataclasses import dataclass
 from enum import StrEnum
-from math import ceil, hypot
+from math import hypot
 from pathlib import Path
-from time import perf_counter
 
 import pygame
 
@@ -54,7 +49,6 @@ from airts.geometry import (
     rectangle_region,
     simplify_freehand,
 )
-from airts.presentation.opengl_renderer import OpenGLRenderer, OpenGLRendererError
 from airts.simulation import Simulation
 from airts.spatial import SpatialKind
 from airts.world.entities import Entity
@@ -68,106 +62,12 @@ class InputMode(StrEnum):
     FREEHAND = "freehand"
 
 
-class RendererBackend(StrEnum):
-    OPENGL = "opengl"
-    SOFTWARE = "software"
-
-
-REAL_FPS_FRAME_TIME_PERCENTILE = 0.99
-
-
-def real_fps_from_frame_times(frame_times_ms: Iterable[float]) -> float:
-    """Return AIRTS's permanent stutter-sensitive FPS acceptance metric."""
-
-    frame_p99_ms = _percentile(frame_times_ms, REAL_FPS_FRAME_TIME_PERCENTILE)
-    return 1000.0 / frame_p99_ms if frame_p99_ms > 0.0 else 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class PresentationMetrics:
-    """Rolling measurements for the application-to-compositor presentation path."""
-
-    submit_fps: float = 0.0
-    one_percent_low_fps: float = 0.0
-    frame_p95_ms: float = 0.0
-    render_p95_ms: float = 0.0
-    present_p95_ms: float = 0.0
-    simulation_p95_ms: float = 0.0
-
-
-class PresentationProfiler:
-    """Measure frame pacing without adding another limiter or profiler dependency."""
-
-    SAMPLE_SECONDS = 2.0
-    MAX_SAMPLE_COUNT = 20_000
-    REFRESH_SECONDS = 0.25
-
-    def __init__(self) -> None:
-        self._presented_at: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
-        self._frame_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
-        self._render_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
-        self._present_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
-        self._simulation_samples: deque[tuple[float, float]] = deque(maxlen=self.MAX_SAMPLE_COUNT)
-        self._last_refresh = 0.0
-        self.metrics = PresentationMetrics()
-
-    def record(
-        self,
-        *,
-        presented_at: float,
-        frame_ms: float,
-        render_ms: float,
-        present_ms: float,
-        simulation_ms: float,
-    ) -> PresentationMetrics:
-        self._presented_at.append(presented_at)
-        self._frame_ms.append(frame_ms)
-        self._render_ms.append(render_ms)
-        self._present_ms.append(present_ms)
-        if simulation_ms > 0.0:
-            self._simulation_samples.append((presented_at, simulation_ms))
-        while (
-            len(self._presented_at) > 1
-            and presented_at - self._presented_at[0] > self.SAMPLE_SECONDS
-        ):
-            self._presented_at.popleft()
-            self._frame_ms.popleft()
-            self._render_ms.popleft()
-            self._present_ms.popleft()
-        while (
-            self._simulation_samples
-            and presented_at - self._simulation_samples[0][0] > self.SAMPLE_SECONDS
-        ):
-            self._simulation_samples.popleft()
-        if presented_at - self._last_refresh < self.REFRESH_SECONDS:
-            return self.metrics
-        self._last_refresh = presented_at
-        elapsed = (
-            self._presented_at[-1] - self._presented_at[0] if len(self._presented_at) > 1 else 0.0
-        )
-        submit_fps = (len(self._presented_at) - 1) / elapsed if elapsed > 0.0 else 0.0
-        self.metrics = PresentationMetrics(
-            submit_fps=submit_fps,
-            one_percent_low_fps=real_fps_from_frame_times(self._frame_ms),
-            frame_p95_ms=_percentile(self._frame_ms, 0.95),
-            render_p95_ms=_percentile(self._render_ms, 0.95),
-            present_p95_ms=_percentile(self._present_ms, 0.95),
-            simulation_p95_ms=_percentile(
-                deque(value for _, value in self._simulation_samples),
-                0.95,
-            ),
-        )
-        return self.metrics
-
-
 class AirtsApp:
-    FRAME_RATE_LIMIT = 1_000
-    OPENGL_OVERLAY_REFRESH_TICKS = 3
+    FRAME_RATE_LIMIT = 60
     MAX_SELECTED_PATHS = 32
     AUTOMATION_ROW_HEIGHT = 70
     AUTOMATION_SCROLLBAR_WIDTH = 12
     AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT = 32
-    OPENGL_DISPLAY_FLAGS = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
     DISPLAY_FLAGS = pygame.RESIZABLE | pygame.SCALED
     MAP_PIXELS = 768
     LEFT_PANEL_WIDTH = 280
@@ -191,13 +91,8 @@ class AirtsApp:
     ENTITY_CLICK_RADIUS = 1.5
     ENEMY_CLICK_RADIUS = 2.5
 
-    def __init__(
-        self,
-        simulation: Simulation,
-        renderer_backend: RendererBackend = RendererBackend.OPENGL,
-    ) -> None:
+    def __init__(self, simulation: Simulation) -> None:
         self.simulation = simulation
-        self.renderer_backend = renderer_backend
         self.mode = InputMode.SELECT
         self.selected_entities: set[str] = set()
         self.selected_points: set[str] = set()
@@ -225,11 +120,6 @@ class AirtsApp:
         self.placement_kind: EntityKind | None = None
         self.production_sequence: list[tuple[EntityKind, int]] = []
         self.paused = False
-        self.real_fps = 0.0
-        self.presentation_metrics = PresentationMetrics()
-        self.render_alpha = 1.0
-        self._previous_entity_positions: dict[str, Point] = {}
-        self._previous_projectile_positions: dict[str, Point] = {}
         self.window_size = self.WINDOW_SIZE
         self._pending_window_size: tuple[int, int] | None = None
         self.notice = "Select units, draw a target, then press A to patrol."
@@ -251,26 +141,10 @@ class AirtsApp:
         self._scaled_map_surface: pygame.Surface | None = None
         self._scaled_map_size: tuple[int, int] | None = None
         self._frame_selected_entities: tuple[Entity, ...] | None = None
-        self._unit_sprite_cache: dict[tuple[int, tuple[int, int, int]], pygame.Surface] = {}
-        self._large_unit_render_key: tuple[object, ...] | None = None
-        self._large_unit_blits: tuple[tuple[pygame.Surface, tuple[int, int]], ...] = ()
-        self._large_building_draws: tuple[tuple[pygame.Rect, tuple[int, int, int], bool], ...] = ()
-        self._large_unit_selected_bounds: pygame.Rect | None = None
-        self._large_unit_health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
-        self._large_unit_inspected_ring: tuple[tuple[int, int], int] | None = None
-        self._large_unit_renderable = False
-        self._path_render_key: tuple[object, ...] | None = None
-        self._path_render_points: tuple[tuple[tuple[int, int], ...], ...] = ()
-        self._software_draw_key: tuple[object, ...] | None = None
-        self._software_draw_tick: int | None = None
-        self._software_deferred_tick: int | None = None
-        self._software_frame_surface: pygame.Surface | None = None
-        self._software_cache_pending = False
         self._scaled_display_active = False
         self._frame_tile_size: float | None = None
         self._frame_map_pixel_size: tuple[int, int] | None = None
         self._frame_map_origin: tuple[int, int] | None = None
-        self._reset_presentation_history()
         self.resize_layout(self.WINDOW_SIZE)
 
     @property
@@ -322,38 +196,6 @@ class AirtsApp:
         if self._font is not None and pygame.font.get_init():
             self._font = pygame.font.Font(None, round(24 * self.ui_scale))
             self._small_font = pygame.font.Font(None, round(19 * self.ui_scale))
-
-    def _reset_presentation_history(self) -> None:
-        """Make the current authoritative state both interpolation endpoints."""
-
-        self._previous_entity_positions = {
-            entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
-        }
-        self._previous_projectile_positions = {
-            projectile_id: projectile.position
-            for projectile_id, projectile in self.simulation.projectiles.items()
-        }
-        self.render_alpha = 1.0
-
-    def _advance_presentation_tick(self) -> None:
-        """Capture the previous state before advancing the authoritative simulation."""
-
-        self._previous_entity_positions = {
-            entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
-        }
-        self._previous_projectile_positions = {
-            projectile_id: projectile.position
-            for projectile_id, projectile in self.simulation.projectiles.items()
-        }
-        self.simulation.advance()
-
-    def previous_entity_position(self, entity_id: str) -> Point:
-        entity = self.simulation.entities[entity_id]
-        return self._previous_entity_positions.get(entity_id, entity.position)
-
-    def previous_projectile_position(self, projectile_id: str) -> Point:
-        projectile = self.simulation.projectiles[projectile_id]
-        return self._previous_projectile_positions.get(projectile_id, projectile.position)
 
     def _request_resolution_step(self, direction: int) -> None:
         current = self._pending_window_size or self.window_size
@@ -425,55 +267,22 @@ class AirtsApp:
     def run(self, max_frames: int | None = None) -> None:
         display_initialized = False
         font_initialized = False
-        opengl_renderer: OpenGLRenderer | None = None
         try:
-            if self.renderer_backend is RendererBackend.OPENGL:
-                self._configure_opengl_video_backend()
             pygame.display.init()
             display_initialized = True
             pygame.font.init()
             font_initialized = True
-            if self.renderer_backend is RendererBackend.OPENGL:
-                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
-                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
-                pygame.display.gl_set_attribute(
-                    pygame.GL_CONTEXT_PROFILE_MASK,
-                    pygame.GL_CONTEXT_PROFILE_CORE,
-                )
-                pygame.display.gl_set_attribute(pygame.GL_DOUBLEBUFFER, 1)
-                try:
-                    screen = pygame.display.set_mode(
-                        self.window_size,
-                        self.OPENGL_DISPLAY_FLAGS,
-                        vsync=0,
-                    )
-                except pygame.error as error:
-                    raise OpenGLRendererError(
-                        "SDL could not create an OpenGL 3.3 window; verify the GPU driver and "
-                        "WSLg setup, or explicitly use --renderer software for headless CI: "
-                        f"{error}"
-                    ) from error
-                opengl_renderer = OpenGLRenderer.from_active_context()
-                self._scaled_display_active = False
-            else:
-                screen = pygame.display.set_mode(self.window_size, self.DISPLAY_FLAGS)
-                self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
+            screen = pygame.display.set_mode(self.window_size, self.DISPLAY_FLAGS)
+            self._scaled_display_active = bool(self.DISPLAY_FLAGS & pygame.SCALED)
             self.resize_layout(self.window_size)
-            pygame.display.set_caption("AIRTS — Phase 5")
+            pygame.display.set_caption("AIRTS")
             self._font = pygame.font.Font(None, 24)
             self._small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
-            profiler = PresentationProfiler()
             accumulator = 0.0
             running = True
             frames = 0
-            last_presented_at = perf_counter()
-            previous_loop_at = last_presented_at
             while running and (max_frames is None or frames < max_frames):
-                clock.tick(self.FRAME_RATE_LIMIT)
-                loop_started_at = perf_counter()
-                elapsed = min(loop_started_at - previous_loop_at, 0.25)
-                previous_loop_at = loop_started_at
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
@@ -482,74 +291,22 @@ class AirtsApp:
                         self._handle_event(event)
                 if not running:
                     break
+                elapsed = min(clock.tick(self.FRAME_RATE_LIMIT) / 1000.0, 0.25)
                 if self._pending_window_size is not None:
                     target_size = self._pending_window_size
                     self._pending_window_size = None
-                    if opengl_renderer is not None:
-                        opengl_renderer.release()
-                        opengl_renderer = None
-                        screen = pygame.display.set_mode(
-                            target_size,
-                            self.OPENGL_DISPLAY_FLAGS,
-                            vsync=0,
-                        )
-                        opengl_renderer = OpenGLRenderer.from_active_context()
-                    else:
-                        screen = pygame.display.set_mode(target_size, self.DISPLAY_FLAGS)
+                    screen = pygame.display.set_mode(target_size, self.DISPLAY_FLAGS)
                     self.resize_layout(target_size)
                 if not self.paused:
                     accumulator += elapsed
-                    simulation_started = perf_counter()
                     while accumulator >= Simulation.TICK_SECONDS:
-                        self._advance_presentation_tick()
+                        self.simulation.advance()
                         accumulator -= Simulation.TICK_SECONDS
-                    simulation_ms = (perf_counter() - simulation_started) * 1000.0
-                    self.render_alpha = max(
-                        0.0,
-                        min(1.0, accumulator / Simulation.TICK_SECONDS),
-                    )
-                else:
-                    simulation_ms = 0.0
-                    self.render_alpha = 1.0
-                render_started = perf_counter()
-                if opengl_renderer is not None:
-                    opengl_renderer.render(
-                        self,
-                        (self.right_panel_rect.right, self.left_panel_rect.bottom),
-                    )
-                else:
-                    self._draw(screen)
-                render_ms = (perf_counter() - render_started) * 1000.0
-                present_started = perf_counter()
+                self._draw(screen)
                 pygame.display.flip()
-                presented_at = perf_counter()
-                present_ms = (presented_at - present_started) * 1000.0
-                frame_ms = (presented_at - last_presented_at) * 1000.0
-                last_presented_at = presented_at
-                self.presentation_metrics = profiler.record(
-                    presented_at=presented_at,
-                    frame_ms=frame_ms,
-                    render_ms=render_ms,
-                    present_ms=present_ms,
-                    simulation_ms=simulation_ms,
-                )
-                self.real_fps = self.presentation_metrics.one_percent_low_fps
                 frames += 1
         finally:
-            if opengl_renderer is not None:
-                opengl_renderer.release()
             self._shutdown_pygame(display_initialized, font_initialized)
-
-    @staticmethod
-    def _configure_opengl_video_backend() -> None:
-        """Prefer native WSLg Wayland for OpenGL unless the user selected an SDL driver."""
-
-        if (
-            "SDL_VIDEODRIVER" not in os.environ
-            and os.environ.get("WSL_DISTRO_NAME")
-            and os.environ.get("WAYLAND_DISPLAY")
-        ):
-            os.environ["SDL_VIDEODRIVER"] = "wayland"
 
     def _shutdown_pygame(self, display_initialized: bool, font_initialized: bool) -> None:
         """Release UI resources in dependency order, including exceptional exits."""
@@ -559,16 +316,6 @@ class AirtsApp:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
-        self._unit_sprite_cache.clear()
-        self._large_unit_render_key = None
-        self._large_unit_blits = ()
-        self._large_building_draws = ()
-        self._large_unit_health_bars = ()
-        self._large_unit_selected_bounds = None
-        self._large_unit_inspected_ring = None
-        self._large_unit_renderable = False
-        self._path_render_key = None
-        self._path_render_points = ()
         self._scaled_display_active = False
         try:
             if display_initialized:
@@ -1170,7 +917,6 @@ class AirtsApp:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
-        self._reset_presentation_history()
         self._clear_selection_state()
         self.notice = f"Loaded {self.quick_save_path}."
 
@@ -1185,7 +931,6 @@ class AirtsApp:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
-        self._reset_presentation_history()
         self._clear_selection_state()
         self.notice = "New game started."
 
@@ -1333,33 +1078,6 @@ class AirtsApp:
             return
 
     def _draw(self, screen: pygame.Surface) -> None:
-        draw_key: tuple[object, ...] = (
-            id(screen),
-            screen.get_size(),
-            self.simulation.tick,
-            self._opengl_overlay_key(),
-        )
-        if self._software_cache_pending:
-            self._software_frame_surface = screen.copy()
-            self._software_cache_pending = False
-            if draw_key == self._software_draw_key:
-                return
-        if draw_key == self._software_draw_key:
-            assert self._software_frame_surface is not None
-            screen.blit(self._software_frame_surface, (0, 0))
-            return
-        same_target = (
-            self._software_draw_key is not None and self._software_draw_key[:2] == draw_key[:2]
-        )
-        if (
-            same_target
-            and self._software_draw_tick != self.simulation.tick
-            and self._software_deferred_tick is None
-        ):
-            self._software_deferred_tick = self.simulation.tick
-            assert self._software_frame_surface is not None
-            screen.blit(self._software_frame_surface, (0, 0))
-            return
         tile_size = min(
             self.canvas_rect.width / self.simulation.game_map.width,
             self.canvas_rect.height / self.simulation.game_map.height,
@@ -1395,13 +1113,6 @@ class AirtsApp:
             self._frame_map_pixel_size = None
             self._frame_map_origin = None
             self._frame_selected_entities = None
-        self._software_draw_key = draw_key
-        self._software_draw_tick = self.simulation.tick
-        self._software_deferred_tick = None
-        if self._software_frame_surface is None:
-            self._software_frame_surface = screen.copy()
-        else:
-            self._software_cache_pending = True
 
     def _draw_interface(self, screen: pygame.Surface) -> None:
         self._draw_command_bar(screen)
@@ -1411,229 +1122,6 @@ class AirtsApp:
             self._draw_settings_menu(screen)
         if self.help_open:
             self._draw_help(screen)
-
-    def _draw_opengl_overlay(self, screen: pygame.Surface) -> None:
-        """Draw non-base scene feedback and the UI into a GPU-composited texture."""
-
-        self._prune_removed_entities()
-        self._frame_selected_entities = tuple(
-            self.simulation.entities[entity_id] for entity_id in self.selected_entities
-        )
-        try:
-            previous_clip = screen.get_clip()
-            screen.set_clip(self.canvas_rect)
-            self._draw_spatial_input(screen)
-            self._draw_construction(screen)
-            screen.set_clip(previous_clip)
-            self._draw_interface(screen)
-        finally:
-            self._frame_selected_entities = None
-
-    def _draw_opengl_partial_overlay(
-        self,
-        screen: pygame.Surface,
-        regions: tuple[pygame.Rect, ...],
-    ) -> None:
-        """Refresh selected overlay rectangles without rebuilding the native canvas."""
-
-        refresh_canvas = any(region.colliderect(self.canvas_rect) for region in regions)
-        refresh_left = any(region.colliderect(self.left_panel_rect) for region in regions)
-        refresh_right = any(region.colliderect(self.right_panel_rect) for region in regions)
-        refresh_commands = any(region.colliderect(self.command_bar_rect) for region in regions)
-        if refresh_canvas:
-            for region in regions:
-                canvas_region = region.clip(self.canvas_rect)
-                if canvas_region.width and canvas_region.height:
-                    screen.fill((0, 0, 0, 0), canvas_region)
-        self._prune_removed_entities()
-        self._frame_selected_entities = tuple(
-            self.simulation.entities[entity_id] for entity_id in self.selected_entities
-        )
-        try:
-            if refresh_canvas:
-                previous_clip = screen.get_clip()
-                screen.set_clip(self.canvas_rect)
-                if any(
-                    automation.kind is AutomationKind.CONSTRUCTION
-                    for automation in self.simulation.live_automations
-                ):
-                    self._draw_construction(screen)
-                screen.set_clip(previous_clip)
-            if refresh_right or refresh_commands:
-                self._draw_interface(screen)
-            elif refresh_left:
-                self._command_buttons[:] = [
-                    button for button in self._command_buttons if button[1] != "help"
-                ]
-                self._draw_panel(
-                    screen,
-                    background_regions=tuple(
-                        region.clip(self.left_panel_rect)
-                        for region in regions
-                        if region.colliderect(self.left_panel_rect)
-                    ),
-                )
-        finally:
-            self._frame_selected_entities = None
-
-    def _opengl_overlay_key(self) -> tuple[object, ...]:
-        """Identify every state change that requires rebuilding the native UI texture."""
-
-        pointer = (
-            pygame.mouse.get_pos()
-            if self.placement_kind is not None
-            or self.drag_start is not None
-            or self.mode is not InputMode.SELECT
-            else None
-        )
-        return (
-            id(self.simulation),
-            self.simulation.tick // self.OPENGL_OVERLAY_REFRESH_TICKS,
-            self.simulation.command_count,
-            self.mode,
-            self.paused,
-            self.notice,
-            frozenset(self.selected_entities),
-            frozenset(self.selected_points),
-            frozenset(self.selected_routes),
-            frozenset(self.selected_regions),
-            repr(self.active_target),
-            self.active_reference_id,
-            self.editing_reference_id,
-            self.selected_automation_id,
-            self.inspected_entity_id,
-            self.inspected_kind,
-            self.naming_reference_id,
-            self.naming_buffer,
-            tuple(self.line_points),
-            tuple(self.freehand_points),
-            self.drag_start,
-            self.camera_offset,
-            self.automation_scroll,
-            self.settings_open,
-            self.help_open,
-            self.placement_kind,
-            tuple(self.production_sequence),
-            tuple(self.left_panel_rect),
-            tuple(self.right_panel_rect),
-            tuple(self.canvas_rect),
-            tuple(self.command_bar_rect),
-            pointer,
-            self._opengl_canvas_overlay_key(),
-        )
-
-    def _opengl_partial_overlay_regions(
-        self,
-        previous: tuple[object, ...],
-        current: tuple[object, ...],
-    ) -> tuple[pygame.Rect, ...] | None:
-        """Return the exact UI regions affected by inexpensive state-only changes."""
-
-        if len(previous) != len(current):
-            return None
-        changed = {
-            index
-            for index, (old_value, new_value) in enumerate(zip(previous, current, strict=True))
-            if old_value != new_value
-        }
-        left_panel_changes = {1, 2, 4, 5, 6, 13, 14, 22}
-        right_panel_changes = {15}
-        canvas_changes = {32}
-        if not changed or not changed <= (
-            left_panel_changes | right_panel_changes | canvas_changes
-        ):
-            return None
-        regions: list[pygame.Rect] = []
-        if changed & left_panel_changes:
-            if changed & {5, 22}:
-                regions.append(self.left_panel_rect.copy())
-            else:
-                regions.extend(self._opengl_dynamic_overlay_regions())
-        if changed & (right_panel_changes | {6}):
-            context_height = min(self.right_panel_rect.height, 420)
-            regions.append(
-                pygame.Rect(
-                    self.right_panel_rect.x,
-                    self.right_panel_rect.y,
-                    self.right_panel_rect.width,
-                    context_height,
-                )
-            )
-        if 6 in changed:
-            bar = self.command_bar_rect
-            regions.append(pygame.Rect(bar.x, bar.y, bar.width, min(78, bar.height)))
-        if changed & canvas_changes:
-            regions.extend(self._opengl_canvas_regions_from_key(previous[32]))
-            regions.extend(self._opengl_canvas_regions_from_key(current[32]))
-        return tuple(regions)
-
-    def _opengl_dynamic_overlay_regions(self) -> tuple[pygame.Rect, ...]:
-        """Return the populated left-panel bands whose values change with ticks."""
-
-        panel = self.left_panel_rect
-        y = 14 + 28 + 25 + len(self._wrap(self.notice, 46)) * 18 + 7
-        y += 38
-        y += 20 + 24
-        if self.simulation.entities.get(self.inspected_entity_id or "") is not None:
-            selection_lines = 4
-        elif self.selected_entities:
-            selection_lines = 2
-        else:
-            selection_lines = 1
-        selection_bottom = y + selection_lines * 17 + 3
-        y += selection_lines * 17 + 5 + 25
-        list_top = y
-        list_bottom = max(
-            list_top + self.AUTOMATION_ROW_HEIGHT,
-            panel.bottom - round(180 * self.ui_scale),
-        )
-        visible_rows = max(1, (list_bottom - list_top) // self.AUTOMATION_ROW_HEIGHT)
-        live_automations = self.simulation.live_automations
-        live_rows = min(len(live_automations), visible_rows)
-        automation_height = live_rows * self.AUTOMATION_ROW_HEIGHT
-        if self.selected_automation_id in self.simulation.automations:
-            automation_height += 60
-        top_bottom = max(selection_bottom, list_top + automation_height + 3)
-        return (
-            pygame.Rect(panel.x, 38, panel.width, top_bottom - 38),
-            pygame.Rect(
-                panel.x,
-                list_bottom - 3,
-                panel.width,
-                panel.bottom - list_bottom + 3,
-            ),
-        )
-
-    def _opengl_canvas_overlay_key(self) -> tuple[tuple[object, ...], ...]:
-        """Describe transient canvas pixels independently from ordinary tick updates."""
-
-        items: list[tuple[object, ...]] = []
-        for automation in self.simulation.live_automations:
-            if automation.kind is AutomationKind.CONSTRUCTION:
-                parameters = automation.parameters
-                assert isinstance(parameters, ConstructionParameters)
-                items.append(
-                    (
-                        "construction",
-                        automation.automation_id,
-                        parameters.construction_value,
-                        tuple(self.canvas_rect),
-                    )
-                )
-                continue
-        return tuple(items)
-
-    def _opengl_canvas_regions_from_key(self, key: object) -> tuple[pygame.Rect, ...]:
-        if not isinstance(key, tuple):
-            return ()
-        regions: list[pygame.Rect] = []
-        for item in key:
-            if not isinstance(item, tuple) or not item:
-                continue
-            rectangle = item[3]
-            if isinstance(rectangle, tuple) and len(rectangle) == 4:
-                regions.append(pygame.Rect(rectangle))
-        return tuple(regions)
 
     def _prune_removed_entities(self) -> None:
         existing = self.simulation.entities.keys()
@@ -1693,13 +1181,6 @@ class AirtsApp:
         origin_x, origin_y = self.map_origin
         selected_entities = self.selected_entities
         large_selection = len(selected_entities) > 128
-        if large_selection and self._draw_cached_large_unit_entities(
-            screen,
-            colors,
-            tile_size,
-            (origin_x, origin_y),
-        ):
-            return
         show_full_health_bars = not large_selection
         unit_radius = max(5, round(tile_size * 0.42))
         bar_width = max(12, round(tile_size * 1.4))
@@ -1794,154 +1275,6 @@ class AirtsApp:
                 round(interaction_range * self.tile_size),
                 1,
             )
-
-    def _draw_cached_large_unit_entities(
-        self,
-        screen: pygame.Surface,
-        colors: dict[EntityKind, tuple[int, int, int]],
-        tile_size: float,
-        origin: tuple[int, int],
-    ) -> bool:
-        """Draw a large scene without rebuilding unchanged transforms each frame."""
-
-        selected_entities = frozenset(self.selected_entities)
-        key: tuple[object, ...] = (
-            id(self.simulation),
-            self.simulation.tick,
-            origin,
-            tile_size,
-            selected_entities,
-            self.inspected_entity_id,
-            len(self.simulation.entities),
-        )
-        if key != self._large_unit_render_key:
-            self._large_unit_render_key = key
-            self._large_unit_renderable = True
-            if self._large_unit_renderable:
-                radius = max(5, round(tile_size * 0.42))
-                bar_width = max(12, round(tile_size * 1.4))
-                origin_x, origin_y = origin
-                blits: list[tuple[pygame.Surface, tuple[int, int]]] = []
-                building_draws: list[tuple[pygame.Rect, tuple[int, int, int], bool]] = []
-                health_bars: list[tuple[pygame.Rect, int]] = []
-                selected_min_x: int | None = None
-                selected_min_y = 0
-                selected_max_x = 0
-                selected_max_y = 0
-                inspected_ring: tuple[tuple[int, int], int] | None = None
-                for entity_id, entity in self.simulation.entities.items():
-                    color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
-                    selected = entity_id in selected_entities
-                    if entity.category is EntityCategory.BUILDING:
-                        width, height = entity.kind.profile.footprint
-                        rectangle = pygame.Rect(
-                            origin_x + round(entity.position.x * tile_size),
-                            origin_y + round(entity.position.y * tile_size),
-                            round(width * tile_size),
-                            round(height * tile_size),
-                        )
-                        building_draws.append((rectangle, color, selected))
-                        center = (
-                            origin_x + round(entity.selection_position.x * tile_size),
-                            origin_y + round(entity.selection_position.y * tile_size),
-                        )
-                    else:
-                        center = (
-                            origin_x + round(entity.position.x * tile_size),
-                            origin_y + round(entity.position.y * tile_size),
-                        )
-                        if selected:
-                            color = (
-                                min(255, color[0] + 45),
-                                min(255, color[1] + 45),
-                                min(255, color[2] + 45),
-                            )
-                            left = center[0] - radius
-                            top = center[1] - radius
-                            right = center[0] + radius
-                            bottom = center[1] + radius
-                            if selected_min_x is None:
-                                selected_min_x = left
-                                selected_min_y = top
-                                selected_max_x = right
-                                selected_max_y = bottom
-                            else:
-                                selected_min_x = min(selected_min_x, left)
-                                selected_min_y = min(selected_min_y, top)
-                                selected_max_x = max(selected_max_x, right)
-                                selected_max_y = max(selected_max_y, bottom)
-                        elif entity_id == self.inspected_entity_id:
-                            inspected_ring = (center, radius)
-                        sprite = self._unit_sprite(radius, color)
-                        blits.append((sprite, (center[0] - radius, center[1] - radius)))
-                    if (
-                        entity.health < entity.kind.profile.max_health
-                        or entity_id == self.inspected_entity_id
-                    ):
-                        bar = pygame.Rect(
-                            center[0] - bar_width // 2,
-                            center[1] - 12,
-                            bar_width,
-                            3,
-                        )
-                        health_width = round(
-                            bar_width * entity.health / entity.kind.profile.max_health
-                        )
-                        health_bars.append((bar, health_width))
-                self._large_unit_blits = tuple(blits)
-                self._large_building_draws = tuple(building_draws)
-                self._large_unit_health_bars = tuple(health_bars)
-                self._large_unit_inspected_ring = inspected_ring
-                self._large_unit_selected_bounds = (
-                    None
-                    if selected_min_x is None
-                    else pygame.Rect(
-                        selected_min_x - 3,
-                        selected_min_y - 3,
-                        selected_max_x - selected_min_x + 6,
-                        selected_max_y - selected_min_y + 6,
-                    )
-                )
-        if not self._large_unit_renderable:
-            return False
-        screen.fblits(self._large_unit_blits)
-        for rectangle, color, selected in self._large_building_draws:
-            pygame.draw.rect(screen, color, rectangle, border_radius=3)
-            pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
-            if selected:
-                pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
-        if self._large_unit_inspected_ring is not None:
-            center, radius = self._large_unit_inspected_ring
-            pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
-        for bar, health_width in self._large_unit_health_bars:
-            pygame.draw.rect(screen, (70, 35, 35), bar)
-            pygame.draw.rect(
-                screen,
-                (74, 218, 111),
-                pygame.Rect(bar.x, bar.y, health_width, 3),
-            )
-        if self._large_unit_selected_bounds is not None:
-            pygame.draw.rect(
-                screen,
-                (245, 245, 245),
-                self._large_unit_selected_bounds,
-                1,
-            )
-        return True
-
-    def _unit_sprite(
-        self,
-        radius: int,
-        color: tuple[int, int, int],
-    ) -> pygame.Surface:
-        key = (radius, color)
-        sprite = self._unit_sprite_cache.get(key)
-        if sprite is None:
-            diameter = radius * 2 + 1
-            sprite = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
-            pygame.draw.circle(sprite, color, (radius, radius), radius)
-            self._unit_sprite_cache[key] = sprite
-        return sprite
 
     def _draw_construction(self, screen: pygame.Surface) -> None:
         construction_automations = tuple(
@@ -2050,33 +1383,21 @@ class AirtsApp:
         return tuple(representatives)
 
     def _representative_path_points(self) -> tuple[tuple[tuple[int, int], ...], ...]:
-        key: tuple[object, ...] = (
-            id(self.simulation),
-            self.simulation.tick,
-            self.simulation.command_count,
-            self.map_origin,
-            self.tile_size,
-            frozenset(self.selected_entities),
-            self.inspected_entity_id,
-        )
-        if key != self._path_render_key:
-            origin_x, origin_y = self.map_origin
-            tile_size = self.tile_size
-            paths: list[tuple[tuple[int, int], ...]] = []
-            for entity_id in self._representative_path_entity_ids():
-                entity = self.simulation.entities[entity_id]
-                points = tuple(
-                    (
-                        origin_x + round(point.x * tile_size),
-                        origin_y + round(point.y * tile_size),
-                    )
-                    for point in self._simplified_path(entity)
+        origin_x, origin_y = self.map_origin
+        tile_size = self.tile_size
+        paths: list[tuple[tuple[int, int], ...]] = []
+        for entity_id in self._representative_path_entity_ids():
+            entity = self.simulation.entities[entity_id]
+            points = tuple(
+                (
+                    origin_x + round(point.x * tile_size),
+                    origin_y + round(point.y * tile_size),
                 )
-                if len(points) >= 2:
-                    paths.append(points)
-            self._path_render_key = key
-            self._path_render_points = tuple(paths)
-        return self._path_render_points
+                for point in self._simplified_path(entity)
+            )
+            if len(points) >= 2:
+                paths.append(points)
+        return tuple(paths)
 
     @staticmethod
     def _simplified_path(entity: Entity) -> tuple[Point, ...]:
@@ -2246,25 +1567,19 @@ class AirtsApp:
             self._command_buttons.append((rectangle, action))
             x += width + 9
 
-    def _draw_panel(
-        self,
-        screen: pygame.Surface,
-        *,
-        background_regions: tuple[pygame.Rect, ...] | None = None,
-    ) -> None:
+    def _draw_panel(self, screen: pygame.Surface) -> None:
         if self._font is None or self._small_font is None:
             raise RuntimeError("fonts not initialized")
         panel = self.left_panel_rect
-        for region in (panel,) if background_regions is None else background_regions:
-            pygame.draw.rect(screen, self.PANEL_BACKGROUND, region)
+        pygame.draw.rect(screen, self.PANEL_BACKGROUND, panel)
         x = 16
         y = 14
-        self._text(screen, "AIRTS — Phase 5", (x, y), (245, 245, 245))
+        self._text(screen, "AIRTS", (x, y), (245, 245, 245))
         y += 28
         self._small_text(
             screen,
-            f"Tick {self.simulation.tick} | Real FPS {self.real_fps:4.0f} | "
-            f"{self.mode.value} | {'PAUSED' if self.paused else 'RUNNING'}",
+            f"Tick {self.simulation.tick} | {self.mode.value} | "
+            f"{'PAUSED' if self.paused else 'RUNNING'}",
             (x, y),
             (166, 191, 215),
         )
@@ -2564,9 +1879,9 @@ class AirtsApp:
 
     def _draw_settings_menu(self, screen: pygame.Surface) -> None:
         x = self.command_bar_rect.x + 14
-        y = self.command_bar_rect.y - 208
+        y = self.command_bar_rect.y - 154
         self._settings_buttons.clear()
-        pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 202), border_radius=4)
+        pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 148), border_radius=4)
         self._small_text(
             screen,
             f"Resolution {self.window_size[0]} x {self.window_size[1]}",
@@ -2578,26 +1893,7 @@ class AirtsApp:
         self._button(screen, lower, "Lower")
         self._button(screen, higher, "Higher")
         self._settings_buttons.extend(((lower, "resolution_lower"), (higher, "resolution_higher")))
-        metrics = self.presentation_metrics
-        self._small_text(
-            screen,
-            f"Frame p95 {metrics.frame_p95_ms:5.1f} ms  Present {metrics.present_p95_ms:5.1f} ms",
-            (x + 10, y + 62),
-            (166, 191, 215),
-        )
-        self._small_text(
-            screen,
-            f"Render {metrics.render_p95_ms:5.1f} ms  Sim {metrics.simulation_p95_ms:5.1f} ms",
-            (x + 10, y + 82),
-            (166, 191, 215),
-        )
-        self._small_text(
-            screen,
-            f"Real FPS {metrics.one_percent_low_fps:4.0f}  Submit FPS {metrics.submit_fps:4.0f}",
-            (x + 10, y + 102),
-            (111, 221, 151),
-        )
-        y += 122
+        y += 66
         for action, label in (("save", "Save"), ("load", "Load"), ("new", "New game")):
             rectangle = pygame.Rect(x + 8, y, 252, 24)
             self._button(screen, rectangle, label)
@@ -2702,14 +1998,6 @@ class AirtsApp:
         if current:
             lines.append(current)
         return lines
-
-
-def _percentile(values: Iterable[float], fraction: float) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        return 0.0
-    index = max(0, min(len(ordered) - 1, ceil(fraction * len(ordered)) - 1))
-    return ordered[index]
 
 
 def _entity_hit_distance(entity: Entity, point: Point) -> float:

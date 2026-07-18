@@ -46,7 +46,7 @@ from airts.validation import (
     validate_positive,
     validate_priority,
 )
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import UnitState
 from airts.world.map_model import Cell, EntityKind
 
 if TYPE_CHECKING:
@@ -247,7 +247,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             ),
         )
     simulation._manual_override_many(command.entity_ids)
-    path_source = "human_group" if len(command.entity_ids) > 128 else "human"
+    path_source = "human" if len(command.entity_ids) == 1 else "human_group"
     for entity_id in command.entity_ids:
         simulation.entities[entity_id].pursue_target = False
         simulation._start_path(
@@ -257,96 +257,24 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             path_source,
             UnitState.MOVING,
         )
-    if len(command.entity_ids) > 128:
-        _prepend_coherent_staging_leg(simulation, command.entity_ids, command.target)
     return simulation._accept("move")
-
-
-def _prepend_coherent_staging_leg(
-    simulation: Simulation,
-    entity_ids: tuple[str, ...],
-    target: Point,
-) -> None:
-    center = Point(
-        sum(simulation.entities[entity_id].position.x for entity_id in entity_ids)
-        / len(entity_ids),
-        sum(simulation.entities[entity_id].position.y for entity_id in entity_ids)
-        / len(entity_ids),
-    )
-    offset_x = target.x - center.x
-    offset_y = target.y - center.y
-    length = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-    if length <= 1e-9:
-        return
-    stage_distance = min(12.0, length)
-    offset_x *= stage_distance / length
-    offset_y *= stage_distance / length
-    blocked = _group_route_obstacles(simulation, entity_ids)
-    for entity_id in entity_ids:
-        entity = simulation.entities[entity_id]
-        if not entity.path:
-            continue
-        stage = Point(entity.position.x + offset_x, entity.position.y + offset_y)
-        if not _straight_segment_is_passable(simulation, entity.position, stage, blocked):
-            continue
-        entity.path.insert(0, stage)
-        destination = entity.move_target
-        if destination is not None and _straight_segment_is_passable(
-            simulation,
-            entity.position,
-            destination,
-            blocked,
-        ):
-            entity.path[:] = [stage, destination]
-        entity.progress_target = stage
-        entity.progress_distance = stage_distance
-
-
-def _straight_segment_is_passable(
-    simulation: Simulation,
-    start: Point,
-    end: Point,
-    blocked: frozenset[Cell],
-) -> bool:
-    sample_count = max(1, int(start.distance_to(end) * 4))
-    previous = simulation.game_map.cell_for(start)
-    for index in range(1, sample_count + 1):
-        fraction = index / sample_count
-        point = Point(
-            start.x + (end.x - start.x) * fraction,
-            start.y + (end.y - start.y) * fraction,
-        )
-        cell = simulation.game_map.cell_for(point)
-        if cell == previous:
-            continue
-        if cell[0] != previous[0] and cell[1] != previous[1]:
-            corners = ((cell[0], previous[1]), (previous[0], cell[1]))
-            if any(
-                not simulation.game_map.is_cell_passable(corner) or corner in blocked
-                for corner in corners
-            ):
-                return False
-        if not simulation.game_map.is_cell_passable(cell) or cell in blocked:
-            return False
-        previous = cell
-    return True
 
 
 def _group_route_obstacles(
     simulation: Simulation,
     entity_ids: tuple[str, ...],
 ) -> frozenset[Cell]:
-    """Treat held and stationary hostile units as fixed route obstacles for large orders."""
+    """Treat held and stationary hostile units as fixed route obstacles."""
 
     blocked = set(simulation._building_cells())
-    if len(entity_ids) <= 128:
-        return frozenset(blocked)
     selected = frozenset(entity_ids)
     owners = {simulation.entities[entity_id].owner_id for entity_id in entity_ids}
     for other_id, other in simulation.entities.items():
         if other_id in selected or not other.is_movable or other.path:
             continue
-        if other.state is UnitState.HOLDING or other.owner_id not in owners:
+        if (
+            other.state is UnitState.HOLDING and not other.congestion_stopped
+        ) or other.owner_id not in owners:
             blocked.update(simulation._cells_at(other, other.position))
     return frozenset(blocked)
 
@@ -356,80 +284,33 @@ def plan_group_paths(
     entity_ids: tuple[str, ...],
     destinations: dict[str, Point],
 ) -> dict[str, PathResult]:
+    """Route a group through at most four shared, destination-derived lanes."""
+
     blocked = _group_route_obstacles(simulation, entity_ids)
-    if len(entity_ids) <= 32:
-        return {
-            entity_id: simulation._routes.dynamic_path(
-                simulation.entities[entity_id].position,
-                destinations[entity_id],
-                blocked,
+    ordered_destinations = tuple(
+        sorted(set(destinations.values()), key=lambda point: (point.y, point.x))
+    )
+    lane_count = min(4, len(ordered_destinations))
+    route_anchors = tuple(
+        ordered_destinations[
+            min(
+                len(ordered_destinations) - 1,
+                (2 * index + 1) * len(ordered_destinations) // (2 * lane_count),
             )
-            for entity_id in entity_ids
-        }
-    center = Point(
-        sum(point.x for point in destinations.values()) / len(destinations),
-        sum(point.y for point in destinations.values()) / len(destinations),
+        ]
+        for index in range(lane_count)
     )
-    anchor_id = min(
-        entity_ids,
-        key=lambda entity_id: (
-            destinations[entity_id].distance_to(center),
-            destinations[entity_id].y,
-            destinations[entity_id].x,
-            entity_id,
-        ),
-    )
-    anchor = destinations[anchor_id]
-    route_anchors: tuple[Point, ...] = (anchor,)
-    route_anchor_by_entity = dict.fromkeys(entity_ids, anchor)
-    if len(entity_ids) > 128 and (blocked or not simulation._all_terrain_passable):
-        start_center = Point(
-            sum(simulation.entities[entity_id].position.x for entity_id in entity_ids)
-            / len(entity_ids),
-            sum(simulation.entities[entity_id].position.y for entity_id in entity_ids)
-            / len(entity_ids),
-        )
-        direction_x = center.x - start_center.x
-        direction_y = center.y - start_center.y
-        length = max((direction_x * direction_x + direction_y * direction_y) ** 0.5, 1.0)
-        lateral_x = -direction_y / length
-        lateral_y = direction_x / length
-        ordered_destinations = sorted(
-            set(destinations.values()),
-            key=lambda point: (
-                (point.x - center.x) * lateral_x + (point.y - center.y) * lateral_y,
-                point.distance_to(center),
-                point.y,
-                point.x,
+    route_anchor_by_entity = {
+        entity_id: min(
+            route_anchors,
+            key=lambda anchor: (
+                destinations[entity_id].distance_to(anchor),
+                anchor.y,
+                anchor.x,
             ),
         )
-        route_count = min(8, (len(entity_ids) + 99) // 100)
-        route_anchors = tuple(
-            ordered_destinations[
-                min(
-                    len(ordered_destinations) - 1,
-                    (2 * route_index + 1) * len(ordered_destinations) // (2 * route_count),
-                )
-            ]
-            for route_index in range(route_count)
-        )
-        ordered_route_entities = sorted(
-            entity_ids,
-            key=lambda entity_id: (
-                (simulation.entities[entity_id].position.x - start_center.x) * lateral_x
-                + (simulation.entities[entity_id].position.y - start_center.y) * lateral_y,
-                entity_id,
-            ),
-        )
-        route_anchor_by_entity = {
-            entity_id: route_anchors[
-                min(
-                    len(route_anchors) - 1,
-                    route_index * len(route_anchors) // len(ordered_route_entities),
-                )
-            ]
-            for route_index, entity_id in enumerate(ordered_route_entities)
-        }
+        for entity_id in entity_ids
+    }
     branch_distance = 8
     paths: dict[str, PathResult] = {}
     for entity_id in sorted(entity_ids):
@@ -935,20 +816,6 @@ def validate_paths(
         )
     for waypoint in waypoints[1:]:
         simulation._routes.shared_path(waypoint, anchor, building_cells)
-
-
-def fail_movement(simulation: Simulation, entity: Entity, reason: str, position: Point) -> None:
-    entity.move_target = None
-    entity.path.clear()
-    entity.state = UnitState.IDLE
-    simulation._reset_movement_liveness(entity, clear_stop=True)
-    simulation.events.record(
-        simulation.tick,
-        EventType.MOVEMENT_FAILED,
-        entity.entity_id,
-        reason=reason,
-        position=[position.x, position.y],
-    )
 
 
 def production_parameters(automation: Automation) -> ProductionParameters:

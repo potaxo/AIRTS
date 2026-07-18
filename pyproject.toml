@@ -9,7 +9,6 @@ version = "0.1.0"
 description = "A human-in-the-loop RTS research environment for language-driven automation."
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "moderngl>=5.12,<6",
     "pygame-ce>=2.5.7,<3",
 ]
 
@@ -18,7 +17,6 @@ dependencies = [
 dev = [
     "mypy>=2.2,<3",
     "pytest>=9.1,<10",
-    "pytest-cov>=7.1,<8",
     "ruff>=0.15.21,<0.16",
 ]
 

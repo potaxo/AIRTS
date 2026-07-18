@@ -21,7 +21,7 @@ from airts.commands import (
     command_to_dict,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.presentation.app import AirtsApp, InputMode, RendererBackend
+from airts.presentation.app import AirtsApp, InputMode
 from airts.simulation import Simulation
 from airts.world.map_model import EntityKind, load_map_data
 
@@ -260,7 +260,7 @@ def test_dense_patrol_assigns_distributed_motion() -> None:
 
 def test_window_close_exits_before_another_tick_or_render_and_releases_resources() -> None:
     simulation = _interaction_simulation()
-    app = AirtsApp(simulation, renderer_backend=RendererBackend.SOFTWARE)
+    app = AirtsApp(simulation)
     lifecycle = Mock()
     clock = Mock()
     clock.tick.return_value = 100
@@ -305,10 +305,7 @@ def test_window_close_exits_before_another_tick_or_render_and_releases_resources
 
 
 def test_render_failure_still_releases_pygame_resources_in_order() -> None:
-    app = AirtsApp(
-        _interaction_simulation(),
-        renderer_backend=RendererBackend.SOFTWARE,
-    )
+    app = AirtsApp(_interaction_simulation())
     lifecycle = Mock()
     clock = Mock()
     clock.tick.return_value = 0
