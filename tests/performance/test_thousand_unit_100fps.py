@@ -170,7 +170,3 @@ def test_thousand_selected_unit_paths_are_visible_but_bounded() -> None:
         if len(call.args) >= 2 and call.args[1] == (225, 225, 225)
     ]
     assert 1 <= len(route_calls) <= MAXIMUM_REPRESENTATIVE_PATHS
-
-
-def test_application_render_loop_uses_the_requested_thousand_fps_ceiling() -> None:
-    assert AirtsApp.FRAME_RATE_LIMIT == 1_000

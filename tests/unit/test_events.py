@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from airts.events import EventLog, EventType
 
 
@@ -25,3 +27,17 @@ def test_event_log_has_stable_sequence_and_writes_json_lines(tmp_path: Path) -> 
         "tick": 3,
         "type": "command_accepted",
     }
+
+
+def test_event_query_filters_newest_first_and_validates_limit() -> None:
+    events = EventLog()
+    events.record(1, EventType.COMMAND_ACCEPTED, "one")
+    events.record(2, EventType.AUTOMATION_MODIFIED, "two", reason="EDITED")
+    events.record(3, EventType.AUTOMATION_MODIFIED, "two", reason="EDITED_AGAIN")
+
+    result = events.query(
+        event_types=frozenset({EventType.AUTOMATION_MODIFIED}), subject_id="two", limit=1
+    )
+    assert [event.tick for event in result] == [3]
+    with pytest.raises(ValueError, match="negative"):
+        events.query(limit=-1)

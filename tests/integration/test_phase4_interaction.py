@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-import pytest
-
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import load_replay, run_replay, save_replay
 from airts.commands import (
@@ -18,7 +16,7 @@ from airts.commands import (
     SetSelectionCommand,
     command_to_dict,
 )
-from airts.events import EventLog, EventType
+from airts.events import EventType
 from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
@@ -138,17 +136,3 @@ def test_save_restores_spatial_state(make_map: Callable[[int], GameMap], tmp_pat
     restored = load_simulation(destination)
     assert restored.snapshot() == simulation.snapshot()
     assert restored.spatial.references[region.reference_id or ""].persistent
-
-
-def test_event_query_filters_newest_first_and_validates_limit() -> None:
-    events = EventLog()
-    events.record(1, EventType.COMMAND_ACCEPTED, "one")
-    events.record(2, EventType.AUTOMATION_MODIFIED, "two", reason="EDITED")
-    events.record(3, EventType.AUTOMATION_MODIFIED, "two", reason="EDITED_AGAIN")
-
-    result = events.query(
-        event_types=frozenset({EventType.AUTOMATION_MODIFIED}), subject_id="two", limit=1
-    )
-    assert [event.tick for event in result] == [3]
-    with pytest.raises(ValueError, match="negative"):
-        events.query(limit=-1)

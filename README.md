@@ -1,48 +1,26 @@
 # AIRTS
 
-AIRTS is a Windows-native RTS research prototype for direct control and persistent,
-human-supervised automation. The current build includes economy, construction, production,
-combat, spatial commands, save/load, and deterministic replay. Language-model control is not
-implemented yet.
-
-The [design index](docs/design.md) is the entry point for architecture, scope, implemented
-milestones, limitations, and focused owner documents. [AGENTS.md](AGENTS.md) contains contributor
-rules and required validation.
+Windows-native RTS research prototype with direct control, persistent automations, economy,
+construction, combat, save/load, and deterministic replay. Language-model control is planned.
+[Design](docs/design.md) owns scope/contracts; [AGENTS](AGENTS.md) owns contributor workflow.
 
 ## Requirements and setup
 
-Use Windows, PowerShell, Python 3.13, and the repository-local virtual environment. From the
-repository root:
+Windows, PowerShell, Python 3.13; dependencies are defined in [pyproject.toml](pyproject.toml).
+From the repository root:
 
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python -m airts
 ```
 
 ## Run
 
-```powershell
-.\.venv\Scripts\python -m airts
-```
-
-OpenGL 3.3 is the default renderer. For diagnostics or systems where OpenGL is not intended:
+OpenGL 3.3 is the default. Startup failures are reported; explicitly choose software if needed:
 
 ```powershell
 .\.venv\Scripts\python -m airts --renderer software
-```
-
-OpenGL startup failures are reported; select the software backend explicitly when needed.
-
-The OpenGL frontend uses a 1,000 FPS application-clock ceiling and does not request VSync. Open
-`Settings` to choose a window-resolution preset and inspect rolling p95 frame, render, present-wait,
-and simulation timing. The left rail's `Real FPS` is the rolling 1%-low rate derived from p99
-completed-swap frame time, so visible stalls lower it even when average submission remains high.
-Settings retains average `Submit FPS` for comparison. Neither application-side measurement captures
-physical monitor scan-out, which still depends on the driver and Windows compositor.
-
-Common workflows:
-
-```powershell
 .\.venv\Scripts\python -m airts --map PATH
 .\.venv\Scripts\python -m airts --enemy-spawn-seconds 2.5 --enemy-cap 60
 .\.venv\Scripts\python -m airts --event-log events.jsonl
@@ -53,8 +31,11 @@ Common workflows:
 .\.venv\Scripts\python -m airts --help
 ```
 
-Enemy generation defaults to one unit per second with a cap of 100. Set
-`--enemy-spawn-seconds 0` to disable it.
+Enemy generation defaults to one unit/second, cap 100; `--enemy-spawn-seconds 0` disables it.
+Settings offers resolution presets and p95 frame/render/present-wait/simulation timings.
+`Real FPS` measures rolling inverse-p99 completed-swap time; average `Submit FPS` is diagnostic.
+The frontend has a 1,000 FPS ceiling and requests VSync off. These measurements do not count
+physical monitor scan-out; [performance contracts](docs/milestones/performance.md) explain limits.
 
 ## Controls
 
@@ -85,9 +66,3 @@ Enemy generation defaults to one unit per second with a cap of 100. Set
 | Middle-drag | Pan the game canvas independently of window resolution |
 | Mouse wheel over left panel | Scroll active automations |
 | Double-click friendly entity | Select every friendly entity of the same type inside the canvas |
-
-## Development
-
-See [AGENTS.md](AGENTS.md) for contributor workflow and required checks, and the
-[engineering change policy](docs/architecture/engineering.md#31-engineering-change-policy) for
-documentation ownership. [pyproject.toml](pyproject.toml) defines dependencies and tool settings.

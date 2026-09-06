@@ -1,104 +1,59 @@
-# AIRTS Engineering Architecture
+# Engineering
 
-This document owns repository structure, dependency direction, validation strategy, and durable engineering-change policy.
+[Design](../design.md) owns scope and invariants; [AGENTS](../../AGENTS.md) owns workflow.
 
-[Design index](../design.md) · [Roadmap](../roadmap.md)
+## Ownership
 
----
+AIRTS is a modular monolith. Split code by responsibility and reason to change, not line count.
+Keep one canonical implementation per responsibility; the public facade does not require private
+forwarders for every system function. Local work calls its owner; retain shared hooks where useful.
 
-# 30. Development Philosophy
-
-Define invariants, implement one bounded vertical slice, test its behavior, and revise the design
-from evidence. Prefer clear types and focused functions over speculative factories, registries,
-or inheritance hierarchies. The design records useful contracts rather than every class or method.
-
----
-
-# 31. Engineering Change Policy
-
-`AGENTS.md` owns contributor workflow and validation commands. Update the owning design document
-when architecture, dependencies, scope, behavior, performance strategy, or limitations change.
-Record the changed contract, important tradeoffs, and relevant acceptance tests; discuss effects
-on authority, determinism, or persistence when they apply. A behavior-preserving cleanup needs a
-concise ownership/tradeoff note, not a new milestone or a repeated checklist of unaffected systems.
-
-Update `docs/design.md` when document ownership or the implemented baseline changes. Add an ADR
-when a consequential choice has durable alternatives. README owns setup and controls;
-`pyproject.toml` owns dependencies. Link to these owners rather than restating their rules.
-
-## 31.1 Module boundary and refactoring policy
-
-AIRTS is a modular monolith. `airts.simulation.Simulation` is the stable public facade,
-authoritative state owner, and tick orchestrator. Authoritative world state types live under
-`airts.world`; routing and spatial-query mechanisms live under `airts.navigation`; cohesive
-simulation behaviors live under `airts.systems`; persistence and replay live under
-`airts.adapters`; and Pygame/OpenGL code lives under `airts.presentation`. Runtime dependencies
-point from presentation and adapters toward the facade, from the facade toward systems, and from
-systems toward navigation, world, and stable top-level contracts. World and navigation code never
-depend on systems, adapters, presentation, or the facade.
-
-Split modules by responsibility, invariant, and reason to change rather than by a fixed line
-count. A large cohesive module may be acceptable; a smaller module with unrelated responsibilities
-is not. Avoid generic dumping grounds such as `utils`, `helpers`, or `manager`, and introduce a
-subpackage only when it represents a durable boundary.
-
-Refactor one responsibility at a time behind stable interfaces. Establish the test baseline first,
-preserve the documented `airts.Simulation` facade, commands, persistence and replay schemas, tick
-and event order, and seeded determinism, then run focused tests before the full suite. Internal
-implementation paths are not parallel public facades: moved code has one canonical package owner.
-A flag-day rewrite requires an explicit milestone and migration contract.
-
-## 31.2 Repository ownership
-
-| Location | Responsibility |
+| Location under `src/airts/` | Responsibility |
 | --- | --- |
-| `src/airts/world/` | Authoritative entities, maps, occupancy, visibility, and projectiles |
-| `src/airts/navigation/` | Deterministic routing, steering support, and spatial indexing |
-| `src/airts/systems/` | Command execution and tick-driven domain behavior |
-| `src/airts/adapters/` | Persistence and replay at the simulation boundary |
-| `src/airts/presentation/` | Input, inspection, software rendering, and OpenGL rendering |
-| `tests/unit/` | Isolated domain-component contracts |
-| `tests/integration/` | Facade, adapter, milestone, and cross-system behavior |
-| `tests/movement/` | Collision and swarm behavior with specialized fixtures |
-| `tests/performance/` | Explicit workload and frame-rate contracts |
-| `tests/architecture/` | Dependency and documentation structure policies |
+| `simulation.py` | Public facade, state, command boundary, tick order |
+| `commands.py`, `control.py`, `validation.py` | Shared input and validation contracts |
+| `automations.py`, `geometry.py`, `spatial.py`, `events.py` | Schemas, geometry, references, events |
+| `world/` | Entity/map profiles, occupancy, projectiles, visibility |
+| `navigation/` | Routing, collision support, spatial indexing |
+| `systems/` | Command handling and tick-driven movement, automation, combat, production, construction, economy |
+| `adapters/` | Save/load and replay |
+| `presentation/` | Input, UI/software renderer in `app.py`; GPU renderer in `opengl_renderer.py` |
 
-Moved code has one canonical package path under [ADR 0005](../decisions/0005-canonical-module-ownership.md).
-The stable public facade does not require mirroring every system function as a private method.
-Command dispatch and tick orchestration call their owners directly; system-local calls stay local.
-Shared cross-system hooks remain where removing them would expand coupling. Unused forwarding
-methods and obsolete algorithms are removed under [ADR 0007](../decisions/0007-simplify-internal-delegation.md).
-Public commands, state schemas, event order, and tick behavior are preserved.
+Runtime dependencies point inward: presentation/adapters -> facade -> systems -> navigation/world.
+World does not import navigation; neither imports systems, adapters, presentation, or the facade.
+Systems may reference `Simulation` under `TYPE_CHECKING` only. Pygame/ModernGL stay outside domain
+code. Keep the public `airts.Simulation` identity; do not recreate transitional compatibility APIs.
 
-Architecture tests enforce dependency direction (including nested and relative imports), keep
-Pygame and OpenGL outside the domain, reject removed compatibility imports, and preserve the public
-facade. Documentation checks verify local links and that owner documents are reachable from the
-index. Filenames and a fixed global section count are not architectural invariants.
+## Change policy
 
-The unit, integration, movement, and performance suites cover the delegation cleanup, including
-save/load continuation and replay equality. Hardware performance thresholds remain unchanged.
-Optional blocking inspection workloads live under `tests/gui_scenarios/` outside pytest discovery.
+Update only the document that owns a changed contract. Keep implementation details in code,
+parameter values in their definitions, and executable acceptance scenarios in tests. Historical
+rationale should explain a surviving tradeoff once, not repeat every patch or validation run.
+A consequential new choice needs a concise decision/tradeoff note in its owner, not another file
+unless it introduces a separate durable concern. Roadmap proposals are not current requirements.
 
-## 31.3 Test ownership and fixture scope
+For cleanup, preserve commands, schemas, tick/event order, determinism, and hardware thresholds.
+A movement rewrite needs an explicit replacement scope and save/replay migration decision.
+Do not introduce generic managers, registries, parallel facades, or unrelated restructuring.
 
-Test a contract at the lowest useful layer. Automation lifecycle and command serialization belong
-in unit tests; facade-driven patrol behavior belongs in simulation integration tests. The command
-codec matrix covers every command kind, so UI tests need not repeat isolated codec assertions.
-Parameterized validation cases keep separate descriptive IDs and expected failures.
+## Test ownership
 
-Renderer correctness and mocked startup/error paths live in
-`tests/integration/test_opengl_presentation.py`. Startup and overlay-key checks use small worlds;
-full-scene and timing contracts retain their required scale. Software and OpenGL stress tests use
-the same fresh 1,000-scout map from `tests/scout_scenario.py`, with no shared mutable simulation.
-Timing workloads remain under `tests/performance/`; their thresholds and frame counts are unchanged.
+| Suite | Contract |
+| --- | --- |
+| `tests/unit/` | Isolated domain components and codecs |
+| `tests/integration/` | Facade, adapters, controls, and renderer behavior |
+| `tests/movement/` | Collision, traffic, arrival, and specialized movement fixtures |
+| `tests/performance/` | Measured workload and timing contracts |
+| `tests/architecture/` | Dependency direction, public facade, document links/discovery |
+| `tests/gui_scenarios/` | Explicit, blocking visual inspection; excluded from default discovery |
 
-Persistence scenarios remain distinct for patrol, repair suspension, production queues, ambient
-spawns, and linked defenses. They share a full exported-state continuation assertion that includes
-events, command history, counters, and transient movement state rather than repeating partial
-snapshot checks. Merge repeated setup and assertions without collapsing independent failures into
-one long scenario or replacing behavior checks with source-text checks.
+Test at the lowest useful layer. Remove duplicate smoke checks when a retained scenario covers
+their assertions; merge unique assertions into that scenario. Preserve independent failures and
+use descriptive parameter IDs. Do not freeze obsolete filenames or private candidate ordering.
+Architecture checks inspect real imports, including nested/relative imports and type-only guards.
 
-The FPS acceptance helper is exercised with explicit completed-frame timestamps: a stuttering
-sample must fail 100 Real FPS even when average throughput exceeds it. This replaces a source-text
-blacklist that could be satisfied by a comment or broken by harmless renaming; benchmark calls
-continue to use the same measured acceptance helper and invariant p99 rule.
+Keep fixtures local until independent tests need identical setup; never share mutable simulations.
+Renderer startup checks use small worlds; full-scene/timing tests retain their required scale.
+Backend stress tests share `tests/scout_scenario.py`. Persistence scenarios retain distinct patrol,
+repair, queues, spawns, and defense cases and compare complete exported state after continuation.
+FPS tests use the common completed-frame probe; no average-throughput substitution or lower gates.

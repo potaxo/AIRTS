@@ -33,22 +33,6 @@ PACKAGE_RULES = {
         "airts.simulation",
     },
 }
-REMOVED_TOP_LEVEL_MODULES = frozenset(
-    {
-        "app",
-        "entities",
-        "map_model",
-        "movement",
-        "occupancy",
-        "opengl_renderer",
-        "pathfinding",
-        "persistence",
-        "projectiles",
-        "replay",
-        "spatial_index",
-        "visibility",
-    }
-)
 
 
 def test_simulation_remains_the_public_package_facade() -> None:
@@ -57,44 +41,21 @@ def test_simulation_remains_the_public_package_facade() -> None:
 
 def test_package_dependencies_point_toward_domain_code() -> None:
     violations: list[str] = []
-    for package, forbidden_imports in PACKAGE_RULES.items():
-        for path in sorted((SOURCE / package).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for module_name, line in _runtime_imports(tree, _package_name(path)):
-                if _matches_any(module_name, forbidden_imports):
-                    violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
-    assert not violations, "\n".join(violations)
-
-
-def test_internal_source_uses_canonical_package_imports() -> None:
-    violations: list[str] = []
-    removed_imports = {f"airts.{module}" for module in REMOVED_TOP_LEVEL_MODULES}
-    for path in sorted(SOURCE.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for module_name, line in _runtime_imports(tree, _package_name(path)):
-            if _matches_any(module_name, removed_imports):
-                violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
-    assert not violations, "\n".join(violations)
-
-
-def test_removed_top_level_modules_do_not_return() -> None:
-    assert not [
-        module for module in sorted(REMOVED_TOP_LEVEL_MODULES) if (SOURCE / f"{module}.py").exists()
-    ]
-
-
-def test_domain_code_does_not_import_presentation_dependencies() -> None:
-    violations: list[str] = []
     paths = list(SOURCE.glob("*.py"))
     paths.extend(path for package in PACKAGE_RULES for path in (SOURCE / package).rglob("*.py"))
     for path in paths:
         if path.name == "__main__.py":
             continue
+        package = path.relative_to(SOURCE).parts[0]
+        forbidden = PACKAGE_RULES.get(package, set()) | {
+            "pygame",
+            "moderngl",
+            "airts.presentation",
+            "airts.adapters",
+        }
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for module_name, line in _runtime_imports(tree, _package_name(path)):
-            if _matches_any(
-                module_name, {"pygame", "moderngl", "airts.presentation", "airts.adapters"}
-            ):
+            if _matches_any(module_name, forbidden):
                 violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
 

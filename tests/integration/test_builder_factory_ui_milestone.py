@@ -537,18 +537,9 @@ def test_escape_returns_to_select_mode_and_detaches_every_selection() -> None:
     assert app.simulation.selection.entity_ids == ()
 
 
-def test_double_click_selection_helper_selects_same_kind_in_current_view() -> None:
-    app = AirtsApp(_simulation())
-    app.resize_layout((1100, 760))
-
-    app._select_all_visible_kind(EntityKind.BUILDER)
-
-    assert app.selected_entities == {"builder", "builder_2"}
-    assert app.inspected_kind is EntityKind.BUILDER
-
-
 def test_double_click_entity_selects_all_visible_friendly_entities_of_that_kind() -> None:
     app = AirtsApp(_simulation())
+    app.resize_layout((1100, 760))
     builder = app.simulation.entities["builder"]
     with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
         app._select_entities(builder.position, builder.position)

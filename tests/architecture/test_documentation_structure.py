@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs"
@@ -11,9 +12,7 @@ LOCAL_LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 
 
 def test_design_index_links_to_owning_documents() -> None:
-    owners = {DOCS / "roadmap.md", DOCS / "decisions" / "README.md"}
-    owners.update((DOCS / "architecture").glob("*.md"))
-    owners.update((DOCS / "milestones").glob("*.md"))
+    owners = set(DOCS.rglob("*.md")) - {DOCS / "design.md"}
     linked = {
         (DOCS / target.split("#", 1)[0]).resolve()
         for target in LOCAL_LINK.findall((DOCS / "design.md").read_text(encoding="utf-8"))
@@ -24,15 +23,22 @@ def test_design_index_links_to_owning_documents() -> None:
 
 def test_local_markdown_links_resolve() -> None:
     markdown_files = [ROOT / "README.md", ROOT / "AGENTS.md", *sorted(DOCS.rglob("*.md"))]
+    anchors = {}
+    for path in markdown_files:
+        headings = re.findall(r"^#{1,6}\s+(.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
+        anchors[path.resolve()] = {
+            re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+            for heading in headings
+        }
     missing: list[str] = []
     for path in markdown_files:
         for target in LOCAL_LINK.findall(path.read_text(encoding="utf-8")):
-            if target.startswith(("#", "http://", "https://")):
+            if target.startswith(("http://", "https://")):
                 continue
-            target_path = target.split("#", 1)[0]
-            if not target_path:
-                continue
-            resolved = (path.parent / target_path).resolve()
-            if not resolved.exists():
+            target_path, _, fragment = unquote(target).partition("#")
+            resolved = (path.parent / target_path).resolve() if target_path else path.resolve()
+            if not resolved.exists() or (
+                fragment and resolved in anchors and fragment not in anchors[resolved]
+            ):
                 missing.append(f"{path.relative_to(ROOT)} -> {target}")
     assert not missing, "\n".join(missing)

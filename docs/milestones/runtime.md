@@ -1,98 +1,106 @@
-# AIRTS Implemented Runtime Milestone
+# Runtime contract
 
-This document records the implemented builder, factory, and responsive-UI contract. It is
-normative for current behavior together with the [design index](../design.md).
+[Design](../design.md) owns scope; [performance](performance.md) owns rendering and workload gates.
+This document consolidates implemented behavior. Exact schemas/profiles live in their code owners.
 
----
+## World and spatial input
 
-# 37. Builder, Factory, and Responsive UI Milestone
+- Static weighted grid; grass, road, forest, water, rock, and bridge terrain. Entity profiles and
+  footprints: [map_model.py](../../src/airts/world/map_model.py). Buildings are hard obstacles;
+  mobile-unit exclusion belongs to physical colliders, not an impassable cell wall.
+- Point, polyline, rectangle, and freehand inputs normalize to `PointTarget`, `PolylineTarget`,
+  and `PolygonRegion`. Rectangles/freehand become validated polygons.
+- Typed selections and spatial references have stable IDs. Naming persists a user region;
+  edits replace whole geometry. Deleting a used reference cancels affected automations explicitly.
+  Ownership validation is atomic; destroyed entities are pruned from selection.
+- Visibility is owner-specific: visible, explored, and unexplored cells. Future provider inputs
+  must distinguish visible evidence, observation history, and inference from complete internal state.
 
-## Construction
+## Commands and automations
 
-The simulation adds a factory-produced `builder` unit. A selected builder group may create a factory,
-repair hub, or resource generator by choosing a building in the right context panel and clicking a
-grid location. UI code may preview or submit construction, but only the simulation may validate
-placement, reserve resources, advance progress, or create the building.
+[commands.py](../../src/airts/commands.py) owns tagged, serializable commands;
+[automations.py](../../src/airts/automations.py) owns parameters and legal lifecycle transitions.
+Move, stop, hold, attack, spatial edits, and automation actions share deterministic validation.
+Failures identify their operation, subject, and reason; no invalid proposal silently changes state.
 
-Placement validation covers map bounds, terrain, footprint overlap, ownership, and builder
-capability. Factories, repair hubs, and resource generators cost 400, 250, and 200 resources. A
-shared construction job reserves that cost once and requires 100 construction value. Every builder
-still assigned to the job contributes its profile's build speed, currently 5 value per tick, only
-while within its 2.5-map-unit build range of the building footprint. Out-of-range builders route to
-a valid perimeter point and contribute no work until they arrive. One in-range builder therefore
-completes a job in 20 ticks, while additional in-range builders reduce elapsed time without
-duplicating the cost or result. Command centers are scenario-defined and not constructible.
+A unit has at most one active controlling assignment and may retain a suspended assignment during
+explicit repair. Direct control detaches units, records override, and leaves remaining members
+working. Creating a new patrol/defend on explicitly selected units replaces their older ordinary
+assignment even at lower priority. Background claims use emergency status, priority, and recency.
+Empty ordinary work is canceled; valid future-unit sources may wait. Terminal work leaves live UI.
+Manual factory override pauses its controller; resume must reclaim the factory.
 
-Shift-clicking while a building placement tool is active keeps that tool selected and appends a
-reserved construction site to the selected builders' FIFO queue. Waiting jobs do not own builders
-or reserve resources; they reserve only their non-overlapping footprints. When the current job
-completes or is canceled, the next job claims all still-available builders and charges its cost.
-A non-Shift construction command replaces pending construction jobs for those builders. Queue
-intent, lifecycle, progress, assignments, and destinations are persisted and replayed.
+Lifecycle: proposed -> validating -> optional confirmation -> active; waiting can resume when
+resources/capacity return, blocked records unavailable action, and failed records unrecoverable
+loss. Pause/resume/cancel and all terminal transitions retain structured reasons and history.
+Supported templates: patrol, defend, production, construction, reinforcement, repair-and-return,
+and economy. Reinforcement transfers eligible units and fails when its target is invalidated.
 
-Right-click while placement is active closes only the placement tool. It must not issue a move or
-attack command, cancel accepted construction, or change builder assignments. Assigned builders
-inside a reserved footprint route to a valid perimeter point and do not contribute work while
-inside. If any entity still occupies the footprint at 100 percent progress, the job remains
-inspectable with reason `SITE_OCCUPIED` and retries safely; occupancy is committed before the
-finished building is published to entity state.
+## Movement and combat
 
-Construction commands, automation state, resource accounting, timing, persistence, and replay all
-use the same authoritative simulation path.
+All static move/patrol/defend/repair/production/combat routes use shared deterministic routing with
+bounded fields and fair per-controller/global budgets. Dynamic unit-penalty replans are uncached.
+Weighted four-neighbor reachability, terrain/building clearance, and speed bounds remain required.
+Patrol groups follow the same cycle direction. Small defenses use exact stations; undersized targets
+expand into unique reachable holding space. Same-owner, same-target defenses coordinate membership
+and retain valid stations on growth; contraction can reassign outer survivors into compact slots.
+Line defenses cover the full polyline. Glow follows the authoritative assembly radius.
 
-## Factory Production
+Current movement uses continuous steering/push for small forces and topology-sensitive manual
+traffic, with coherent translation/reservation slots for large forces. Idle friendlies may yield;
+held units, stationary enemies, and docked defenders are anchors. Reservations retain surviving
+identities while spacing is valid; topology changes invalidate unsafe derived state. Queueing must
+not trigger unbounded replanning or cut across water. Large expanded defenses may adopt valid,
+pressure-free arrival positions inside their envelope; small groups retain exact stations.
+[Movement tests](../../tests/movement/test_swarm_movement.py) and
+[crowd contracts](performance.md#crowd-and-routing) retain the acceptance details.
 
-Factories produce every current mobile kind: scout, light tank, heavy tank, and builder. All
-manual, finite ordered, and continuous requests share the same five-tick build, resource
-reservation, spawn search, event, lifecycle, persistence, and replay path. An ordered request is a
-sequence of `(unit kind, exact positive quantity)` stages. It completes only after the last stage
-and then leaves the live automation panel. A continuous request repeats one kind until explicitly
-canceled; a newer continuous request supersedes an older unfinished continuous request for that
-factory. Finite player queues have execution priority over the current continuous request, which
-waits and resumes after finite work completes. Continuous production does not create a defense by
-itself. `Produce + Defend` and automation retargeting attach the selected polygon or polyline to
-the factory's existing loop, preserve that loop's unit kind, and route its existing and future
-produced units into one linked defense automation. A polygon uses the expanding gathering-point
-formation. A polyline creates an ordinary line defense and deterministically redistributes the
-produced force at evenly spaced stations across the full line whenever a unit joins.
+Opportunistic fire does not cancel locomotion. Explicit attack pursuit stops at weapon range.
+Projectiles retain their last target destination: a removed target leaves the shot/trace alive
+until arrival, with no damage to bystanders. Repair is explicitly requested, selects units strictly
+below the default 30% health threshold, prefers repair hubs, and restores suspended work or returns
+to the previous position. Low health alone does not replace the current automation.
 
-Same-kind building controls apply to the complete compatible friendly selection. Selecting several
-factories and choosing Loop submits one independent continuous production command per factory;
-starting an ordered queue copies the exact staged sequence to every selected factory; and
-`Produce + Defend` retargets every selected factory loop to the same line or polygon. The UI only
-broadcasts ordinary commands. It does not merge factory state, reserve resources, advance work, or
-create units itself. Consequently every factory retains its own authoritative costs, timing, queue
-priority, spawn behavior, persistence, and replay history. Other contextual building actions follow
-the same selection-wide rule when their underlying command supports a group, including economy
-development across all selected friendly resource generators.
+## Economy, production, and construction
 
-## Interface
+Each owner has an integer resource balance. Each generator adds 1,000 every ten ticks, including
+without an automation. Runtime enemy generation defaults to one unit/second, capped at 100;
+configuration and seed govern reproducible spawning. [README](../../README.md#run) owns CLI controls.
 
-The application UI has a left status and scrollable automation rail, a central pannable canvas,
-and a right selection/action rail. The automation rail exposes a high-contrast draggable scrollbar,
-clamps and backfills its viewport whenever live items disappear, and presents a factory production
-loop with its linked area-defense automation as one management item. Mixed selections first show
-every selected entity kind. The player chooses one kind to deselect other kinds before its
-statistics and valid controls appear;
-a single-kind selection opens those details immediately. Double-clicking a friendly entity selects
-all friendly entities of that kind currently inside the canvas. Escape returns to selection mode
-and clears entity, geometry, placement, and inspection state. Save, load, new game, resolution
-presets, and rolling frame/present/simulation timing are grouped under a settings button, while the
-full control reference is hidden from the normal
-status surface. Middle-drag pans the canvas through shared map/screen transforms, and the resizable
-window recalculates rail, canvas, command-bar, font, and map scaling from its current dimensions.
-The left rail reports `Real FPS`, a stutter-sensitive rolling 1%-low rate calculated from the p99
-completed-swap frame interval. Settings retains the rolling average `Submit FPS` for comparison.
-These are application-side presentation measurements, not claims about physical monitor scan-out.
-Building placement previews its snapped footprint in green when
-valid and red when blocked; accepted construction jobs remain visible with completion progress.
-Single-kind detail titles and applicable action labels show the selected count so the scope of a
-group command is visible before it is submitted.
+Factories produce scouts, light/heavy tanks, and builders through one five-tick, paid production
+path. Finite staged quantities run FIFO; finite work preempts the continuous loop, which resumes
+afterward. A newer loop replaces the previous unfinished loop without discarding finite requests.
+No spawn space/resources means waiting; source destruction fails the job. IDs are deterministic.
+`Produce + Defend` retargets each selected factory's existing loop without changing its unit kind
+and attaches existing/future units to a linked defense. Polygons gather; polylines spread along the
+line. Factories remain independent owners of costs, queues, and progress.
 
-## Exclusions
+Builders construct factories (400), repair hubs (250), and generators (200), not command centers.
+Placement validates capability, ownership, bounds, terrain, footprints, and reservations. One job
+charges once and requires 100 value; each assigned builder contributes its profile's speed
+(currently 5/tick) only within 2.5 units of the footprint and outside it. Builders route to the
+perimeter first. Multiple builders accelerate one job without duplicating cost or the building.
 
-This milestone does not add builder resource gathering, construction refunds,
-command-center construction, technology prerequisites, or multiple factories contributing to one
-production automation.
+Shift-placement appends FIFO jobs and keeps placement active. Waiting jobs reserve footprints,
+not resources or builders; activation claims available builders and charges once. Ordinary placement
+replaces pending jobs for those builders. Right-click closes placement without issuing movement or
+altering accepted work. A completed occupied site waits with `SITE_OCCUPIED`; commit occupancy before
+publishing a building. Queue, progress, resource, and assignment state survive save/replay.
 
----
+## Persistence and presentation
+
+[persistence.py](../../src/airts/adapters/persistence.py) and
+[replay.py](../../src/airts/adapters/replay.py) own versioned JSON schemas and rejection of malformed
+or incompatible input. Saves preserve complete authoritative state, selections, queues, combat,
+movement progress, events, and counters; replay checks state/events from recorded commands.
+Derived navigation/traffic caches rebuild deterministically; presentation history is not saved.
+[events.py](../../src/airts/events.py) provides ordered, filterable events and JSON Lines export.
+
+The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays
+valid controls for the selected kind and selected count. Double-click selects visible friendlies
+of one kind; Escape clears selection/placement/inspection. Same-kind actions broadcast ordinary
+commands to the compatible selection. Linked production/area defense share a management item;
+scrollbars clamp/backfill when work disappears. Placement previews validity and job progress.
+Settings owns save/load/reset, resolution, and timing; [README](../../README.md#controls) owns keys.
+Window close stops before another tick/draw. Normal and exceptional exits release GPU objects,
+events, fonts, display, and Pygame state. Building hit tests use visible footprints.

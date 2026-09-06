@@ -239,19 +239,6 @@ def test_crossing_units_recover_and_are_deterministic() -> None:
     assert first.snapshot() == second.snapshot()
 
 
-def test_dense_patrol_assigns_distributed_motion() -> None:
-    simulation = _interaction_simulation()
-    result = simulation.execute(
-        CreatePatrolCommand(("unit", "tank"), rectangle_region(Point(7, 7), Point(10, 10)))
-    )
-
-    simulation.advance(80)
-
-    assert result.accepted
-    assert simulation.entities["unit"].position != simulation.entities["tank"].position
-    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.ACTIVE
-
-
 def test_window_close_exits_before_another_tick_or_render_and_releases_resources() -> None:
     simulation = _interaction_simulation()
     app = AirtsApp(simulation, renderer_backend=RendererBackend.SOFTWARE)

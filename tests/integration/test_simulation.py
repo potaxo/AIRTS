@@ -24,12 +24,15 @@ def test_manual_movement_reaches_target_on_fixed_ticks(
     make_map: Callable[[int], GameMap],
 ) -> None:
     simulation = Simulation(make_map(1))
+    assert simulation.occupancy.cells_for("unit_01") == frozenset({(1, 1)})
 
     result = simulation.execute(MoveCommand(("unit_01",), Point(6.5, 1.5)))
     simulation.advance(10)
 
     assert result.accepted
     assert simulation.entities["unit_01"].position == Point(6.5, 1.5)
+    assert simulation.occupancy.cells_for("unit_01") == frozenset({(6, 1)})
+    assert "unit_01" not in simulation.occupancy.occupants((1, 1))
     assert any(
         event.event_type is EventType.MOVEMENT_COMPLETED for event in simulation.events.events
     )
@@ -191,3 +194,38 @@ def test_invalid_patrol_geometry_cannot_mutate_world_state(
     assert not result.accepted
     assert simulation.snapshot() == before
     assert not simulation.automations
+
+
+def test_group_move_allocates_distinct_destination_cells(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    simulation = Simulation(make_map(2))
+
+    result = simulation.execute(MoveCommand(("unit_01", "unit_02"), Point(7.5, 7.5)))
+    simulation.advance(30)
+
+    assert result.accepted
+    assert simulation.occupancy.cells_for("unit_01") != simulation.occupancy.cells_for("unit_02")
+
+
+def test_building_footprint_is_a_hard_pathfinding_obstacle() -> None:
+    game_map = load_map_data(
+        {
+            "id": "building_path",
+            "name": "Building Path",
+            "width": 13,
+            "height": 9,
+            "terrain": {"default": "grass", "rectangles": []},
+            "entities": [
+                {"id": "unit", "kind": "scout", "position": [1.5, 4.5]},
+                {"id": "factory", "kind": "factory", "position": [4, 2]},
+            ],
+        }
+    )
+    simulation = Simulation(game_map)
+
+    result = simulation.execute(MoveCommand(("unit",), Point(10.5, 4.5)))
+    path_cells = {(int(point.x), int(point.y)) for point in simulation.entities["unit"].path}
+
+    assert result.accepted
+    assert path_cells.isdisjoint(simulation.occupancy.cells_for("factory"))
