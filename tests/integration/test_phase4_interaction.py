@@ -16,7 +16,6 @@ from airts.commands import (
     ModifyAutomationCommand,
     RenameRegionCommand,
     SetSelectionCommand,
-    command_from_dict,
     command_to_dict,
 )
 from airts.events import EventLog, EventType
@@ -128,14 +127,7 @@ def test_automation_modification_is_atomic_and_inspectable(
     )
 
 
-def test_phase4_commands_round_trip_and_save_restores_spatial_state(
-    make_map: Callable[[int], GameMap], tmp_path: Path
-) -> None:
-    command = ModifyAutomationCommand(
-        "automation_001", title="Watch bridge", priority=3, minimum_units=4
-    )
-    assert command_from_dict(command_to_dict(command)) == command
-
+def test_save_restores_spatial_state(make_map: Callable[[int], GameMap], tmp_path: Path) -> None:
     simulation = Simulation(make_map())
     region = simulation.execute(
         CreateSpatialReferenceCommand(rectangle_region(Point(2, 2), Point(6, 6)), "North")

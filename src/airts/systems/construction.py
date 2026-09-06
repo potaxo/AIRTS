@@ -74,7 +74,7 @@ def create_construction(
         simulation._transition(automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
         return simulation._accept("create_construction", automation.automation_id)
     if not command.queued:
-        simulation._cancel_queued_construction(builder_ids)
+        cancel_queued_construction(simulation, builder_ids)
     claim_failure = simulation._validate_claims(automation, builder_ids, replace_existing=True)
     if claim_failure is not None:
         return simulation._reject_validation("create_construction", claim_failure)
@@ -109,7 +109,7 @@ def validate_building_placement(
             continue
         parameters = automation.parameters
         assert isinstance(parameters, ConstructionParameters)
-        if cells & simulation._construction_cells(parameters):
+        if cells & construction_cells(parameters):
             return ValidationFailure(
                 ValidationPhase.SPATIAL,
                 "CONSTRUCTION_SITE_RESERVED",
@@ -172,7 +172,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         simulation._release_automation(automation)
         simulation._start_next_construction()
         return
-    site_cells = simulation._construction_cells(parameters)
+    site_cells = construction_cells(parameters)
     site_occupants = frozenset(
         entity_id for cell in site_cells for entity_id in simulation.occupancy.occupants(cell)
     )
@@ -184,13 +184,13 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         simulation._transition(automation, AutomationStatus.ACTIVE, "SITE_CLEARED")
     builders_in_range: list[str] = []
     route_available = False
-    destinations = simulation._construction_interaction_points(parameters)
+    destinations = construction_interaction_points(simulation, parameters)
     for builder_id in active_builders:
         builder = simulation.entities[builder_id]
         inside_footprint = bool(builder.occupied_cells & site_cells)
         if (
             not inside_footprint
-            and simulation._construction_distance(builder.position, parameters)
+            and construction_distance(builder.position, parameters)
             <= builder.kind.profile.build_range
         ):
             builder.path.clear()
@@ -285,7 +285,7 @@ def construction_interaction_points(
 ) -> tuple[Point, ...]:
     build_range = EntityKind.BUILDER.profile.build_range
     width, height = parameters.building_kind.profile.footprint
-    site_cells = simulation._construction_cells(parameters)
+    site_cells = construction_cells(parameters)
     candidates: list[Point] = []
     for y in range(
         floor(parameters.position.y - build_range),
@@ -300,7 +300,7 @@ def construction_interaction_points(
             if (
                 cell not in site_cells
                 and simulation.game_map.is_cell_passable(cell)
-                and simulation._construction_distance(point, parameters) <= build_range
+                and construction_distance(point, parameters) <= build_range
             ):
                 candidates.append(point)
     return tuple(candidates)

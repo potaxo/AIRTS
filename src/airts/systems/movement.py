@@ -98,7 +98,7 @@ def move_entities(simulation: Simulation) -> None:
             entity.no_progress_ticks = simulation.NO_PROGRESS_YIELD_TICKS - 1
             entity.progress_distance = entity.position.distance_to(entity.path[0])
         simulation._movement_step_attempt_count += 1
-        simulation._consume_reached_intermediate_waypoints(entity)
+        consume_reached_intermediate_waypoints(entity)
         simulation._skip_crowded_waypoints(entity)
         target = entity.path[0]
         maximum_step = entity.speed * simulation.TICK_SECONDS
@@ -126,14 +126,16 @@ def move_entities(simulation: Simulation) -> None:
             )
         )
         preferred_position = desired_direct_position
-        direct_position = simulation._clamp_to_collider_contact(
+        direct_position = clamp_to_collider_contact(
+            simulation,
             entity,
             preferred_position,
             entity_radius,
             local_colliders,
         )
         direct_was_clamped = _squared_distance(direct_position, preferred_position) > 1e-18
-        push_stationary_blocker = direct_was_clamped and simulation._contact_has_stationary_blocker(
+        push_stationary_blocker = direct_was_clamped and contact_has_stationary_blocker(
+            simulation,
             entity,
             preferred_position,
             entity_radius,
@@ -153,9 +155,8 @@ def move_entities(simulation: Simulation) -> None:
                     <= (entity_radius + other_radius + 0.03) ** 2
                 )
             )
-        if (
-            not direct_was_clamped or push_stationary_blocker
-        ) and simulation._local_move_is_available(
+        if (not direct_was_clamped or push_stationary_blocker) and local_move_is_available(
+            simulation,
             entity,
             direct_position,
             entity_radius,
@@ -167,7 +168,7 @@ def move_entities(simulation: Simulation) -> None:
             if (
                 push_stationary_blocker
                 and len(entity.path) == 1
-                and simulation._replan_contested_final_approach(entity, target)
+                and replan_contested_final_approach(simulation, entity, target)
             ):
                 continue
             next_position = None
@@ -198,13 +199,15 @@ def move_entities(simulation: Simulation) -> None:
                     and _squared_distance(raw_candidate, desired_direct_position) <= 1e-18
                 ):
                     continue
-                candidate = simulation._clamp_to_collider_contact(
+                candidate = clamp_to_collider_contact(
+                    simulation,
                     entity,
                     raw_candidate,
                     entity_radius,
                     local_colliders,
                 )
-                if simulation._local_move_is_available(
+                if local_move_is_available(
+                    simulation,
                     entity,
                     candidate,
                     entity_radius,
@@ -222,7 +225,7 @@ def move_entities(simulation: Simulation) -> None:
                 and _squared_distance(entity.position, position)
                 <= (entity_radius + other_radius + maximum_step) ** 2
             )
-            simulation._record_movement_blocked(entity, "NO_SAFE_LOCAL_VELOCITY")
+            record_movement_blocked(simulation, entity, "NO_SAFE_LOCAL_VELOCITY")
             continue
         try:
             simulation.occupancy.move(
@@ -231,7 +234,7 @@ def move_entities(simulation: Simulation) -> None:
                 movable_ids,
             )
         except OccupancyError as error:
-            simulation._record_movement_blocked(entity, str(error))
+            record_movement_blocked(simulation, entity, str(error))
             continue
         simulation._movement_blocked.discard(entity_id)
         simulation._blocked_ticks.pop(entity_id, None)
@@ -251,7 +254,7 @@ def move_entities(simulation: Simulation) -> None:
                     assignment=simulation.assignments.get(entity_id),
                 )
     if contact_ids and not continuous_topology_force:
-        simulation._resolve_unit_collisions(unit_index, tuple(sorted(contact_ids)))
+        resolve_unit_collisions(simulation, unit_index, tuple(sorted(contact_ids)))
     track_movement_progress(
         simulation,
         movable_entities if continuous_topology_force else None,
@@ -452,7 +455,7 @@ def _move_large_force(
                 and entity.route_ticks % simulation.DESTINATION_REPATH_TICKS == repath_phase
                 and _passable_segment_cells(simulation, entity.position, entity.path[0]) is None
             ):
-                simulation._repath_stalled_entity(entity, reason="STATIC_TOPOLOGY_REPATH")
+                repath_stalled_entity(simulation, entity, reason="STATIC_TOPOLOGY_REPATH")
             _skip_large_force_path_prefix(simulation, entity, spacing, route_obstacle_cells)
             target = entity.path[0]
         elif inherited_target is not None:
@@ -563,7 +566,8 @@ def _move_large_force(
                 )
                 for other_id in local_neighbor_ids
             )
-            candidate = simulation._clamp_to_collider_contact(
+            candidate = clamp_to_collider_contact(
+                simulation,
                 entity,
                 candidate,
                 collision_radii[entity_id],
@@ -1101,9 +1105,9 @@ def track_movement_progress(
             )
             and (
                 (entity.kind is EntityKind.BUILDER and entity.collision_pressure > 0)
-                or simulation._remaining_path_crosses_military_units(entity)
+                or remaining_path_crosses_military_units(simulation, entity)
             )
-            and simulation._repath_stalled_entity(entity, reason="DESTINATION_DELAY_REPATH")
+            and repath_stalled_entity(simulation, entity, reason="DESTINATION_DELAY_REPATH")
         ):
             continue
         target = entity.path[0]
@@ -1132,8 +1136,8 @@ def track_movement_progress(
             continue
         if (
             entity.kind is EntityKind.BUILDER
-            or simulation._remaining_path_crosses_military_units(entity)
-        ) and simulation._repath_stalled_entity(entity):
+            or remaining_path_crosses_military_units(simulation, entity)
+        ) and repath_stalled_entity(simulation, entity):
             continue
         entity.congestion_stopped = True
         simulation._movement_blocked.discard(entity_id)
@@ -1175,7 +1179,7 @@ def repath_stalled_entity(
             entity.position,
             destination,
             simulation._building_cells(),
-            cell_penalties=simulation._military_cell_penalties(entity.entity_id),
+            cell_penalties=military_cell_penalties(simulation, entity.entity_id),
         )
     except PathfindingError:
         return False
@@ -1233,7 +1237,7 @@ def replan_contested_final_approach(
             entity.position,
             destination,
             simulation._building_cells(),
-            cell_penalties=simulation._military_cell_penalties(entity.entity_id),
+            cell_penalties=military_cell_penalties(simulation, entity.entity_id),
         )
     except PathfindingError:
         return False
@@ -1338,7 +1342,7 @@ def skip_crowded_waypoints(simulation: Simulation, entity: Entity) -> None:
             return
         if not _waypoint_lookahead_preserves_axis(simulation, entity, entity.path[1]):
             return
-        if not simulation._waypoint_has_lateral_clearance(entity, waypoint):
+        if not waypoint_has_lateral_clearance(simulation, entity, waypoint):
             return
         entity.path.pop(0)
 
@@ -1486,7 +1490,7 @@ def resolve_unit_collisions(
     force_pairs = unit_index.candidate_pairs_for(active_ids, 0.93)
     participating_ids = frozenset(item for pair in force_pairs for item in pair)
     forces = {
-        entity_id: simulation._unit_drive_force(simulation.entities[entity_id])
+        entity_id: unit_drive_force(simulation, simulation.entities[entity_id])
         for entity_id in participating_ids
     }
     force_passes = (
@@ -1532,7 +1536,8 @@ def resolve_unit_collisions(
                 )
             net_pressure = first_pressure - second_pressure
             if net_pressure > 1e-9 and not second_fixed:
-                simulation._apply_physical_push(
+                apply_physical_push(
+                    simulation,
                     second,
                     normal_x,
                     normal_y,
@@ -1541,7 +1546,8 @@ def resolve_unit_collisions(
                     unit_index,
                 )
             elif net_pressure < -1e-9 and not first_fixed:
-                simulation._apply_physical_push(
+                apply_physical_push(
+                    simulation,
                     first,
                     -normal_x,
                     -normal_y,
@@ -1569,7 +1575,8 @@ def resolve_unit_collisions(
                     second_fixed,
                 )
                 if first_share:
-                    simulation._apply_physical_push(
+                    apply_physical_push(
+                        simulation,
                         first,
                         -correction_x,
                         -correction_y,
@@ -1579,7 +1586,8 @@ def resolve_unit_collisions(
                         correction=True,
                     )
                 if second_share:
-                    simulation._apply_physical_push(
+                    apply_physical_push(
+                        simulation,
                         second,
                         correction_x,
                         correction_y,
@@ -1594,92 +1602,7 @@ def resolve_unit_collisions(
         for entity_id in unit_ids
         if entity_id in active_id_set or simulation.entities[entity_id].collision_pressure > 0
     )
-    simulation._separate_overlapping_colliders(collision_ids, unit_index)
-
-
-def relax_unit_spacing(
-    simulation: Simulation,
-    entity_ids: tuple[str, ...],
-    required_spacing: float,
-    center: Point,
-    maximum_radius: float,
-) -> None:
-    """Apply bounded deterministic corrections until a formation has safe clearance."""
-
-    unit_index = SpatialIndex(
-        {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids},
-        bucket_size=1.5,
-    )
-    allowed_conflicts = frozenset(entity_ids)
-    projection_radius = max(0.0, maximum_radius - 1e-6)
-    for _ in range(6):
-        changed = False
-        for first_id, second_id in unit_index.candidate_pairs(required_spacing):
-            first = simulation.entities[first_id]
-            second = simulation.entities[second_id]
-            offset_x = second.position.x - first.position.x
-            offset_y = second.position.y - first.position.y
-            distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-            if distance >= required_spacing - 1e-6:
-                continue
-            if distance <= 1e-9:
-                normal_x = 1.0 if first_id < second_id else -1.0
-                normal_y = 0.0
-            else:
-                normal_x = offset_x / distance
-                normal_y = offset_y / distance
-            correction = required_spacing - distance
-            changed = (
-                simulation._apply_physical_push(
-                    first,
-                    -normal_x,
-                    -normal_y,
-                    correction / 2,
-                    second_id,
-                    unit_index,
-                    correction=True,
-                )
-                or changed
-            )
-            changed = (
-                simulation._apply_physical_push(
-                    second,
-                    normal_x,
-                    normal_y,
-                    correction / 2,
-                    first_id,
-                    unit_index,
-                    correction=True,
-                )
-                or changed
-            )
-        projected = False
-        for entity_id in sorted(entity_ids):
-            entity = simulation.entities[entity_id]
-            offset_x = entity.position.x - center.x
-            offset_y = entity.position.y - center.y
-            distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-            if distance <= projection_radius:
-                continue
-            candidate = Point(
-                center.x + offset_x * projection_radius / distance,
-                center.y + offset_y * projection_radius / distance,
-            )
-            if not simulation.game_map.is_passable(candidate):
-                continue
-            try:
-                simulation.occupancy.move(
-                    entity_id,
-                    simulation._cells_at(entity, candidate),
-                    allowed_conflicts,
-                )
-            except OccupancyError:
-                continue
-            entity.position = candidate
-            unit_index.move(entity_id, candidate)
-            projected = True
-        if not changed and not projected:
-            break
+    separate_overlapping_colliders(simulation, collision_ids, unit_index)
 
 
 def separate_overlapping_colliders(
@@ -1728,7 +1651,8 @@ def separate_overlapping_colliders(
             )
             if first_share:
                 changed = (
-                    simulation._apply_physical_push(
+                    apply_physical_push(
+                        simulation,
                         first,
                         -normal_x,
                         -normal_y,
@@ -1741,7 +1665,8 @@ def separate_overlapping_colliders(
                 )
             if second_share:
                 changed = (
-                    simulation._apply_physical_push(
+                    apply_physical_push(
+                        simulation,
                         second,
                         normal_x,
                         normal_y,
@@ -1896,12 +1821,12 @@ def record_movement_blocked(simulation: Simulation, entity: Entity, evidence: st
         return
     if (
         entity.kind is not EntityKind.BUILDER
-        and not simulation._final_destination_is_contested(entity)
-        and not simulation._remaining_path_crosses_military_units(entity)
+        and not final_destination_is_contested(simulation, entity)
+        and not remaining_path_crosses_military_units(simulation, entity)
     ):
         return
     simulation._blocked_recoveries_this_tick += 1
-    simulation._recover_blocked_entity(entity)
+    recover_blocked_entity(simulation, entity)
 
 
 def final_destination_is_contested(simulation: Simulation, entity: Entity) -> bool:
@@ -1939,7 +1864,7 @@ def recover_blocked_entity(simulation: Simulation, entity: Entity) -> None:
                 entity.position,
                 replacement,
                 simulation._building_cells(),
-                cell_penalties=simulation._military_cell_penalties(entity.entity_id),
+                cell_penalties=military_cell_penalties(simulation, entity.entity_id),
             )
         except PathfindingError:
             pass
@@ -1982,7 +1907,7 @@ def recover_blocked_entity(simulation: Simulation, entity: Entity) -> None:
             sidestep,
             destination,
             simulation._building_cells(),
-            cell_penalties=simulation._military_cell_penalties(entity.entity_id),
+            cell_penalties=military_cell_penalties(simulation, entity.entity_id),
         )
     except PathfindingError:
         return

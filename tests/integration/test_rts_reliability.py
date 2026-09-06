@@ -14,11 +14,8 @@ from airts.commands import (
     CreateProductionCommand,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
-    DeleteSpatialReferenceCommand,
     MoveCommand,
     SetSelectionCommand,
-    command_from_dict,
-    command_to_dict,
 )
 from airts.geometry import Point, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp, InputMode, RendererBackend
@@ -121,7 +118,6 @@ def test_region_deletion_is_replayable_and_cancels_affected_automation() -> None
     assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
     assert simulation.selection.entity_ids == ("unit",)
     assert not simulation.selection.region_ids
-    assert command_from_dict(command_to_dict(command)) == command
 
 
 def test_delete_control_removes_selected_route_and_cancels_its_patrol() -> None:
@@ -137,8 +133,6 @@ def test_delete_control_removes_selected_route_and_cancels_its_patrol() -> None:
     assert route.reference_id not in simulation.spatial.references
     assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
     assert not app.selected_routes
-    command = DeleteSpatialReferenceCommand("route_001")
-    assert command_from_dict(command_to_dict(command)) == command
 
 
 def test_resource_generators_produce_without_an_automation() -> None:

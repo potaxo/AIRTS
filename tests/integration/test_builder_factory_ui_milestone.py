@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pygame
 import pytest
+from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import load_replay, run_replay, save_replay
@@ -729,6 +730,19 @@ def test_real_fps_acceptance_rule_remains_inverse_p99_frame_time() -> None:
 
     assert REAL_FPS_FRAME_TIME_PERCENTILE == 0.99
     assert real_fps_from_frame_times(frame_times_ms) == pytest.approx(1000.0 / 30.0)
+
+    probe = RealFpsProbe(started_at=0.0)
+    completed_at = 0.0
+    for frame_ms in frame_times_ms:
+        completed_at += frame_ms / 1000.0
+        probe.frame_completed(completed_at)
+
+    assert probe.p99_frame_ms == pytest.approx(30.0)
+    assert probe.elapsed_seconds == pytest.approx(1.25)
+    assert len(frame_times_ms) / probe.elapsed_seconds > 100.0
+    with pytest.raises(AssertionError, match="stuttering workload achieved 33.3 Real FPS"):
+        assert_real_fps(probe, 100, "stuttering workload")
+    assert_real_fps(probe, 30, "within the measured pacing budget")
 
 
 def test_info_panel_displays_stutter_sensitive_real_fps() -> None:

@@ -3,25 +3,23 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs"
-NUMBERED_SECTION = re.compile(r"^# (\d+)\. ", re.MULTILINE)
 LOCAL_LINK = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 
 
-def test_design_sections_exist_exactly_once() -> None:
-    design_files = [DOCS / "design.md", DOCS / "roadmap.md"]
-    design_files.extend(sorted((DOCS / "architecture").glob("*.md")))
-    design_files.extend(sorted((DOCS / "milestones").glob("*.md")))
-    counts = Counter(
-        int(section)
-        for path in design_files
-        for section in NUMBERED_SECTION.findall(path.read_text(encoding="utf-8"))
-    )
-    assert counts == Counter(range(1, 42))
+def test_design_index_links_to_owning_documents() -> None:
+    owners = {DOCS / "roadmap.md", DOCS / "decisions" / "README.md"}
+    owners.update((DOCS / "architecture").glob("*.md"))
+    owners.update((DOCS / "milestones").glob("*.md"))
+    linked = {
+        (DOCS / target.split("#", 1)[0]).resolve()
+        for target in LOCAL_LINK.findall((DOCS / "design.md").read_text(encoding="utf-8"))
+        if not target.startswith(("#", "http://", "https://"))
+    }
+    assert not {path.resolve() for path in owners} - linked
 
 
 def test_local_markdown_links_resolve() -> None:

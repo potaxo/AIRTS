@@ -15,7 +15,6 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
-    build_patrol_waypoints,
     patrol_formation_waypoint,
     retain_formation_slots,
     target_center,
@@ -44,19 +43,19 @@ def drive_automations(simulation: Simulation) -> None:
     for automation_id in automation_ids:
         automation = simulation.automations[automation_id]
         if automation.kind is AutomationKind.PATROL:
-            simulation._drive_patrol(automation)
+            drive_patrol(simulation, automation)
         elif automation.kind is AutomationKind.DEFEND:
-            simulation._drive_defend(automation)
+            drive_defend(simulation, automation)
         elif automation.kind is AutomationKind.PRODUCTION:
             simulation._drive_production(automation)
         elif automation.kind is AutomationKind.REINFORCEMENT:
-            simulation._drive_reinforcement(automation)
+            drive_reinforcement(simulation, automation)
         elif automation.kind is AutomationKind.ECONOMY:
             simulation._drive_economy(automation)
         elif automation.kind is AutomationKind.CONSTRUCTION:
             simulation._drive_construction(automation)
         else:
-            simulation._drive_repair(automation)
+            drive_repair(simulation, automation)
 
 
 def scheduled_entity_ids(simulation: Simulation, automation: Automation) -> tuple[str, ...]:
@@ -82,7 +81,7 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
         area_unit_radius = max(
             collision_radius(simulation.entities[entity_id].kind) for entity_id in ordered_ids
         )
-    for entity_id in simulation._scheduled_entity_ids(automation):
+    for entity_id in scheduled_entity_ids(simulation, automation):
         if simulation.assignments.get(entity_id) != automation.automation_id:
             continue
         entity = simulation.entities[entity_id]
@@ -274,7 +273,7 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
                     attacker_id=attacker.entity_id,
                 )
 
-    for entity_id in simulation._scheduled_entity_ids(automation):
+    for entity_id in scheduled_entity_ids(simulation, automation):
         if simulation.assignments.get(entity_id) != automation.automation_id:
             continue
         entity = simulation.entities[entity_id]
@@ -737,7 +736,7 @@ def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:
 def drive_repair(simulation: Simulation, automation: Automation) -> None:
     parameters = repair_parameters(automation)
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
-    for entity_id in simulation._scheduled_entity_ids(automation):
+    for entity_id in scheduled_entity_ids(simulation, automation):
         if simulation.assignments.get(entity_id) != automation.automation_id:
             continue
         phase = parameters.phases[entity_id]
@@ -981,20 +980,6 @@ def initialize_runtime_entity(
         entity.state = UnitState.RETURNING
     elif automation.kind is AutomationKind.ECONOMY:
         entity.state = UnitState.IDLE
-
-
-def next_reinforcement_station(
-    simulation: Simulation, target: SpatialTarget, occupied: tuple[Point, ...]
-) -> Point:
-    candidates = build_patrol_waypoints(target, simulation.game_map)
-    return max(
-        candidates,
-        key=lambda point: (
-            min((point.distance_to(item) for item in occupied), default=float("inf")),
-            -point.y,
-            -point.x,
-        ),
-    )
 
 
 def _patrol_parameters(automation: Automation) -> PatrolParameters:

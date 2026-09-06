@@ -37,19 +37,10 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
     save_simulation(simulation, destination)
     restored = load_simulation(destination)
 
-    assert restored.snapshot() == simulation.snapshot()
-    assert [event.to_dict() for event in restored.events.events] == [
-        event.to_dict() for event in simulation.events.events
-    ]
-    assert restored.command_history == simulation.command_history
+    assert restored.export_state() == simulation.export_state()
     assert restored.entities["unit_01"].collision_pressure == 3
 
-    simulation.advance(25)
-    restored.advance(25)
-    assert restored.snapshot() == simulation.snapshot()
-    assert [event.to_dict() for event in restored.events.events] == [
-        event.to_dict() for event in simulation.events.events
-    ]
+    _assert_continues_identically(simulation, restored, 25)
 
 
 def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:
@@ -76,15 +67,10 @@ def test_phase3_controller_progress_and_suspended_assignments_round_trip(
     save_simulation(simulation, destination)
     restored = load_simulation(destination)
 
-    assert restored.snapshot() == simulation.snapshot()
+    assert restored.export_state() == simulation.export_state()
     assert restored.suspended_assignments["scout_01"] == patrol.automation_id
 
-    simulation.advance(40)
-    restored.advance(40)
-    assert restored.snapshot() == simulation.snapshot()
-    assert [event.to_dict() for event in restored.events.events] == [
-        event.to_dict() for event in simulation.events.events
-    ]
+    _assert_continues_identically(simulation, restored, 40)
 
 
 def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> None:
@@ -97,12 +83,10 @@ def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> N
     save_simulation(simulation, destination)
     restored = load_simulation(destination)
 
-    assert restored.snapshot() == simulation.snapshot()
+    assert restored.export_state() == simulation.export_state()
     assert restored.automations[second.automation_id or ""].reason_code == "FACTORY_QUEUED"
 
-    simulation.advance(30)
-    restored.advance(30)
-    assert restored.snapshot() == simulation.snapshot()
+    _assert_continues_identically(simulation, restored, 30)
     assert simulation.automations[first.automation_id or ""].status.value == "completed"
     assert simulation.automations[second.automation_id or ""].status.value == "completed"
 
@@ -126,10 +110,8 @@ def test_ambient_enemy_reinforcements_continue_after_save_load(
     assert restored.ambient_enemy_spawns
     assert restored.enemy_spawn_interval_ticks == 7
     assert restored.enemy_spawn_cap == 12
-    assert restored.snapshot() == simulation.snapshot()
-    simulation.advance(10)
-    restored.advance(10)
-    assert restored.snapshot() == simulation.snapshot()
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 10)
 
 
 def test_continuous_production_compact_defense_link_round_trips(
@@ -152,7 +134,11 @@ def test_continuous_production_compact_defense_link_round_trips(
     save_simulation(simulation, destination)
     restored = load_simulation(destination)
 
-    assert restored.snapshot() == simulation.snapshot()
-    simulation.advance(10)
-    restored.advance(10)
-    assert restored.snapshot() == simulation.snapshot()
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 10)
+
+
+def _assert_continues_identically(original: Simulation, restored: Simulation, ticks: int) -> None:
+    original.advance(ticks)
+    restored.advance(ticks)
+    assert restored.export_state() == original.export_state()

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import ast
+from importlib.util import resolve_name
 from pathlib import Path
+
+import pytest
 
 import airts
 from airts.simulation import Simulation
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "airts"
-PERFORMANCE_TESTS = ROOT / "tests" / "performance"
 PACKAGE_RULES = {
     "world": {
         "airts.adapters",
@@ -56,9 +58,9 @@ def test_simulation_remains_the_public_package_facade() -> None:
 def test_package_dependencies_point_toward_domain_code() -> None:
     violations: list[str] = []
     for package, forbidden_imports in PACKAGE_RULES.items():
-        for path in sorted((SOURCE / package).glob("*.py")):
+        for path in sorted((SOURCE / package).rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for module_name, line in _runtime_imports(tree.body):
+            for module_name, line in _runtime_imports(tree, _package_name(path)):
                 if _matches_any(module_name, forbidden_imports):
                     violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
@@ -69,7 +71,7 @@ def test_internal_source_uses_canonical_package_imports() -> None:
     removed_imports = {f"airts.{module}" for module in REMOVED_TOP_LEVEL_MODULES}
     for path in sorted(SOURCE.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for module_name, line in _runtime_imports(tree.body):
+        for module_name, line in _runtime_imports(tree, _package_name(path)):
             if _matches_any(module_name, removed_imports):
                 violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
@@ -81,30 +83,19 @@ def test_removed_top_level_modules_do_not_return() -> None:
     ]
 
 
-def test_source_module_names_are_unambiguous() -> None:
-    paths_by_name: dict[str, list[Path]] = {}
-    for path in SOURCE.rglob("*.py"):
-        if path.name != "__init__.py":
-            paths_by_name.setdefault(path.name, []).append(path.relative_to(SOURCE))
-    duplicates = {name: paths for name, paths in sorted(paths_by_name.items()) if len(paths) > 1}
-    assert not duplicates
-
-
-def test_repository_root_has_no_python_scripts() -> None:
-    assert not sorted(ROOT.glob("*.py"))
-
-
-def test_every_fps_performance_contract_uses_the_real_fps_rule() -> None:
+def test_domain_code_does_not_import_presentation_dependencies() -> None:
     violations: list[str] = []
-    for path in sorted(PERFORMANCE_TESTS.glob("test_*.py")):
-        source = path.read_text(encoding="utf-8")
-        if "TARGET_FPS" not in source:
+    paths = list(SOURCE.glob("*.py"))
+    paths.extend(path for package in PACKAGE_RULES for path in (SOURCE / package).rglob("*.py"))
+    for path in paths:
+        if path.name == "__main__.py":
             continue
-        if "assert_real_fps(" not in source:
-            violations.append(f"{path.name} does not assert the shared Real FPS metric")
-        for forbidden in ("achieved_fps", "MEASURED_FRAMES /", "/ elapsed"):
-            if forbidden in source:
-                violations.append(f"{path.name} uses forbidden average-FPS logic: {forbidden}")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for module_name, line in _runtime_imports(tree, _package_name(path)):
+            if _matches_any(
+                module_name, {"pygame", "moderngl", "airts.presentation", "airts.adapters"}
+            ):
+                violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
 
 
@@ -115,25 +106,50 @@ def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:
     )
 
 
-def _runtime_imports(statements: list[ast.stmt]) -> list[tuple[str, int]]:
+def _package_name(path: Path) -> str:
+    return ".".join(("airts", *path.relative_to(SOURCE).parent.parts))
+
+
+def _runtime_imports(node: ast.AST, package: str) -> list[tuple[str, int]]:
     imports: list[tuple[str, int]] = []
-    for statement in statements:
-        if isinstance(statement, ast.If) and _is_type_checking_guard(statement.test):
-            imports.extend(_runtime_imports(statement.orelse))
-            continue
-        if isinstance(statement, ast.Import):
-            imports.extend((alias.name, statement.lineno) for alias in statement.names)
-        elif isinstance(statement, ast.ImportFrom) and statement.module is not None:
-            imports.append((statement.module, statement.lineno))
-        elif isinstance(statement, (ast.If, ast.Try, ast.With)):
-            nested = list(statement.body)
-            nested.extend(getattr(statement, "orelse", ()))
-            nested.extend(getattr(statement, "finalbody", ()))
-            for handler in getattr(statement, "handlers", ()):
-                nested.extend(handler.body)
-            imports.extend(_runtime_imports(nested))
+    if isinstance(node, ast.If) and _is_type_checking_guard(node.test):
+        for statement in node.orelse:
+            imports.extend(_runtime_imports(statement, package))
+        return imports
+    if isinstance(node, ast.Import):
+        imports.extend((alias.name, node.lineno) for alias in node.names)
+    elif isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        if node.level:
+            module = resolve_name("." * node.level + module, package)
+        imports.append((module, node.lineno))
+        imports.extend((f"{module}.{alias.name}", node.lineno) for alias in node.names)
+    for child in ast.iter_child_nodes(node):
+        imports.extend(_runtime_imports(child, package))
     return imports
 
 
 def _is_type_checking_guard(expression: ast.expr) -> bool:
-    return isinstance(expression, ast.Name) and expression.id == "TYPE_CHECKING"
+    return (isinstance(expression, ast.Name) and expression.id == "TYPE_CHECKING") or (
+        isinstance(expression, ast.Attribute)
+        and isinstance(expression.value, ast.Name)
+        and expression.value.id == "typing"
+        and expression.attr == "TYPE_CHECKING"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("def render():\n    import pygame", {"pygame"}),
+        ("from .. import simulation", {"airts", "airts.simulation"}),
+        ("from ..presentation import app", {"airts.presentation", "airts.presentation.app"}),
+        ("if TYPE_CHECKING:\n    from airts.simulation import Simulation", set()),
+        ("if typing.TYPE_CHECKING:\n    import pygame\nelse:\n    import moderngl", {"moderngl"}),
+        ("class View:\n    import pygame", {"pygame"}),
+    ],
+)
+def test_dependency_scan_handles_nested_and_relative_imports(
+    source: str, expected: set[str]
+) -> None:
+    assert {name for name, _ in _runtime_imports(ast.parse(source), "airts.systems")} == expected

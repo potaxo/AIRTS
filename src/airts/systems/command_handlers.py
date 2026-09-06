@@ -46,7 +46,7 @@ from airts.validation import (
     validate_positive,
     validate_priority,
 )
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import UnitState
 from airts.world.map_model import Cell, EntityKind
 
 if TYPE_CHECKING:
@@ -91,7 +91,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
         if automation.kind is AutomationKind.PATROL:
             try:
                 waypoints = build_patrol_waypoints(command.target, simulation.game_map)
-                simulation._validate_paths(tuple(automation.entity_ids), waypoints)
+                validate_paths(simulation, tuple(automation.entity_ids), waypoints)
             except (ValueError, PathfindingError) as error:
                 return simulation._reject_validation(
                     "modify_automation",
@@ -108,7 +108,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                     tuple(automation.entity_ids),
                     gathering_point=existing_defend.gathering_point,
                 )
-                simulation._validate_paths(tuple(automation.entity_ids), tuple(stations.values()))
+                validate_paths(simulation, tuple(automation.entity_ids), tuple(stations.values()))
             except (ValueError, PathfindingError) as error:
                 return simulation._reject_validation(
                     "modify_automation",
@@ -235,7 +235,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
         )
     try:
         destinations = simulation._allocate_destinations(command.entity_ids, command.target)
-        paths = simulation._plan_group_paths(command.entity_ids, destinations)
+        paths = plan_group_paths(simulation, command.entity_ids, destinations)
     except PathfindingError as error:
         return simulation._reject_validation(
             "move",
@@ -519,7 +519,8 @@ def stop(
 
 
 def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> CommandResult:
-    failure = simulation._validate_automation_common(
+    failure = validate_automation_common(
+        simulation,
         command.entity_ids,
         command.owner_id,
         command.priority,
@@ -530,7 +531,7 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
         return simulation._reject_validation("create_patrol", failure)
     try:
         waypoints = build_patrol_waypoints(command.target, simulation.game_map)
-        simulation._validate_paths(command.entity_ids, waypoints)
+        validate_paths(simulation, command.entity_ids, waypoints)
     except (ValueError, PathfindingError) as error:
         return simulation._reject_validation(
             "create_patrol",
@@ -553,7 +554,8 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
 
 
 def create_defend(simulation: Simulation, command: CreateDefendCommand) -> CommandResult:
-    failure = simulation._validate_automation_common(
+    failure = validate_automation_common(
+        simulation,
         command.entity_ids,
         command.owner_id,
         command.priority,
@@ -581,7 +583,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
             ):
                 raise PathfindingError("NO_PATH")
         else:
-            simulation._validate_paths(command.entity_ids, tuple(stations.values()))
+            validate_paths(simulation, command.entity_ids, tuple(stations.values()))
     except (ValueError, PathfindingError) as error:
         return simulation._reject_validation(
             "create_defend",
@@ -768,7 +770,8 @@ def create_repair(simulation: Simulation, command: CreateRepairAndReturnCommand)
                 {"health_threshold": command.health_threshold},
             ),
         )
-    failure = simulation._validate_automation_common(
+    failure = validate_automation_common(
+        simulation,
         eligible_ids,
         command.owner_id,
         command.priority,
@@ -935,20 +938,6 @@ def validate_paths(
         )
     for waypoint in waypoints[1:]:
         simulation._routes.shared_path(waypoint, anchor, building_cells)
-
-
-def fail_movement(simulation: Simulation, entity: Entity, reason: str, position: Point) -> None:
-    entity.move_target = None
-    entity.path.clear()
-    entity.state = UnitState.IDLE
-    simulation._reset_movement_liveness(entity, clear_stop=True)
-    simulation.events.record(
-        simulation.tick,
-        EventType.MOVEMENT_FAILED,
-        entity.entity_id,
-        reason=reason,
-        position=[position.x, position.y],
-    )
 
 
 def production_parameters(automation: Automation) -> ProductionParameters:

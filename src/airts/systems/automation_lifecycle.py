@@ -162,7 +162,7 @@ def activate(
             previous = simulation.automations[previous_id]
             previous.remove_entities(frozenset(removed_ids))
             simulation._refresh_gathering_formation(previous)
-            simulation._handle_automation_without_entities(previous)
+            handle_automation_without_entities(simulation, previous)
         for entity_id in entity_ids:
             previous_id = previous_ids[entity_id]
             simulation.suspended_assignments.pop(entity_id, None)
@@ -240,12 +240,12 @@ def assign(
             simulation.suspended_assignments[entity_id] = existing_suspended or previous_id
             if previous.kind is AutomationKind.REPAIR_AND_RETURN:
                 previous.remove_entity(entity_id)
-                simulation._handle_automation_without_entities(previous)
+                handle_automation_without_entities(simulation, previous)
         else:
             previous = simulation.automations[previous_id]
             previous.remove_entity(entity_id)
             simulation._refresh_gathering_formation(previous)
-            simulation._handle_automation_without_entities(previous)
+            handle_automation_without_entities(simulation, previous)
             simulation.suspended_assignments.pop(entity_id, None)
     simulation.assignments[entity_id] = automation.automation_id
     simulation.events.record(
@@ -256,10 +256,6 @@ def assign(
         automation_id=automation.automation_id,
         authority=authority.name.lower(),
     )
-
-
-def manual_override(simulation: Simulation, entity_id: str) -> None:
-    simulation._manual_override_many((entity_id,))
 
 
 def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) -> None:
@@ -281,7 +277,7 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
         else:
             automation.remove_entities(frozenset(removed_ids))
             simulation._refresh_gathering_formation(automation)
-            simulation._handle_automation_without_entities(automation)
+            handle_automation_without_entities(simulation, automation)
     for entity_id, (automation_id, suspended_id) in previous.items():
         if automation_id is None:
             continue
@@ -329,7 +325,7 @@ def release_automation(
             if suspended_id is not None and suspended_id in simulation.automations:
                 suspended = simulation.automations[suspended_id]
                 suspended.remove_entity(entity_id)
-                simulation._handle_automation_without_entities(suspended)
+                handle_automation_without_entities(simulation, suspended)
 
 
 def resume_suspended_assignment(

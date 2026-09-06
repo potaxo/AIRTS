@@ -14,36 +14,20 @@ later-phase features unless explicitly requested.
 ## Environment
 
 - Develop and validate AIRTS natively on Windows with Python 3.13 and PowerShell.
-- Use the repository-local `.venv`.
+- Use the repository-local `.venv` for development and validation. Follow
+  [README setup](README.md#requirements-and-setup) to create it and install the project.
 - Treat `pyproject.toml` as the source of truth for dependencies.
-- Install the project with:
-
-  `.\.venv\Scripts\python -m pip install -e ".[dev]"`
-
-- Do not use global Python, Conda, or global `pip` without explicit approval.
+- The Python launcher may create `.venv` as documented in README. Otherwise,
+  do not use global Python, Conda, or global `pip` without explicit approval.
 - Do not install undeclared or speculative dependencies.
 - Explain why a new dependency is necessary before adding it.
 - AIRTS uses `pygame-ce`, not `pygame`. Never install both.
 
 ## Architecture
 
-- Keep the simulation core independent of Pygame, the UI, LM Studio, MCP,
-  and language-model providers.
-- All control sources must use shared command and automation interfaces.
-- Language-model output must never mutate world state directly.
-- The simulation is authoritative for geometry, entities, paths,
-  resources, visibility, combat, and state transitions.
-- Core domain logic must run and be testable without opening a graphical
-  window.
-- Persistent automations must be serializable and inspectable.
-- Preserve deterministic behavior for the same initial state and random
-  seed.
-- Keep AIRTS a modular monolith. Preserve `airts.simulation.Simulation` as
-  the stable public facade, authoritative state owner, and tick orchestrator;
-  place cohesive deterministic behavior under `airts.systems`.
-- Split modules by responsibility, invariant, and reason to change, not by
-  an arbitrary line-count target. Keep packages shallow and avoid generic
-  dumping grounds such as `utils`, `helpers`, or `manager`.
+Follow the invariants and module ownership in [docs/design.md](docs/design.md) and
+[engineering architecture](docs/architecture/engineering.md). Preserve the public `Simulation`
+facade, deterministic behavior, shared command boundary, and headless simulation core.
 
 ## Working Style
 
@@ -56,8 +40,8 @@ For substantial tasks:
 2. Check `git status`.
 3. Present a concise plan before editing.
 4. Identify important assumptions or conflicts with the design.
-5. Implement the approved scope autonomously.
-6. Add or update relevant tests.
+5. Implement the requested scope autonomously; routine implementation choices need no extra approval.
+6. Reuse existing tests when they cover the change; add or update tests for uncovered behavior.
 7. Run the required validation.
 
 Keep changes focused. Do not modify unrelated files or introduce
@@ -66,11 +50,6 @@ speculative abstractions.
 Fail fast and fix root causes. Do not silently swallow errors or add
 fallback behavior that conceals failures. Add useful diagnostics when a
 problem cannot be understood from existing evidence.
-
-Prefer clear types, small focused modules, low coupling, and simple
-solutions over unnecessary factories, registries, or inheritance
-hierarchies.
-
 
 ## Git and Generated Files
 
@@ -91,29 +70,25 @@ Before declaring a coding task complete, run:
 - `.\.venv\Scripts\python -m pytest`
 - `.\.venv\Scripts\python -m pip check`
 
-When behavior changes, also run the smallest relevant manual or integration
-test.
+When behavior changes, ensure a relevant integration or manual test exercises it.
+An integration test included in the full suite satisfies this requirement.
+
+For documentation-only changes, check affected links and consistency with their authoritative
+sources; run the documentation tests. The full coding suite is not required unless executable
+code or tool configuration also changes. Follow the
+[test ownership policy](docs/architecture/engineering.md#313-test-ownership-and-fixture-scope)
+when adding, merging, or reorganizing tests.
 
 Do not claim that validation passed unless it was actually run. If a check
 cannot run, report the exact failure and what remains unverified.
 
 ## Documentation
 
-Update the design documentation set indexed by `docs/design.md` whenever
-architecture, dependencies, scope, user-visible behavior, feature capability,
-performance strategy, or implementation limitations change. Record every
-architecture modification, feature upgrade, optimization, and behavioral
-improvement in its owning document, including important tradeoffs and relevant
-acceptance tests. Update `docs/design.md` when document ownership or the current
-implemented baseline changes, and add an architecture decision record under
-`docs/decisions/` when a consequential choice has durable alternatives.
-
-Keep `README.md` focused on concise user and developer setup, runtime, controls, and
-entry points. Keep the design set, `README.md`, `AGENTS.md`, and `pyproject.toml`
-consistent while giving each fact one authoritative owner. Do not duplicate the full
-design specification. Do not otherwise modify `AGENTS.md` unless a repository
-instruction is genuinely incorrect, contradictory, or missing a rule required to
-complete the task safely.
+Follow the [engineering change policy](docs/architecture/engineering.md#31-engineering-change-policy).
+Keep README focused on setup, runtime, controls, and entry points; keep dependencies in
+`pyproject.toml` and contributor workflow here. Link to authoritative facts instead of repeating
+whole specifications. Change these instructions when requested or when a rule is incorrect,
+contradictory, or missing for safe completion of the task.
 
 ## Completion Report
 

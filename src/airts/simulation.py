@@ -11,7 +11,6 @@ from airts.automations import (
     AutomationKind,
     AutomationParameters,
     AutomationStatus,
-    ConstructionParameters,
     DefendParameters,
     PatrolParameters,
     ProductionParameters,
@@ -51,7 +50,6 @@ from airts.events import EventLog, EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.navigation.collision import SETTLED_FORMATION_SPACING
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
-from airts.navigation.spatial_index import SpatialIndex
 from airts.spatial import GroundingSelection, SpatialStore
 from airts.systems import (
     automation_lifecycle,
@@ -216,7 +214,7 @@ class Simulation:
     def production_queue(self, factory_id: str) -> tuple[Automation, ...]:
         """Return one factory's unfinished production jobs in FIFO order."""
 
-        return self._factory_production_jobs(factory_id)
+        return production_system.factory_production_jobs(self, factory_id)
 
     def continuous_production(self, factory_id: str) -> Automation | None:
         """Return the factory's current unfinished background production loop."""
@@ -224,7 +222,7 @@ class Simulation:
         return next(
             (
                 automation
-                for automation in self._factory_production_jobs(factory_id)
+                for automation in production_system.factory_production_jobs(self, factory_id)
                 if _production_parameters(automation).continuous
             ),
             None,
@@ -257,47 +255,47 @@ class Simulation:
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
-            return self._create_spatial_reference(command)
+            return spatial_commands.create_spatial_reference(self, command)
         if isinstance(command, EditSpatialReferenceCommand):
-            return self._edit_spatial_reference(command)
+            return spatial_commands.edit_spatial_reference(self, command)
         if isinstance(command, DeleteRegionCommand | DeleteSpatialReferenceCommand):
-            return self._delete_spatial_reference(command)
+            return spatial_commands.delete_spatial_reference(self, command)
         if isinstance(command, RenameRegionCommand):
-            return self._rename_region(command)
+            return spatial_commands.rename_region(self, command)
         if isinstance(command, SetSelectionCommand):
-            return self._set_selection(command)
+            return spatial_commands.set_selection(self, command)
         if isinstance(command, ModifyAutomationCommand):
-            return self._modify_automation(command)
+            return command_handlers.modify_automation(self, command)
         if isinstance(command, AttackCommand):
-            return self._attack(command)
+            return command_handlers.attack(self, command)
         if isinstance(command, MoveCommand):
-            return self._move(command)
+            return command_handlers.move(self, command)
         if isinstance(command, StopCommand):
-            return self._stop(command, hold=False)
+            return command_handlers.stop(self, command, hold=False)
         if isinstance(command, HoldPositionCommand):
-            return self._stop(command, hold=True)
+            return command_handlers.stop(self, command, hold=True)
         if isinstance(command, RemoveEntityCommand):
             return self._remove_entity(command)
         if isinstance(command, CreatePatrolCommand):
-            return self._create_patrol(command)
+            return command_handlers.create_patrol(self, command)
         if isinstance(command, CreateDefendCommand):
-            return self._create_defend(command)
+            return command_handlers.create_defend(self, command)
         if isinstance(command, CreateProductionCommand):
-            return self._create_production(command)
+            return production_system.create_production(self, command)
         if isinstance(command, CreateProductionBatchCommand):
-            return self._create_production_batch(command)
+            return production_system.create_production_batch(self, command)
         if isinstance(command, CreateConstructionCommand):
-            return self._create_construction(command)
+            return construction_system.create_construction(self, command)
         if isinstance(command, CreateReinforcementCommand):
-            return self._create_reinforcement(command)
+            return command_handlers.create_reinforcement(self, command)
         if isinstance(command, CreateRepairAndReturnCommand):
-            return self._create_repair(command)
+            return command_handlers.create_repair(self, command)
         if isinstance(command, CreateEconomyCommand):
-            return self._create_economy(command)
+            return command_handlers.create_economy(self, command)
         if isinstance(command, PauseAutomationCommand):
-            return self._pause(command.automation_id, command.owner_id)
+            return automation_lifecycle.pause(self, command.automation_id, command.owner_id)
         if isinstance(command, ResumeAutomationCommand):
-            return self._resume(command.automation_id, command.owner_id)
+            return automation_lifecycle.resume(self, command.automation_id, command.owner_id)
         return self._cancel(command.automation_id, command.owner_id)
 
     def advance(self, ticks: int = 1) -> None:
@@ -311,13 +309,13 @@ class Simulation:
             self._movement_step_attempt_count = 0
             self._collision_pair_check_count = 0
             self._blocked_recoveries_this_tick = 0
-            self._generate_income()
-            self._spawn_ambient_enemy()
-            self._drive_automations()
-            self._move_entities()
+            economy_system.generate_income(self)
+            economy_system.spawn_ambient_enemy(self)
+            automation_runtime.drive_automations(self)
+            movement_system.move_entities(self)
             automation_runtime.settle_automation_formations(self)
-            self._drive_projectiles()
-            self._drive_combat()
+            combat_system.drive_projectiles(self)
+            combat_system.drive_combat(self)
             self._update_visibility()
 
     def remove_entity(self, entity_id: str, reason: str = "ENTITY_REMOVED") -> CommandResult:
@@ -346,12 +344,12 @@ class Simulation:
             if current.kind is AutomationKind.PRODUCTION and not current.status.terminal:
                 self._transition(current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
             else:
-                self._handle_automation_without_entities(current)
+                automation_lifecycle.handle_automation_without_entities(self, current)
         if suspended_id is not None:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
             self._refresh_gathering_formation(suspended)
-            self._handle_automation_without_entities(suspended)
+            automation_lifecycle.handle_automation_without_entities(self, suspended)
         for automation in tuple(self.automations.values()):
             if (
                 automation.kind is AutomationKind.PRODUCTION
@@ -464,60 +462,6 @@ class Simulation:
     def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
         return spatial_commands.validate_geometry(self, target)
 
-    def _create_spatial_reference(self, command: CreateSpatialReferenceCommand) -> CommandResult:
-        return spatial_commands.create_spatial_reference(self, command)
-
-    def _edit_spatial_reference(self, command: EditSpatialReferenceCommand) -> CommandResult:
-        return spatial_commands.edit_spatial_reference(self, command)
-
-    def _rename_region(self, command: RenameRegionCommand) -> CommandResult:
-        return spatial_commands.rename_region(self, command)
-
-    def _delete_spatial_reference(
-        self, command: DeleteRegionCommand | DeleteSpatialReferenceCommand
-    ) -> CommandResult:
-        return spatial_commands.delete_spatial_reference(self, command)
-
-    def _set_selection(self, command: SetSelectionCommand) -> CommandResult:
-        return spatial_commands.set_selection(self, command)
-
-    def _modify_automation(self, command: ModifyAutomationCommand) -> CommandResult:
-        return command_handlers.modify_automation(self, command)
-
-    def _move(self, command: MoveCommand) -> CommandResult:
-        return command_handlers.move(self, command)
-
-    def _plan_group_paths(
-        self,
-        entity_ids: tuple[str, ...],
-        destinations: dict[str, Point],
-    ) -> dict[str, PathResult]:
-        return command_handlers.plan_group_paths(self, entity_ids, destinations)
-
-    def _attack(self, command: AttackCommand) -> CommandResult:
-        return command_handlers.attack(self, command)
-
-    def _stop(self, command: StopCommand | HoldPositionCommand, *, hold: bool) -> CommandResult:
-        return command_handlers.stop(self, command, hold=hold)
-
-    def _create_patrol(self, command: CreatePatrolCommand) -> CommandResult:
-        return command_handlers.create_patrol(self, command)
-
-    def _create_defend(self, command: CreateDefendCommand) -> CommandResult:
-        return command_handlers.create_defend(self, command)
-
-    def _create_production(self, command: CreateProductionCommand) -> CommandResult:
-        return production_system.create_production(self, command)
-
-    def _preempt_continuous_production(self, factory_id: str) -> None:
-        production_system.preempt_continuous_production(self, factory_id)
-
-    def _create_production_batch(self, command: CreateProductionBatchCommand) -> CommandResult:
-        return production_system.create_production_batch(self, command)
-
-    def _create_construction(self, command: CreateConstructionCommand) -> CommandResult:
-        return construction_system.create_construction(self, command)
-
     def _validate_building_placement(
         self,
         kind: EntityKind,
@@ -529,66 +473,17 @@ class Simulation:
             self, kind, position, ignore_construction_id=ignore_construction_id
         )
 
-    def _cancel_queued_construction(self, builder_ids: tuple[str, ...]) -> None:
-        construction_system.cancel_queued_construction(self, builder_ids)
-
-    def _supersede_continuous_production(self, factory_id: str) -> None:
-        production_system.supersede_continuous_production(self, factory_id)
-
-    def _create_reinforcement(self, command: CreateReinforcementCommand) -> CommandResult:
-        return command_handlers.create_reinforcement(self, command)
-
-    def _create_repair(self, command: CreateRepairAndReturnCommand) -> CommandResult:
-        return command_handlers.create_repair(self, command)
-
-    def _create_economy(self, command: CreateEconomyCommand) -> CommandResult:
-        return command_handlers.create_economy(self, command)
-
-    def _pause(self, automation_id: str, owner_id: str) -> CommandResult:
-        return automation_lifecycle.pause(self, automation_id, owner_id)
-
-    def _resume(self, automation_id: str, owner_id: str) -> CommandResult:
-        return automation_lifecycle.resume(self, automation_id, owner_id)
-
     def _cancel(self, automation_id: str, owner_id: str) -> CommandResult:
         return automation_lifecycle.cancel(self, automation_id, owner_id)
-
-    def _drive_automations(self) -> None:
-        automation_runtime.drive_automations(self)
 
     def _drive_construction(self, automation: Automation) -> None:
         construction_system.drive_construction(self, automation)
 
-    @staticmethod
-    def _construction_cells(parameters: ConstructionParameters) -> frozenset[Cell]:
-        return construction_system.construction_cells(parameters)
-
-    @staticmethod
-    def _construction_distance(point: Point, parameters: ConstructionParameters) -> float:
-        return construction_system.construction_distance(point, parameters)
-
-    def _construction_interaction_points(
-        self, parameters: ConstructionParameters
-    ) -> tuple[Point, ...]:
-        return construction_system.construction_interaction_points(self, parameters)
-
     def _start_next_construction(self) -> None:
         construction_system.start_next_construction(self)
 
-    def _scheduled_entity_ids(self, automation: Automation) -> tuple[str, ...]:
-        return automation_runtime.scheduled_entity_ids(self, automation)
-
-    def _drive_patrol(self, automation: Automation) -> None:
-        automation_runtime.drive_patrol(self, automation)
-
-    def _drive_defend(self, automation: Automation) -> None:
-        automation_runtime.drive_defend(self, automation)
-
     def _drive_production(self, automation: Automation) -> None:
         production_system.drive_production(self, automation)
-
-    def _factory_production_jobs(self, factory_id: str) -> tuple[Automation, ...]:
-        return production_system.factory_production_jobs(self, factory_id)
 
     def _start_next_production(self, factory_id: str) -> None:
         production_system.start_next_production(self, factory_id)
@@ -599,171 +494,12 @@ class Simulation:
     def _drive_economy(self, automation: Automation) -> None:
         economy_system.drive_economy(self, automation)
 
-    def _generate_income(self) -> None:
-        economy_system.generate_income(self)
-
-    def _spawn_ambient_enemy(self) -> None:
-        economy_system.spawn_ambient_enemy(self)
-
-    def _drive_reinforcement(self, automation: Automation) -> None:
-        automation_runtime.drive_reinforcement(self, automation)
-
-    def _drive_repair(self, automation: Automation) -> None:
-        automation_runtime.drive_repair(self, automation)
-
-    def _drive_combat(self) -> None:
-        combat_system.drive_combat(self)
-
-    def _drive_projectiles(self) -> None:
-        combat_system.drive_projectiles(self)
-
-    def _impact_projectile(self, projectile: Projectile, target: Entity) -> None:
-        combat_system.impact_projectile(self, projectile, target)
-
-    def _finish_projectile(self, projectile: Projectile) -> None:
-        combat_system.finish_projectile(self, projectile)
-
-    def _nearest_enemy_in_range(
-        self, attacker: Entity, enemy_indexes: tuple[SpatialIndex, ...]
-    ) -> Entity | None:
-        return combat_system.nearest_enemy_in_range(self, attacker, enemy_indexes)
-
-    def _chase_target(self, attacker: Entity, target: Entity) -> None:
-        combat_system.chase_target(self, attacker, target)
-
-    def _move_entities(self) -> None:
-        movement_system.move_entities(self)
-
-    def _track_movement_progress(self) -> None:
-        movement_system.track_movement_progress(self)
-
     @staticmethod
     def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
         movement_system.reset_movement_liveness(entity, clear_stop=clear_stop)
 
-    def _repath_stalled_entity(self, entity: Entity, *, reason: str = "NO_PROGRESS_REPATH") -> bool:
-        return movement_system.repath_stalled_entity(self, entity, reason=reason)
-
-    def _remaining_path_crosses_military_units(self, entity: Entity) -> bool:
-        return movement_system.remaining_path_crosses_military_units(self, entity)
-
-    def _military_cell_penalties(self, excluding_id: str) -> dict[Cell, float]:
-        return movement_system.military_cell_penalties(self, excluding_id)
-
-    def _replan_contested_final_approach(self, entity: Entity, destination: Point) -> bool:
-        return movement_system.replan_contested_final_approach(self, entity, destination)
-
-    @staticmethod
-    def _consume_reached_intermediate_waypoints(entity: Entity) -> None:
-        movement_system.consume_reached_intermediate_waypoints(entity)
-
     def _skip_crowded_waypoints(self, entity: Entity) -> None:
         movement_system.skip_crowded_waypoints(self, entity)
-
-    def _waypoint_has_lateral_clearance(self, entity: Entity, waypoint: Point) -> bool:
-        return movement_system.waypoint_has_lateral_clearance(self, entity, waypoint)
-
-    def _local_move_is_available(
-        self,
-        entity: Entity,
-        candidate: Point,
-        entity_radius: float,
-        local_colliders: tuple[LocalCollider, ...],
-        static_occupant_cells: frozenset[Cell],
-    ) -> bool:
-        return movement_system.local_move_is_available(
-            self,
-            entity,
-            candidate,
-            entity_radius,
-            local_colliders,
-            static_occupant_cells,
-        )
-
-    def _clamp_to_collider_contact(
-        self,
-        entity: Entity,
-        candidate: Point,
-        entity_radius: float,
-        local_colliders: tuple[LocalCollider, ...],
-    ) -> Point:
-        return movement_system.clamp_to_collider_contact(
-            self, entity, candidate, entity_radius, local_colliders
-        )
-
-    def _contact_has_stationary_blocker(
-        self,
-        entity: Entity,
-        candidate: Point,
-        entity_radius: float,
-        local_colliders: tuple[LocalCollider, ...],
-    ) -> bool:
-        return movement_system.contact_has_stationary_blocker(
-            self, entity, candidate, entity_radius, local_colliders
-        )
-
-    def _resolve_unit_collisions(
-        self,
-        unit_index: SpatialIndex,
-        contact_ids: tuple[str, ...] | None = None,
-    ) -> None:
-        movement_system.resolve_unit_collisions(self, unit_index, contact_ids)
-
-    def _relax_unit_spacing(
-        self,
-        entity_ids: tuple[str, ...],
-        required_spacing: float,
-        center: Point,
-        maximum_radius: float,
-    ) -> None:
-        movement_system.relax_unit_spacing(
-            self,
-            entity_ids,
-            required_spacing,
-            center,
-            maximum_radius,
-        )
-
-    def _separate_overlapping_colliders(
-        self,
-        collision_ids: tuple[str, ...],
-        unit_index: SpatialIndex,
-    ) -> None:
-        movement_system.separate_overlapping_colliders(self, collision_ids, unit_index)
-
-    def _unit_drive_force(self, entity: Entity) -> tuple[float, float]:
-        return movement_system.unit_drive_force(self, entity)
-
-    def _apply_physical_push(
-        self,
-        entity: Entity,
-        normal_x: float,
-        normal_y: float,
-        pressure: float,
-        pusher_id: str,
-        unit_index: SpatialIndex,
-        *,
-        correction: bool = False,
-    ) -> bool:
-        return movement_system.apply_physical_push(
-            self,
-            entity,
-            normal_x,
-            normal_y,
-            pressure,
-            pusher_id,
-            unit_index,
-            correction=correction,
-        )
-
-    def _record_movement_blocked(self, entity: Entity, evidence: str) -> None:
-        movement_system.record_movement_blocked(self, entity, evidence)
-
-    def _final_destination_is_contested(self, entity: Entity) -> bool:
-        return movement_system.final_destination_is_contested(self, entity)
-
-    def _recover_blocked_entity(self, entity: Entity) -> None:
-        movement_system.recover_blocked_entity(self, entity)
 
     def _activate(
         self,
@@ -815,14 +551,8 @@ class Simulation:
     def _refresh_gathering_formation(self, automation: Automation) -> None:
         automation_runtime.refresh_gathering_formation(self, automation)
 
-    def _manual_override(self, entity_id: str) -> None:
-        automation_lifecycle.manual_override(self, entity_id)
-
     def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
         automation_lifecycle.manual_override_many(self, entity_ids)
-
-    def _handle_automation_without_entities(self, automation: Automation) -> None:
-        automation_lifecycle.handle_automation_without_entities(self, automation)
 
     def _release_automation(self, automation: Automation, *, clear_suspended: bool = False) -> None:
         automation_lifecycle.release_automation(self, automation, clear_suspended=clear_suspended)
@@ -833,41 +563,12 @@ class Simulation:
     def _initialize_runtime_entity(self, automation: Automation, entity_id: str) -> None:
         automation_runtime.initialize_runtime_entity(self, automation, entity_id)
 
-    def _spawn_unit(
-        self, automation: Automation, parameters: ProductionParameters, position: Point
-    ) -> str:
-        return production_system.spawn_unit(self, automation, parameters, position)
-
-    def _assign_produced_defender(
-        self,
-        production: Automation,
-        parameters: ProductionParameters,
-        entity_id: str,
-    ) -> None:
-        production_system.assign_produced_defender(self, production, parameters, entity_id)
-
     def _attach_production_defense(
         self,
         production: Automation,
         target: PolygonRegion | PolylineTarget,
     ) -> None:
         production_system.attach_production_defense(self, production, target)
-
-    def _assign_produced_patroller(
-        self,
-        production: Automation,
-        parameters: ProductionParameters,
-        entity_id: str,
-    ) -> None:
-        production_system.assign_produced_patroller(self, production, parameters, entity_id)
-
-    def _next_reinforcement_station(
-        self, target: SpatialTarget, occupied: tuple[Point, ...]
-    ) -> Point:
-        return automation_runtime.next_reinforcement_station(self, target, occupied)
-
-    def _find_spawn_point(self, factory: Entity) -> Point | None:
-        return production_system.find_spawn_point(self, factory)
 
     def _nearest_repair_destination(
         self, entity: Entity, required_id: str | None = None
@@ -912,19 +613,6 @@ class Simulation:
             if self.game_map.is_cell_passable((x, y))
         )
 
-    def _validate_automation_common(
-        self,
-        entity_ids: tuple[str, ...],
-        owner_id: str,
-        priority: int,
-        title: str,
-        *,
-        require_movable: bool,
-    ) -> ValidationFailure | None:
-        return command_handlers.validate_automation_common(
-            self, entity_ids, owner_id, priority, title, require_movable=require_movable
-        )
-
     def _validate_entities(
         self,
         entity_ids: tuple[str, ...],
@@ -960,13 +648,6 @@ class Simulation:
         self, automation_id: str, owner_id: str
     ) -> tuple[Automation | None, ValidationFailure | None]:
         return automation_lifecycle.owned_automation(self, automation_id, owner_id)
-
-    def _validate_paths(
-        self,
-        entity_ids: tuple[str, ...],
-        waypoints: tuple[Point, ...],
-    ) -> None:
-        command_handlers.validate_paths(self, entity_ids, waypoints)
 
     def _start_path(
         self,
@@ -1015,9 +696,6 @@ class Simulation:
 
     def _state_for_assignment(self, entity_id: str) -> UnitState:
         return automation_lifecycle.state_for_assignment(self, entity_id)
-
-    def _fail_movement(self, entity: Entity, reason: str, position: Point) -> None:
-        command_handlers.fail_movement(self, entity, reason, position)
 
     def _allocate_destinations(
         self, entity_ids: tuple[str, ...], target: Point

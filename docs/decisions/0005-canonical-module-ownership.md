@@ -1,6 +1,6 @@
 # ADR 0005: Require canonical module ownership
 
-**Status:** Accepted
+**Status:** Accepted; basename and root-script restrictions superseded by [ADR 0007](0007-simplify-internal-delegation.md)
 
 ## Context
 

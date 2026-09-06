@@ -31,8 +31,7 @@ OpenGL 3.3 is the default renderer. For diagnostics or systems where OpenGL is n
 .\.venv\Scripts\python -m airts --renderer software
 ```
 
-OpenGL startup failures are reported and do not silently fall back. Use `--renderer software`
-explicitly when that backend is intended.
+OpenGL startup failures are reported; select the software backend explicitly when needed.
 
 The OpenGL frontend uses a 1,000 FPS application-clock ceiling and does not request VSync. Open
 `Settings` to choose a window-resolution preset and inspect rolling p95 frame, render, present-wait,
@@ -89,7 +88,6 @@ Enemy generation defaults to one unit per second with a cap of 100. Set
 
 ## Development
 
-Keep code changes within the requested milestone and preserve the simulation/UI dependency
-boundary. Before declaring a coding task complete, run the validation suite listed in
-[AGENTS.md](AGENTS.md). Update the owning document linked from [docs/design.md](docs/design.md) for
-every architecture change, feature upgrade, optimization, or behavioral improvement.
+See [AGENTS.md](AGENTS.md) for contributor workflow and required checks, and the
+[engineering change policy](docs/architecture/engineering.md#31-engineering-change-policy) for
+documentation ownership. [pyproject.toml](pyproject.toml) defines dependencies and tool settings.

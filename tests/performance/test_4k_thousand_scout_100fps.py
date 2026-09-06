@@ -6,90 +6,20 @@ from time import perf_counter
 
 import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
+from tests.scout_scenario import head_on_scout_simulation
 
 from airts.commands import CommandResult, MoveCommand
 from airts.geometry import Point
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000
-GROUP_SIZE = UNIT_COUNT // 2
 TARGET_FPS = 100
 MEASURED_FRAMES = 100
 MEASURED_TICKS = Simulation.TICKS_PER_SECOND
 SIMULATION_INTERVAL_FRAMES = TARGET_FPS // Simulation.TICKS_PER_SECOND
 MINIMUM_PROGRESSING_UNITS = 750
-
-
-def _head_on_scout_simulation() -> tuple[Simulation, tuple[str, ...], tuple[str, ...]]:
-    eastbound = tuple(f"east_{index:04d}" for index in range(GROUP_SIZE))
-    westbound = tuple(f"west_{index:04d}" for index in range(GROUP_SIZE))
-    simulation = Simulation(
-        load_map_data(
-            {
-                "id": "four_k_thousand_scout_head_on",
-                "name": "4K Thousand Scout Head-On Collision",
-                "width": 80,
-                "height": 60,
-                "terrain": {
-                    "default": "grass",
-                    "rectangles": [
-                        [0, 14, 80, 4, "road"],
-                        [0, 42, 80, 4, "road"],
-                        [31, 20, 3, 20, "forest"],
-                    ],
-                },
-                "entities": [
-                    {
-                        "id": entity_id,
-                        "kind": "scout",
-                        "owner": "player",
-                        "position": [5.5 + index % 25, 20.5 + index // 25],
-                    }
-                    for index, entity_id in enumerate(eastbound)
-                ]
-                + [
-                    {
-                        "id": entity_id,
-                        "kind": "scout",
-                        "owner": "player",
-                        "position": [35.5 + index % 25, 20.5 + index // 25],
-                    }
-                    for index, entity_id in enumerate(westbound)
-                ]
-                + [
-                    {
-                        "id": "factory",
-                        "kind": "factory",
-                        "owner": "player",
-                        "position": [68, 4],
-                    },
-                    {
-                        "id": "repair_hub",
-                        "kind": "repair_hub",
-                        "owner": "player",
-                        "position": [68, 12],
-                    },
-                    {
-                        "id": "command_center",
-                        "kind": "command_center",
-                        "owner": "player",
-                        "position": [68, 48],
-                    },
-                    {
-                        "id": "resource_generator",
-                        "kind": "resource_generator",
-                        "owner": "player",
-                        "position": [4, 48],
-                    },
-                ],
-            }
-        ),
-        random_seed=97,
-    )
-    return simulation, eastbound, westbound
 
 
 def _four_k_app(
@@ -129,7 +59,7 @@ def _assert_orders_active(
 def test_4k_static_thousand_scout_rendering_sustains_100_real_fps() -> None:
     """A static large army must not become slow merely because the window is 4K."""
 
-    simulation, eastbound, westbound = _head_on_scout_simulation()
+    simulation, eastbound, westbound = head_on_scout_simulation()
     app, surface = _four_k_app(simulation, eastbound + westbound)
 
     probe = RealFpsProbe()
@@ -143,7 +73,7 @@ def test_4k_static_thousand_scout_rendering_sustains_100_real_fps() -> None:
 def test_thousand_scout_head_on_collision_cpu_work_fits_one_realtime_second() -> None:
     """Command planning and ten authoritative dense-collision ticks fit their real-time budget."""
 
-    simulation, eastbound, westbound = _head_on_scout_simulation()
+    simulation, eastbound, westbound = head_on_scout_simulation()
     entity_ids = eastbound + westbound
     initial_positions = {
         entity_id: simulation.entities[entity_id].position for entity_id in entity_ids
@@ -174,7 +104,7 @@ def test_thousand_scout_head_on_collision_cpu_work_fits_one_realtime_second() ->
 def test_4k_thousand_scout_head_on_collision_sustains_100_real_fps_end_to_end() -> None:
     """The measured second includes commands, collisions, visibility, UI, and 4K drawing."""
 
-    simulation, eastbound, westbound = _head_on_scout_simulation()
+    simulation, eastbound, westbound = head_on_scout_simulation()
     entity_ids = eastbound + westbound
     app, surface = _four_k_app(simulation, entity_ids)
     initial_positions = {

@@ -1,6 +1,13 @@
 # Formation Control and Pathfinding Algorithm Report for AIRTS
 
-**Status:** Implementation design proposal; no runtime code has been changed
+**Status:** Historical, unaccepted design proposal; not the current implementation contract
+
+This report describes its recorded July baseline and proposed alternatives. Its measurements were
+not rerun in the September audit. Several implementation claims are stale: the current runtime has
+a separate large-force lattice controller and more performance workloads. References to an
+unavailable movement document and ADR 0008 have been corrected below. Use the
+[design index](../design.md), [performance milestones](../milestones/performance.md), and
+[ADR 0006](../decisions/0006-stable-incremental-crowd-state.md) for current behavior.
 **Audience:** AIRTS maintainers implementing a future movement revision
 **Repository baseline reviewed:** working tree as inspected on 2026-07-28
 **Scope:** formation planning, group routing, local avoidance, congestion recovery, migration,
@@ -84,10 +91,10 @@ optimizing repair reuse before replacing shared fields.
 
 ### Authoritative project constraints
 
-The proposal follows [`AGENTS.md`](../../AGENTS.md),
-[`docs/design.md`](../design.md), the
-[movement architecture](../architecture/movement.md), and
-[ADR 0008](../decisions/0008-single-movement-pipeline.md):
+The following constraints were assumptions of this proposal. Current authoritative constraints
+live in [`AGENTS.md`](../../AGENTS.md), the [design index](../design.md), and
+[ADR 0006](../decisions/0006-stable-incremental-crowd-state.md); the single-pipeline assumption
+below does not describe the current large-force controller:
 
 - `Simulation` remains authoritative and the stable public facade.
 - The simulation stays headless, fixed at 10 Hz, and independent of Pygame or model providers.
@@ -101,10 +108,9 @@ The proposal follows [`AGENTS.md`](../../AGENTS.md),
   rebuildable.
 - Failures stay explicit.
 
-Adopting formation checkpoints does not require overturning ADR 0008 because it still compiles to
-one route and one movement pipeline. Enabling ORCA as the universal local solver would materially
-change ADR 0008's chosen local-steering implementation and should be recorded in a superseding ADR.
-Adding a persisted space-time reservation lattice would contradict the ADR and is not recommended.
+There is no accepted ADR 0008 in this repository. Any future checkpoint or ORCA proposal must be
+evaluated against ADR 0006 and the current crowd contracts, and record a superseding decision if it
+changes those contracts.
 
 ### Evidence reviewed
 

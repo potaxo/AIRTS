@@ -136,9 +136,9 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 ),
             )
     if command.continuous:
-        simulation._supersede_continuous_production(command.factory_id)
+        supersede_continuous_production(simulation, command.factory_id)
     else:
-        simulation._preempt_continuous_production(command.factory_id)
+        preempt_continuous_production(simulation, command.factory_id)
     build_ticks = simulation.PRODUCTION_BUILD_TICKS
     automation = simulation._new_automation(
         AutomationKind.PRODUCTION,
@@ -206,7 +206,8 @@ def create_production_batch(
                 ),
             )
     first_kind, first_quantity = command.sequence[0]
-    result = simulation._create_production(
+    result = create_production(
+        simulation,
         CreateProductionCommand(
             command.factory_id,
             first_kind,
@@ -215,7 +216,7 @@ def create_production_batch(
             priority=command.priority,
             owner_id=command.owner_id,
             original_instruction=command.original_instruction,
-        )
+        ),
     )
     if result.accepted:
         parameters = production_parameters(simulation.automations[result.automation_id or ""])
@@ -228,7 +229,7 @@ def create_production_batch(
 def supersede_continuous_production(simulation: Simulation, factory_id: str) -> None:
     superseded = tuple(
         automation
-        for automation in simulation._factory_production_jobs(factory_id)
+        for automation in factory_production_jobs(simulation, factory_id)
         if production_parameters(automation).continuous
     )
     for automation in superseded:
@@ -285,7 +286,7 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         parameters.progress_ticks += 1
         if parameters.progress_ticks < parameters.build_ticks:
             return
-    spawn = simulation._find_spawn_point(simulation.entities[parameters.factory_id])
+    spawn = find_spawn_point(simulation, simulation.entities[parameters.factory_id])
     if spawn is None:
         if automation.status is AutomationStatus.ACTIVE:
             simulation._transition(automation, AutomationStatus.WAITING, "SPAWN_BLOCKED")
@@ -294,7 +295,7 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         simulation._transition(automation, AutomationStatus.ACTIVE, "SPAWN_AVAILABLE")
     parameters.progress_ticks = 0
     parameters.cost_paid = False
-    entity_id = simulation._spawn_unit(automation, parameters, spawn)
+    entity_id = spawn_unit(simulation, automation, parameters, spawn)
     parameters.produced_count += 1
     parameters.produced_entity_ids.append(entity_id)
     if parameters.sequence:
@@ -303,9 +304,9 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
             parameters.sequence_index += 1
             parameters.sequence_produced = 0
     if parameters.defend_target is not None:
-        simulation._assign_produced_defender(automation, parameters, entity_id)
+        assign_produced_defender(simulation, automation, parameters, entity_id)
     elif parameters.patrol_target is not None:
-        simulation._assign_produced_patroller(automation, parameters, entity_id)
+        assign_produced_patroller(simulation, automation, parameters, entity_id)
     simulation.events.record(
         simulation.tick,
         EventType.PRODUCTION_COMPLETED,
@@ -348,7 +349,7 @@ def start_next_production(simulation: Simulation, factory_id: str) -> None:
     queued = next(
         (
             automation
-            for automation in simulation._factory_production_jobs(factory_id)
+            for automation in factory_production_jobs(simulation, factory_id)
             if automation.status is AutomationStatus.WAITING
             and automation.reason_code == "FACTORY_QUEUED"
         ),
@@ -545,7 +546,7 @@ def attach_production_defense(
         return
     parameters.defend_automation_id = None
     for entity_id in produced_ids:
-        simulation._assign_produced_defender(production, parameters, entity_id)
+        assign_produced_defender(simulation, production, parameters, entity_id)
 
 
 def assign_produced_patroller(

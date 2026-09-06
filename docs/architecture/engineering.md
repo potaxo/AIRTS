@@ -8,57 +8,23 @@ This document owns repository structure, dependency direction, validation strate
 
 # 30. Development Philosophy
 
-AIRTS should use a combination of deliberate design and fast iteration.
-
-The project should avoid both extremes:
-
-```text
-Too little design:
-“Build an AI RTS game.”
-→ inconsistent architecture
-→ fragile prototype
-
-Too much design:
-specify every class and method before coding
-→ unnecessary complexity
-→ slow progress
-```
-
-The preferred loop is:
-
-```text
-define architectural invariants
-→ implement one bounded vertical slice
-→ test real behavior
-→ identify problems
-→ revise the design
-→ implement the next milestone
-```
-
-The design documentation set is a living source of truth.
-
-It should be updated when implementation reveals that an assumption is incorrect.
+Define invariants, implement one bounded vertical slice, test its behavior, and revise the design
+from evidence. Prefer clear types and focused functions over speculative factories, registries,
+or inheritance hierarchies. The design records useful contracts rather than every class or method.
 
 ---
 
 # 31. Engineering Change Policy
 
-`AGENTS.md` owns contributor workflow and validation instructions. This document owns durable
-technical decisions and must change whenever implementation work changes architecture, behavior,
-scope, dependencies, performance strategy, or a user-visible feature.
+`AGENTS.md` owns contributor workflow and validation commands. Update the owning design document
+when architecture, dependencies, scope, behavior, performance strategy, or limitations change.
+Record the changed contract, important tradeoffs, and relevant acceptance tests; discuss effects
+on authority, determinism, or persistence when they apply. A behavior-preserving cleanup needs a
+concise ownership/tradeoff note, not a new milestone or a repeated checklist of unaffected systems.
 
-Every architecture modification, feature upgrade, optimization, or improvement must record the
-following in the owning design document or as a new bounded milestone:
-
-* the behavior or constraint that changed;
-* the component that remains authoritative;
-* effects on dependency direction, determinism, validation, persistence, or replay;
-* explicit exclusions and remaining limitations;
-* the test or other acceptance evidence that defines the contract.
-
-Milestones should remain coherent and reviewable. Do not add later-phase capability merely because
-it is mentioned in the roadmap, and do not turn this document into a class-by-class implementation
-manual.
+Update `docs/design.md` when document ownership or the implemented baseline changes. Add an ADR
+when a consequential choice has durable alternatives. README owns setup and controls;
+`pyproject.toml` owns dependencies. Link to these owners rather than restating their rules.
 
 ## 31.1 Module boundary and refactoring policy
 
@@ -97,19 +63,42 @@ A flag-day rewrite requires an explicit milestone and migration contract.
 | `tests/performance/` | Explicit workload and frame-rate contracts |
 | `tests/architecture/` | Dependency and documentation structure policies |
 
-The old top-level compatibility modules have been removed under ADR 0005. Application and renderer
-code is imported from `airts.presentation`; world state from `airts.world`; routing, collision
-primitives, and spatial indexing from `airts.navigation`; authoritative tick behavior from
-`airts.systems`; and persistence or replay from `airts.adapters`. In particular,
-`airts.systems.movement` owns movement behavior while `airts.navigation.collision` owns collision
-radii and steering candidates. No second `movement.py` or top-level re-export may obscure that
-boundary.
+Moved code has one canonical package path under [ADR 0005](../decisions/0005-canonical-module-ownership.md).
+The stable public facade does not require mirroring every system function as a private method.
+Command dispatch and tick orchestration call their owners directly; system-local calls stay local.
+Shared cross-system hooks remain where removing them would expand coupling. Unused forwarding
+methods and obsolete algorithms are removed under [ADR 0007](../decisions/0007-simplify-internal-delegation.md).
+Public commands, state schemas, event order, and tick behavior are preserved.
 
-`tests/architecture/test_architecture_boundaries.py` enforces dependency direction, canonical
-imports, absence of the removed modules, unique source basenames, a clean repository root, and the
-stable `Simulation` facade. This structure expresses ownership, not a target file size, and
-packages should remain shallow until a new durable boundary is demonstrated. Removing the
-transitional imports is a bounded prototype source migration, not permission to change command,
-save, replay, event, or deterministic behavior.
+Architecture tests enforce dependency direction (including nested and relative imports), keep
+Pygame and OpenGL outside the domain, reject removed compatibility imports, and preserve the public
+facade. Documentation checks verify local links and that owner documents are reachable from the
+index. Filenames and a fixed global section count are not architectural invariants.
 
----
+The unit, integration, movement, and performance suites cover the delegation cleanup, including
+save/load continuation and replay equality. Hardware performance thresholds remain unchanged.
+Optional blocking inspection workloads live under `tests/gui_scenarios/` outside pytest discovery.
+
+## 31.3 Test ownership and fixture scope
+
+Test a contract at the lowest useful layer. Automation lifecycle and command serialization belong
+in unit tests; facade-driven patrol behavior belongs in simulation integration tests. The command
+codec matrix covers every command kind, so UI tests need not repeat isolated codec assertions.
+Parameterized validation cases keep separate descriptive IDs and expected failures.
+
+Renderer correctness and mocked startup/error paths live in
+`tests/integration/test_opengl_presentation.py`. Startup and overlay-key checks use small worlds;
+full-scene and timing contracts retain their required scale. Software and OpenGL stress tests use
+the same fresh 1,000-scout map from `tests/scout_scenario.py`, with no shared mutable simulation.
+Timing workloads remain under `tests/performance/`; their thresholds and frame counts are unchanged.
+
+Persistence scenarios remain distinct for patrol, repair suspension, production queues, ambient
+spawns, and linked defenses. They share a full exported-state continuation assertion that includes
+events, command history, counters, and transient movement state rather than repeating partial
+snapshot checks. Merge repeated setup and assertions without collapsing independent failures into
+one long scenario or replacing behavior checks with source-text checks.
+
+The FPS acceptance helper is exercised with explicit completed-frame timestamps: a stuttering
+sample must fail 100 Real FPS even when average throughput exceeds it. This replaces a source-text
+blacklist that could be satisfied by a comment or broken by harmless renaming; benchmark calls
+continue to use the same measured acceptance helper and invariant p99 rule.
