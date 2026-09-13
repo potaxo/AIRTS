@@ -1,15 +1,18 @@
-"""Integration contracts for phase 4 interaction behavior."""
+"""Spatial references, grounded selections, and editing controls."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
 
-from airts.adapters.persistence import load_simulation, save_simulation
-from airts.adapters.replay import load_replay, run_replay, save_replay
+from tests.integration.scenarios import interaction_simulation
+
+from airts.adapters.replay import capture_replay, load_replay, run_replay, save_replay
+from airts.automations import AutomationStatus
 from airts.commands import (
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
+    DeleteRegionCommand,
     EditSpatialReferenceCommand,
     ModifyAutomationCommand,
     RenameRegionCommand,
@@ -18,7 +21,7 @@ from airts.commands import (
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
-from airts.presentation.app import AirtsApp
+from airts.presentation.app import AirtsApp, InputMode
 from airts.simulation import Simulation
 from airts.world.map_model import GameMap
 
@@ -48,6 +51,12 @@ def test_spatial_references_have_stable_ids_unique_names_and_edit_in_place(
     assert simulation.spatial.references[point.reference_id or ""].geometry == PointTarget(
         Point(2, 2)
     )
+    replacement = PointTarget(Point(3, 2))
+    assert simulation.execute(
+        EditSpatialReferenceCommand(point.reference_id or "", replacement)
+    ).accepted
+    assert simulation.spatial.references[point.reference_id or ""].geometry == replacement
+    assert set(simulation.spatial.references) == {"point_001", "region_001", "region_002"}
 
 
 def test_grounded_selection_is_typed_owned_and_replayable(
@@ -125,14 +134,88 @@ def test_automation_modification_is_atomic_and_inspectable(
     )
 
 
-def test_save_restores_spatial_state(make_map: Callable[[int], GameMap], tmp_path: Path) -> None:
-    simulation = Simulation(make_map())
+def test_drag_selection_chooses_only_friendly_units_and_keeps_grounding() -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
     region = simulation.execute(
-        CreateSpatialReferenceCommand(rectangle_region(Point(2, 2), Point(6, 6)), "North")
+        CreateSpatialReferenceCommand(rectangle_region(Point(1, 1), Point(8, 8)))
     )
-    simulation.execute(SetSelectionCommand(region_ids=(region.reference_id or "",)))
-    destination = tmp_path / "phase4-save.json"
-    save_simulation(simulation, destination)
-    restored = load_simulation(destination)
-    assert restored.snapshot() == simulation.snapshot()
-    assert restored.spatial.references[region.reference_id or ""].persistent
+    app.selected_regions = {region.reference_id or ""}
+
+    app._select_entities(Point(1, 1), Point(8, 8))
+
+    assert app.selected_entities == {"unit", "tank"}
+    assert app.selected_regions == {region.reference_id}
+    assert simulation.selection.entity_ids == ("tank", "unit")
+    assert simulation.selection.region_ids == (region.reference_id,)
+
+
+def test_line_finishes_with_right_click_and_preserves_selected_units() -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
+    app.selected_entities = {"unit"}
+    app.mode = InputMode.LINE
+    app._handle_mouse_down(1, (80, 80))
+    app._handle_mouse_down(1, (120, 120))
+
+    app._handle_mouse_down(3, (140, 140))
+
+    assert app.mode is InputMode.SELECT
+    assert app.selected_entities == {"unit"}
+    assert simulation.selection.entity_ids == ("unit",)
+    assert simulation.selection.route_ids == ("route_001",)
+    assert simulation.spatial.references["route_001"].geometry == PolylineTarget(
+        (app._map_point((80, 80)), app._map_point((120, 120)))
+    )
+
+
+def test_line_enter_does_not_finish_and_escape_cancels() -> None:
+    app = AirtsApp(interaction_simulation())
+    app.mode = InputMode.LINE
+    app._handle_mouse_down(1, (80, 80))
+    app._handle_mouse_down(1, (120, 120))
+
+    app._handle_key(13)
+
+    assert app.mode is InputMode.LINE
+    assert len(app.line_points) == 2
+
+    app._handle_key(27)
+
+    assert app.mode is InputMode.SELECT
+    assert not app.line_points
+
+
+def test_region_deletion_is_replayable_and_cancels_affected_automation() -> None:
+    simulation = interaction_simulation()
+    target = rectangle_region(Point(7, 7), Point(10, 10))
+    region = simulation.execute(CreateSpatialReferenceCommand(target, "Defense"))
+    patrol = simulation.execute(CreatePatrolCommand(("unit",), target))
+    simulation.execute(SetSelectionCommand(("unit",), region_ids=(region.reference_id or "",)))
+    command = DeleteRegionCommand(region.reference_id or "")
+
+    result = simulation.execute(command)
+
+    assert result.accepted
+    assert "CANCELED" in result.reason
+    assert region.reference_id not in simulation.spatial.references
+    assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
+    assert simulation.selection.entity_ids == ("unit",)
+    assert not simulation.selection.region_ids
+    replayed = run_replay(capture_replay(simulation))
+    assert replayed.export_state() == simulation.export_state()
+
+
+def test_delete_control_removes_selected_route_and_cancels_its_patrol() -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
+    target = PolylineTarget((Point(7, 7), Point(12, 7)))
+    route = simulation.execute(CreateSpatialReferenceCommand(target))
+    patrol = simulation.execute(CreatePatrolCommand(("unit",), target))
+    app._select_reference(route.reference_id)
+
+    app._delete_selected_reference()
+
+    assert route.reference_id not in simulation.spatial.references
+    assert simulation.automations[patrol.automation_id or ""].status is AutomationStatus.CANCELED
+    assert not app.selected_routes

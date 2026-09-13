@@ -1,18 +1,25 @@
-"""Integration contracts for phase 5 economy and combat behavior."""
+"""Income, spawning, weapon range, and projectile behavior."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from tests.integration.scenarios import (
+    economy_combat_simulation,
+    interaction_simulation,
+)
+
 from airts.adapters.persistence import load_simulation, save_simulation
-from airts.adapters.replay import load_replay, run_replay, save_replay
-from airts.automations import AutomationKind, AutomationStatus
+from airts.automations import (
+    AutomationKind,
+    AutomationStatus,
+)
 from airts.commands import (
     AttackCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
     CreatePatrolCommand,
-    CreateProductionCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
     RemoveEntityCommand,
@@ -24,62 +31,8 @@ from airts.world.map_model import EntityKind, load_map_data
 from airts.world.projectiles import Projectile
 
 
-def _phase5_simulation() -> Simulation:
-    return Simulation(
-        load_map_data(
-            {
-                "id": "phase5_test",
-                "name": "Phase 5 Test",
-                "width": 16,
-                "height": 16,
-                "terrain": {"default": "grass", "rectangles": []},
-                "entities": [
-                    {"id": "tank", "kind": "light_tank", "owner": "player", "position": [2.5, 2.5]},
-                    {"id": "enemy", "kind": "scout", "owner": "enemy", "position": [4.5, 2.5]},
-                    {"id": "factory", "kind": "factory", "owner": "player", "position": [2, 8]},
-                    {"id": "repair", "kind": "repair_hub", "owner": "player", "position": [8, 8]},
-                    {
-                        "id": "generator",
-                        "kind": "resource_generator",
-                        "owner": "player",
-                        "position": [12, 9],
-                    },
-                ],
-            }
-        ),
-        random_seed=41,
-    )
-
-
-def test_production_charges_cost_and_waits_for_resources() -> None:
-    simulation = _phase5_simulation()
-    created = simulation.execute(CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1))
-    simulation.advance()
-    assert simulation.resources["player"] == 400
-    assert any(
-        event.event_type is EventType.RESOURCE_CHANGED
-        and event.details["reason"] == "PRODUCTION_COST"
-        for event in simulation.events.events
-    )
-    simulation.advance(3)
-    assert not simulation.automations[created.automation_id or ""].parameters.to_dict()[
-        "produced_entity_ids"
-    ]
-    simulation.advance()
-    assert simulation.automations[created.automation_id or ""].parameters.to_dict()[
-        "produced_entity_ids"
-    ] == ["light_tank_001"]
-
-    poor = _phase5_simulation()
-    poor.resources["player"] = 50
-    result = poor.execute(CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1))
-    poor.advance()
-    assert poor.automations[result.automation_id or ""].status is AutomationStatus.WAITING
-    assert poor.resources["player"] == 50
-
-
 def test_economy_automation_collects_generator_income_to_target() -> None:
-    simulation = _phase5_simulation()
+    simulation = economy_combat_simulation()
     result = simulation.execute(CreateEconomyCommand(("generator",), 1500))
     simulation.advance(10)
     automation = simulation.automations[result.automation_id or ""]
@@ -92,12 +45,12 @@ def test_economy_automation_collects_generator_income_to_target() -> None:
 
 def test_seeded_enemy_tank_reinforcements_spawn_on_the_right_each_second() -> None:
     first = Simulation(
-        _phase5_simulation().game_map,
+        economy_combat_simulation().game_map,
         random_seed=19,
         ambient_enemy_spawns=True,
     )
     second = Simulation(
-        _phase5_simulation().game_map,
+        economy_combat_simulation().game_map,
         random_seed=19,
         ambient_enemy_spawns=True,
     )
@@ -162,7 +115,7 @@ def test_enemy_reinforcement_interval_and_cap_limit_world_growth() -> None:
 
 
 def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
-    simulation = _phase5_simulation()
+    simulation = economy_combat_simulation()
     assert simulation.execute(AttackCommand(("tank",), "enemy")).accepted
     simulation.advance()
     assert simulation.entities["enemy"].health == 60
@@ -210,7 +163,7 @@ def test_attack_damage_destruction_and_repair_only_when_requested() -> None:
 def test_projectile_finishes_at_last_target_position_after_target_is_destroyed(
     tmp_path: Path,
 ) -> None:
-    simulation = _phase5_simulation()
+    simulation = economy_combat_simulation()
     destination = simulation.entities["enemy"].selection_position
     projectile = Projectile(
         projectile_id="projectile_orphan",
@@ -250,7 +203,12 @@ def test_projectile_finishes_at_last_target_position_after_target_is_destroyed(
     assert restored.snapshot() == simulation.snapshot()
 
 
-def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
+@pytest.mark.parametrize(
+    "kind",
+    [EntityKind.SCOUT, EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK],
+    ids=lambda kind: kind.value,
+)
+def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires(kind: EntityKind) -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -262,7 +220,7 @@ def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
                 "entities": [
                     {
                         "id": "attacker",
-                        "kind": "light_tank",
+                        "kind": kind.value,
                         "owner": "player",
                         "position": [2.5, 3.5],
                     },
@@ -277,6 +235,7 @@ def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
         )
     )
     initial = simulation.entities["attacker"].position
+    assert initial.distance_to(simulation.entities["target"].position) > kind.profile.attack_range
     assert simulation.execute(AttackCommand(("attacker",), "target")).accepted
 
     for _ in range(20):
@@ -289,6 +248,9 @@ def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
     attacker = simulation.entities["attacker"]
     firing_position = attacker.position
 
+    assert simulation.events.query(
+        event_types=frozenset({EventType.PROJECTILE_LAUNCHED}), subject_id="attacker"
+    ), f"{kind.value} reached range but did not fire"
     assert firing_position != initial
     assert not attacker.path
     assert attacker.move_target is None
@@ -300,61 +262,64 @@ def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires() -> None:
     assert not attacker.path
 
 
-def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range() -> None:
-    commands = (
+@pytest.mark.parametrize(
+    "command",
+    (
         MoveCommand(("unit",), Point(14.5, 2.5)),
         CreatePatrolCommand(("unit",), PointTarget(Point(13.5, 4.5), radius=1)),
         CreateDefendCommand(("unit",), PointTarget(Point(4.5, 4.5), radius=1)),
+    ),
+    ids=["move", "patrol", "defend"],
+)
+def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range(
+    command: MoveCommand | CreatePatrolCommand | CreateDefendCommand,
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "behavior_fire",
+                "name": "Behavior Fire",
+                "width": 18,
+                "height": 8,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "unit",
+                        "kind": "light_tank",
+                        "owner": "player",
+                        "position": [2.5, 2.5],
+                    },
+                    {
+                        "id": "enemy",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [7.5, 2.5],
+                    },
+                ],
+            }
+        )
     )
-    for command in commands:
-        simulation = Simulation(
-            load_map_data(
-                {
-                    "id": "behavior_fire",
-                    "name": "Behavior Fire",
-                    "width": 18,
-                    "height": 8,
-                    "terrain": {"default": "grass", "rectangles": []},
-                    "entities": [
-                        {
-                            "id": "unit",
-                            "kind": "light_tank",
-                            "owner": "player",
-                            "position": [2.5, 2.5],
-                        },
-                        {
-                            "id": "enemy",
-                            "kind": "heavy_tank",
-                            "owner": "enemy",
-                            "position": [7.5, 2.5],
-                        },
-                    ],
-                }
-            )
-        )
-        assert simulation.execute(command).accepted
+    assert simulation.execute(command).accepted
 
-        simulation.advance()
+    simulation.advance()
 
-        assert simulation.events.query(
-            event_types=frozenset({EventType.PROJECTILE_LAUNCHED}),
-            subject_id="unit",
-        )
-        assert simulation.entities["unit"].path
+    assert simulation.events.query(
+        event_types=frozenset({EventType.PROJECTILE_LAUNCHED}),
+        subject_id="unit",
+    )
+    assert simulation.entities["unit"].path
 
 
-def test_all_unit_attack_ranges_are_doubled() -> None:
-    assert {
-        kind: kind.profile.attack_range
-        for kind in (EntityKind.SCOUT, EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK)
-    } == {
-        EntityKind.SCOUT: 5.0,
-        EntityKind.LIGHT_TANK: 6.0,
-        EntityKind.HEAVY_TANK: 7.0,
-    }
-
-
-def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities() -> None:
+@pytest.mark.parametrize(
+    ("kind", "damage"),
+    [
+        pytest.param(EntityKind.LIGHT_TANK, 12, id="light-tank"),
+        pytest.param(EntityKind.HEAVY_TANK, 20, id="heavy-tank"),
+    ],
+)
+def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities(
+    kind: EntityKind, damage: int
+) -> None:
     def combat_simulation(kind: EntityKind) -> Simulation:
         return Simulation(
             load_map_data(
@@ -388,37 +353,16 @@ def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities() -
             )
         )
 
-    results: dict[EntityKind, int] = {}
-    for kind in (EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK):
-        simulation = combat_simulation(kind)
-        assert simulation.execute(AttackCommand(("attacker",), "target")).accepted
-        simulation.advance(8)
-        results[kind] = (
-            EntityKind.HEAVY_TANK.profile.max_health - simulation.entities["target"].health
-        )
-        assert simulation.entities["bystander"].health == EntityKind.HEAVY_TANK.profile.max_health
-
-    assert results == {EntityKind.LIGHT_TANK: 12, EntityKind.HEAVY_TANK: 20}
+    simulation = combat_simulation(kind)
+    assert simulation.execute(AttackCommand(("attacker",), "target")).accepted
+    simulation.advance(8)
+    assert EntityKind.HEAVY_TANK.profile.max_health - simulation.entities["target"].health == damage
+    assert simulation.entities["bystander"].health == EntityKind.HEAVY_TANK.profile.max_health
 
 
-def test_phase5_save_and_replay_preserve_resources_and_combat(
-    tmp_path: Path,
-) -> None:
-    simulation = _phase5_simulation()
-    simulation.execute(CreateEconomyCommand(("generator",), 520))
-    simulation.execute(AttackCommand(("tank",), "enemy"))
-    simulation.advance(12)
+def test_resource_generators_produce_without_an_automation() -> None:
+    simulation = interaction_simulation()
 
-    save_path = tmp_path / "phase5-save.json"
-    replay_path = tmp_path / "phase5-replay.json"
-    save_simulation(simulation, save_path)
-    save_replay(simulation, replay_path)
+    simulation.advance(20)
 
-    restored = load_simulation(save_path)
-    replayed = run_replay(load_replay(replay_path))
-    assert restored.snapshot() == simulation.snapshot()
-    assert replayed.snapshot() == simulation.snapshot()
-
-    restored.advance(10)
-    simulation.advance(10)
-    assert restored.snapshot() == simulation.snapshot()
+    assert simulation.resources["player"] == 2500

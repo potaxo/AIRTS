@@ -3,7 +3,7 @@
 [Design](../design.md) owns scope. These are acceptance requirements, not a claim that every run
 or machine passes. Preserve workload sizes, geometry, durations, collision thresholds, and metrics.
 Exact fixtures/assertions are owned by the linked tests; historical benchmark prose is not evidence
-for the current checkout. This consolidates the retained decisions from ADRs 0002/0003/0004/0006.
+for the current checkout.
 
 ## FPS and rendering
 
@@ -18,7 +18,8 @@ cadence needs external measurement; neither offscreen GPU tests nor application 
 Simulation remains deterministic, single-threaded CPU work at 10 Hz. The frontend has a 1,000 FPS
 ceiling and requests VSync off. Native OpenGL 3.3 uses `OPENGL | DOUBLEBUF | RESIZABLE`, never
 `SCALED` or silent software fallback. Context failures are diagnostic. Windows verification uses
-the native WGL backend; WSLg compatibility prefers Wayland unless explicitly overridden.
+the native WGL backend. The app retains a WSLg/Wayland compatibility branch, but repository
+development and acceptance verification use native Windows as specified in [AGENTS](../../AGENTS.md).
 Software rasterizers (including llvmpipe, softpipe, SwiftShader, GDI Generic, and Microsoft Basic
 Render Driver) cannot count as hardware evidence. Dependencies stay in [pyproject](../../pyproject.toml).
 
@@ -35,7 +36,9 @@ feedback into authoritative state. It adds at most 100 ms visual latency and res
 Tick-driven overlay updates stage onto the first interpolation frame after a tick, adding at most
 one frame of text latency. Explicit software mode caches complete composed Surfaces, reconstructs
 on the following presentation call after a tick, and catches up immediately if another tick arrives.
-Native resolution presets span 1280 x 720 through 3840 x 2160; settings exposes p95 frame, render,
+The interactive software backend scales a bounded logical framebuffer; a native-4K software test
+Surface does not establish native-4K interactive software rendering.
+Native OpenGL resolution presets span 1280 x 720 through 3840 x 2160; settings exposes p95 frame, render,
 simulation, and swap-wait diagnostics. Projectile cores remain small and fixed in pixel size.
 
 ## Required workloads
@@ -56,10 +59,11 @@ live in [presentation integration tests](../../tests/integration/test_opengl_pre
 
 ## Crowd and routing
 
-[Crowd scenarios](../../tests/performance/test_crowd_congestion_performance.py) require 999 focus
-attackers to stop at range (220 ticks); 400 scouts around a 2 x 2 defense to settle with >=0.90
-center spacing and tick p95 <100 ms; and all 400 scouts to cross the nine-cell bridge on a 120 x 80
-map within the existing deadlock guard and overlap tolerance. Capacity-specific counts do not
+[Crowd scenarios](../../tests/performance/test_crowd_congestion_performance.py) require a 999-attacker
+focus scenario to have at least 24 attackers in range after 220 ticks, with every in-range attacker
+stopped and tick p95 <100 ms; 400 scouts around a 2 x 2 defense to settle with >=0.90 center spacing
+and tick p95 <100 ms; and all 400 scouts to cross the nine-cell bridge on a 120 x 80 map within the
+test's tick limit and overlap tolerance. Capacity-specific counts do not
 replace the independent 1,000-unit performance gates. Tiny patrols, stationary hostile anchors,
 and bridge-turn lookahead remain distinct regressions.
 
@@ -81,7 +85,13 @@ in [runtime](runtime.md#movement-and-combat); alternatives need a measured repla
 ## Visual inspection
 
 The non-discovered [GUI scenarios](../../tests/gui_scenarios/crowd_congestion_gui.py) use the normal
-OpenGL app and block until closed. Explicitly run a scenario with pytest `-s`, optionally `-k`;
-other modules in that directory cover large armies, behavior regressions, and rendering/battle.
+OpenGL app and block until closed. From the repository root, run:
+
+```powershell
+.\.venv\Scripts\python -m pytest -s tests/gui_scenarios/crowd_congestion_gui.py
+```
+
+Use `-k` to select a scenario; close its window to proceed to the next selected case.
+Other modules in that directory cover large armies, behavior regressions, and rendering/battle.
 Visual inspection complements automated progress/timing checks; a screenshot alone cannot prove
 liveness, smoothness, or physical display FPS.

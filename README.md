@@ -17,25 +17,40 @@ py -3.13 -m venv .venv
 
 ## Run
 
-OpenGL 3.3 is the default. Startup failures are reported; explicitly choose software if needed:
+OpenGL 3.3 is the default and needs a compatible graphics driver. Startup failures are reported;
+explicitly choose software if needed. The following are separate run examples; create `outputs/`
+before exporting files because export commands do not create parent directories:
 
 ```powershell
+New-Item -ItemType Directory -Force outputs | Out-Null
 .\.venv\Scripts\python -m airts --renderer software
 .\.venv\Scripts\python -m airts --map PATH
 .\.venv\Scripts\python -m airts --enemy-spawn-seconds 2.5 --enemy-cap 60
-.\.venv\Scripts\python -m airts --event-log events.jsonl
-.\.venv\Scripts\python -m airts --save-state state.json
-.\.venv\Scripts\python -m airts --load-state state.json
-.\.venv\Scripts\python -m airts --write-replay replay.json
-.\.venv\Scripts\python -m airts --replay replay.json
+.\.venv\Scripts\python -m airts --event-log outputs/events.jsonl
+.\.venv\Scripts\python -m airts --save-state outputs/state.json
+.\.venv\Scripts\python -m airts --load-state outputs/state.json
+.\.venv\Scripts\python -m airts --write-replay outputs/replay.json
+.\.venv\Scripts\python -m airts --replay outputs/replay.json
 .\.venv\Scripts\python -m airts --help
 ```
 
-Enemy generation defaults to one unit/second, cap 100; `--enemy-spawn-seconds 0` disables it.
+`--map`, `--load-state`, and `--replay` are mutually exclusive. Load/replay examples require a
+previously exported file. Replay verifies the recorded final snapshot and event stream, then opens
+that resulting simulation; it does not play back an animated timeline.
+
+For a new CLI game, enemy generation defaults to one unit/second, cap 100;
+`--enemy-spawn-seconds 0` disables it. Loaded saves/replays retain their recorded spawn settings;
+these CLI spawn options do not override them. `--max-frames N` closes after N rendered frames.
+
+CLI exports run after normal window exit and currently use the simulation created at startup.
+After an in-window load (`F9`) or reset (`F2`), use `F5` to save the displayed game; CLI exports
+still refer to the earlier simulation. Quicksave writes `airts-quicksave.json` in the working
+directory and overwrites that file; keep it out of Git.
+
 Settings offers resolution presets and p95 frame/render/present-wait/simulation timings.
 `Real FPS` measures rolling inverse-p99 completed-swap time; average `Submit FPS` is diagnostic.
-The frontend has a 1,000 FPS ceiling and requests VSync off. These measurements do not count
-physical monitor scan-out; [performance contracts](docs/milestones/performance.md) explain limits.
+These measurements do not count physical monitor scan-out;
+[performance contracts](docs/milestones/performance.md) own frame limits and measurement details.
 
 ## Controls
 
@@ -47,7 +62,7 @@ physical monitor scan-out; [performance contracts](docs/milestones/performance.m
 | `4` | Draw a freehand patrol area |
 | `A` | Create a patrol from the selected units and current target |
 | `D` | Create a defend automation from selected units and current target |
-| `P` | Attach every selected factory loop to the active line or area defense |
+| `P` | Attach every selected factory loop to the active line or area defense; start a Loop on each factory first |
 | `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
 | `S` / `H` | Stop selected units or hold their current position |
@@ -66,3 +81,9 @@ physical monitor scan-out; [performance contracts](docs/milestones/performance.m
 | Middle-drag | Pan the game canvas independently of window resolution |
 | Mouse wheel over left panel | Scroll active automations |
 | Double-click friendly entity | Select every friendly entity of the same type inside the canvas |
+
+## Windows package
+
+The manually triggered [Windows build workflow](.github/workflows/build-windows.yml) validates
+the project and builds a console-enabled PyInstaller directory. Its `AIRTS-windows-debug`
+artifact contains `AIRTS.exe` and supporting files; keep the whole extracted directory together.

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from airts.automations import (
@@ -500,205 +498,40 @@ def _position_has_formation_clearance(
     )
 
 
-def _match_nearby_formation_stations(
-    simulation: Simulation,
-    parameters: DefendParameters,
-    entity_ids: tuple[str, ...],
-) -> bool:
-    """Atomically match interchangeable defenders to distinct nearby slots."""
-
-    if len(entity_ids) != len(parameters.deployment_slots):
-        raise RuntimeError("defend formation entity and deployment-slot counts differ")
-    slot_keys = {
-        f"slot_{index:06d}": slot for index, slot in enumerate(parameters.deployment_slots)
-    }
-    slot_index = SpatialIndex(slot_keys, bucket_size=SETTLED_FORMATION_SPACING)
-    edges: dict[str, tuple[str, ...]] = {}
-    for entity_id in entity_ids:
-        position = simulation.entities[entity_id].position
-        edges[entity_id] = tuple(
-            sorted(
-                slot_index.nearby(position, simulation.DEFEND_FORMATION_TOLERANCE),
-                key=lambda slot_key: (
-                    position.distance_to(slot_keys[slot_key]),
-                    slot_key,
-                ),
-            )
-        )
-        if not edges[entity_id]:
-            return False
-    entity_to_slot: dict[str, str] = {}
-    slot_to_entity: dict[str, str] = {}
-    for start_id in sorted(entity_ids, key=lambda entity_id: (len(edges[entity_id]), entity_id)):
-        queue = deque([start_id])
-        seen_entities = {start_id}
-        seen_slots: set[str] = set()
-        parent_slot: dict[str, str] = {}
-        free_slot: str | None = None
-        while queue and free_slot is None:
-            entity_id = queue.popleft()
-            for slot_key in edges[entity_id]:
-                if slot_key in seen_slots:
-                    continue
-                seen_slots.add(slot_key)
-                parent_slot[slot_key] = entity_id
-                incumbent_id = slot_to_entity.get(slot_key)
-                if incumbent_id is None:
-                    free_slot = slot_key
-                    break
-                if incumbent_id not in seen_entities:
-                    seen_entities.add(incumbent_id)
-                    queue.append(incumbent_id)
-        if free_slot is None:
-            return False
-        slot_key = free_slot
-        while True:
-            entity_id = parent_slot[slot_key]
-            previous_slot = entity_to_slot.get(entity_id)
-            entity_to_slot[entity_id] = slot_key
-            slot_to_entity[slot_key] = entity_id
-            if previous_slot is None:
-                break
-            slot_key = previous_slot
-    parameters.stations = {
-        entity_id: slot_keys[entity_to_slot[entity_id]] for entity_id in entity_ids
-    }
-    return True
-
-
-def _dock_formation_entity(
-    simulation: Simulation,
-    entity_id: str,
-    station: Point,
-    movable_ids: frozenset[str],
-    building_cells: frozenset[Cell],
-) -> None:
-    entity = simulation.entities[entity_id]
-    cells = simulation._cells_at(entity, station)
-    if not simulation.game_map.is_passable(station) or not cells.isdisjoint(building_cells):
-        raise RuntimeError(f"invalid defend deployment slot for {entity_id}: {station}")
-    simulation.occupancy.move(entity_id, cells, movable_ids)
-    entity.position = station
-    entity.path.clear()
-    entity.move_target = None
-    entity.state = UnitState.DEFENDING
-    simulation._reset_movement_liveness(entity, clear_stop=True)
-
-
-def _formation_station_is_clear(
-    simulation: Simulation,
-    index: SpatialIndex,
-    entity_id: str,
-    station: Point,
-    maximum_radius: float,
-) -> bool:
-    radius = collision_radius(simulation.entities[entity_id].kind)
-    nearby_ids = index.nearby(station, radius + maximum_radius)
-    simulation._collision_pair_check_count += len(nearby_ids)
-    return all(
-        other_id == entity_id
-        or station.distance_to(simulation.entities[other_id].position)
-        >= (radius + collision_radius(simulation.entities[other_id].kind)) * 0.90 - 1e-6
-        for other_id in nearby_ids
-    )
-
-
 def settle_automation_formations(simulation: Simulation) -> None:
-    """Dock mature saturated formations onto their collision-safe deployment slots."""
-
+    """Recognize safe physical arrivals without teleporting bodies or rematching identities."""
+    positions = {
+        key: entity.position for key, entity in simulation.entities.items() if entity.is_movable
+    }
+    index: SpatialIndex | None = None
     for automation in sorted(simulation.automations.values(), key=lambda item: item.automation_id):
         if automation.kind is not AutomationKind.DEFEND or automation.status.terminal:
             continue
         parameters = _defend_parameters(automation)
-        shared_entity_count = sum(
-            sum(
-                simulation.assignments.get(entity_id) == other.automation_id
-                for entity_id in other.entity_ids
-            )
-            for other in simulation.automations.values()
-            if other.kind is AutomationKind.DEFEND
-            and other.owner_id == automation.owner_id
-            and not other.status.terminal
-            and isinstance(other.parameters, DefendParameters)
-            and other.parameters.target == parameters.target
-        )
-        entity_ids = tuple(
-            entity_id
-            for entity_id in automation.entity_ids
-            if simulation.assignments.get(entity_id) == automation.automation_id
-        )
-        deployment_slots = _deployment_slot_set(parameters.deployment_slots)
-        packing_started = (
-            simulation.tick - automation.created_tick >= simulation.DEFEND_FORMATION_SETTLE_TICKS
-            or not any(simulation.entities[entity_id].path for entity_id in entity_ids)
-            or any(
-                parameters.stations[entity_id] not in deployment_slots for entity_id in entity_ids
-            )
-        )
-        if not deployment_slots or shared_entity_count <= 128 or not packing_started:
+        shared_ids = _shared_defend_entity_ids(simulation, automation, parameters.target)
+        if len(shared_ids) <= 128 or not parameters.deployment_slots:
             continue
-        formation_center = target_center(parameters.target)
-        maximum_radius = parameters.assembly_radius + simulation.DEFEND_FORMATION_TOLERANCE
-        inside_ids = tuple(
-            entity_id
-            for entity_id in entity_ids
-            if simulation.entities[entity_id].position.distance_to(formation_center)
-            <= maximum_radius
-        )
-        formation_ready = len(inside_ids) * 20 >= len(entity_ids) * 19
-        movable_ids = frozenset(
-            entity_id for entity_id, entity in simulation.entities.items() if entity.is_movable
-        )
-        building_cells = simulation._building_cells()
-        unit_index = SpatialIndex(
-            {entity_id: simulation.entities[entity_id].position for entity_id in movable_ids},
-            bucket_size=1.0,
-        )
-        maximum_unit_radius = max(
-            collision_radius(simulation.entities[entity_id].kind) for entity_id in movable_ids
-        )
-        for entity_id in inside_ids:
+        if simulation.tick - automation.created_tick < simulation.DEFEND_FORMATION_SETTLE_TICKS:
+            continue
+        if index is None:
+            index = SpatialIndex(positions, bucket_size=1.0)
+        center = target_center(parameters.target)
+        radius = parameters.assembly_radius + simulation.DEFEND_FORMATION_TOLERANCE
+        for entity_id in automation.entity_ids:
+            if simulation.assignments.get(entity_id) != automation.automation_id:
+                continue
             entity = simulation.entities[entity_id]
-            station = parameters.stations[entity_id]
-            if not entity.path and entity.position.distance_to(station) <= 1e-9:
-                continue
-            if entity.position.distance_to(station) > simulation.DEFEND_FORMATION_TOLERANCE:
-                continue
-            if not _formation_station_is_clear(
-                simulation,
-                unit_index,
-                entity_id,
-                station,
-                maximum_unit_radius,
+            if (
+                entity.position.distance_to(center) > radius
+                or entity.position.distance_to(parameters.stations[entity_id])
+                > simulation.DEFEND_FORMATION_TOLERANCE
+                or not _position_has_formation_clearance(index, simulation, entity_id)
             ):
                 continue
-            _dock_formation_entity(
-                simulation,
-                entity_id,
-                station,
-                movable_ids,
-                building_cells,
-            )
-            unit_index.move(entity_id, station)
-        if (
-            formation_ready
-            and shared_entity_count == len(entity_ids)
-            and len(inside_ids) == len(entity_ids)
-            and _match_nearby_formation_stations(simulation, parameters, entity_ids)
-        ):
-            for entity_id in entity_ids:
-                _dock_formation_entity(
-                    simulation,
-                    entity_id,
-                    parameters.stations[entity_id],
-                    movable_ids,
-                    building_cells,
-                )
-
-
-@lru_cache(maxsize=128)
-def _deployment_slot_set(slots: tuple[Point, ...]) -> frozenset[Point]:
-    return frozenset(slots)
+            entity.path.clear()
+            entity.move_target = None
+            entity.state = UnitState.DEFENDING
+            simulation._reset_movement_liveness(entity, clear_stop=True)
 
 
 def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:

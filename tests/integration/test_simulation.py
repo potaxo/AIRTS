@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from tests.integration.scenarios import interaction_simulation
 
 from airts.automations import AutomationStatus
 from airts.commands import (
@@ -15,9 +16,32 @@ from airts.commands import (
     ResumeAutomationCommand,
 )
 from airts.events import EventType
-from airts.geometry import Point, PointTarget, PolygonRegion, PolylineTarget, SpatialTarget
+from airts.geometry import (
+    Point,
+    PointTarget,
+    PolygonRegion,
+    PolylineTarget,
+    SpatialTarget,
+)
 from airts.simulation import Simulation
 from airts.world.map_model import GameMap, load_map_data
+
+
+def test_crossing_units_recover_and_are_deterministic() -> None:
+    first = interaction_simulation()
+    second = interaction_simulation()
+    commands = (
+        MoveCommand(("unit",), Point(9.5, 2.5)),
+        MoveCommand(("tank",), Point(2.5, 8.5)),
+    )
+    for simulation in (first, second):
+        for command in commands:
+            assert simulation.execute(command).accepted
+        simulation.advance(120)
+
+    assert not first.entities["unit"].path
+    assert not first.entities["tank"].path
+    assert first.snapshot() == second.snapshot()
 
 
 def test_manual_movement_reaches_target_on_fixed_ticks(

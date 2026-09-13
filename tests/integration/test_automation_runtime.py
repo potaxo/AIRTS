@@ -1,12 +1,16 @@
-"""Integration contracts for the phase 3 runtime milestone."""
+"""Automation ownership, defense, reinforcement, and repair contracts."""
 
 from __future__ import annotations
+
+import pytest
+from tests.integration.scenarios import (
+    runtime_map,
+)
 
 from airts.automations import (
     AutomationKind,
     AutomationStatus,
     DefendParameters,
-    ProductionParameters,
     RepairParameters,
 )
 from airts.commands import (
@@ -14,45 +18,15 @@ from airts.commands import (
     CancelAutomationCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
-    CreateProductionCommand,
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
-    PauseAutomationCommand,
-    ResumeAutomationCommand,
-    StopCommand,
 )
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, rectangle_region
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
-from airts.world.map_model import EntityKind, GameMap, load_map_data
-
-
-def _runtime_map() -> GameMap:
-    return load_map_data(
-        {
-            "id": "runtime",
-            "name": "Runtime",
-            "width": 24,
-            "height": 16,
-            "terrain": {"default": "grass", "rectangles": []},
-            "entities": [
-                {"id": "unit_01", "kind": "scout", "position": [1.5, 2.5]},
-                {"id": "unit_02", "kind": "light_tank", "position": [1.5, 4.5]},
-                {"id": "unit_03", "kind": "heavy_tank", "position": [1.5, 6.5]},
-                {"id": "factory", "kind": "factory", "position": [7, 8]},
-                {"id": "repair", "kind": "repair_hub", "position": [4, 9]},
-                {"id": "command", "kind": "command_center", "position": [15, 8]},
-            ],
-        }
-    )
-
-
-def _production_ids(simulation: Simulation, automation_id: str) -> list[str]:
-    parameters = simulation.automations[automation_id].parameters
-    assert isinstance(parameters, ProductionParameters)
-    return parameters.produced_entity_ids
+from airts.world.map_model import EntityKind, load_map_data
 
 
 def test_ownership_validation_is_atomic_and_structured() -> None:
@@ -81,7 +55,7 @@ def test_ownership_validation_is_atomic_and_structured() -> None:
 
 
 def test_new_unit_automation_replaces_older_assignment_even_at_lower_priority() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=10)
     )
@@ -105,7 +79,7 @@ def test_new_unit_automation_replaces_older_assignment_even_at_lower_priority() 
 
 
 def test_low_health_does_not_override_the_current_automation() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3))))
     simulation.entities["unit_01"].health = 1
 
@@ -118,16 +92,26 @@ def test_low_health_does_not_override_the_current_automation() -> None:
     )
 
 
-def test_canceling_explicit_repair_restores_current_work_and_hides_canceled_work() -> None:
-    simulation = Simulation(_runtime_map())
+@pytest.mark.parametrize(
+    ("health", "threshold"), [(10, 0.3), (20, 0.5)], ids=["default", "custom-threshold"]
+)
+def test_canceling_explicit_repair_restores_current_work_and_hides_canceled_work(
+    health: int, threshold: float
+) -> None:
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3))))
-    simulation.entities["unit_01"].health = 20
-    repair = simulation.execute(CreateRepairAndReturnCommand(("unit_01",), health_threshold=0.5))
+    simulation.entities["unit_01"].health = health
+    repair = simulation.execute(
+        CreateRepairAndReturnCommand(("unit_01",), health_threshold=threshold)
+    )
+    assert repair.accepted
+    assert simulation.suspended_assignments["unit_01"] == patrol.automation_id
 
     canceled = simulation.execute(CancelAutomationCommand(repair.automation_id or ""))
 
     assert canceled.accepted
     assert simulation.assignments["unit_01"] == patrol.automation_id
+    assert "unit_01" not in simulation.suspended_assignments
     assert repair.automation_id not in {
         automation.automation_id for automation in simulation.live_automations
     }
@@ -137,7 +121,7 @@ def test_canceling_explicit_repair_restores_current_work_and_hides_canceled_work
 
 
 def test_replaced_and_empty_automations_do_not_consume_live_panel_space() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=4)
     )
@@ -158,7 +142,7 @@ def test_replaced_and_empty_automations_do_not_consume_live_panel_space() -> Non
 
 
 def test_reassigning_a_tank_group_discards_the_empty_older_automation() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     group = ("unit_01", "unit_02", "unit_03")
     defend = simulation.execute(
         CreateDefendCommand(
@@ -185,7 +169,7 @@ def test_reassigning_a_tank_group_discards_the_empty_older_automation() -> None:
 
 
 def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     created = simulation.execute(
         CreateDefendCommand(("unit_01",), PointTarget(Point(12, 3), radius=2))
     )
@@ -198,7 +182,7 @@ def test_defend_returns_displaced_unit_and_holds_inside_target() -> None:
 
 
 def test_defend_distributes_units_across_exact_area_stations() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     created = simulation.execute(
         CreateDefendCommand(
             ("unit_01", "unit_02", "unit_03"),
@@ -350,273 +334,8 @@ def test_nearby_defenders_retaliate_then_return_when_attacker_runs_away() -> Non
     )
 
 
-def test_cost_free_fixed_tick_production_completes_with_deterministic_ids() -> None:
-    simulation = Simulation(_runtime_map())
-    created = simulation.execute(
-        CreateProductionCommand("factory", EntityKind.SCOUT, 2, Point(14.5, 5.5))
-    )
-    automation_id = created.automation_id or ""
-
-    simulation.advance(20)
-
-    automation = simulation.automations[automation_id]
-    assert automation.status is AutomationStatus.COMPLETED
-    assert isinstance(automation.parameters, ProductionParameters)
-    assert automation.parameters.produced_entity_ids == ["scout_001", "scout_002"]
-    assert all(entity_id in simulation.entities for entity_id in ("scout_001", "scout_002"))
-    assert "factory" not in simulation.assignments
-
-
-def test_continuous_factory_production_assigns_units_to_compact_area_defense() -> None:
-    simulation = Simulation(_runtime_map())
-    simulation.resources["player"] = 10_000
-    defend_target = rectangle_region(Point(14, 2), Point(22, 7))
-    created = simulation.execute(
-        CreateProductionCommand(
-            "factory",
-            EntityKind.LIGHT_TANK,
-            1,
-            continuous=True,
-            defend_target=defend_target,
-        )
-    )
-
-    simulation.advance(16)
-
-    production = simulation.automations[created.automation_id or ""]
-    assert isinstance(production.parameters, ProductionParameters)
-    parameters = production.parameters
-    assert production.status is AutomationStatus.ACTIVE
-    assert parameters.continuous
-    assert parameters.produced_count == 3
-    defend = simulation.automations[parameters.defend_automation_id or ""]
-    assert defend.kind is AutomationKind.DEFEND
-    assert isinstance(defend.parameters, DefendParameters)
-    assert defend.parameters.gathering_point
-    assert len(defend.parameters.deployment_slots) == 3
-    assert len(set(defend.parameters.stations.values())) == 3
-    assert defend.entity_ids == parameters.produced_entity_ids
-    assert all(
-        simulation.assignments[entity_id] == defend.automation_id
-        for entity_id in parameters.produced_entity_ids
-    )
-    assert simulation.navigation_field_build_count <= len(defend.parameters.deployment_slots)
-
-    simulation.advance(10)
-    assert parameters.produced_count == 5
-    assert production.status is AutomationStatus.ACTIVE
-
-    for index, entity_id in enumerate(parameters.produced_entity_ids):
-        entity = simulation.entities[entity_id]
-        simulation.occupancy.move(entity_id, frozenset({(index, 14)}))
-        entity.position = Point(index + 0.5, 14.5)
-        entity.path.clear()
-        entity.move_target = None
-        entity.congestion_stopped = False
-    field_builds = simulation.navigation_field_build_count
-
-    simulation.advance()
-
-    dispatched = [
-        entity_id
-        for entity_id in parameters.produced_entity_ids
-        if simulation.entities[entity_id].path
-    ]
-    assert len(dispatched) == Simulation.GATHERING_PATH_BUDGET
-    assert (
-        simulation.navigation_field_build_count - field_builds <= Simulation.GATHERING_PATH_BUDGET
-    )
-
-
-def test_factory_keeps_only_latest_continuous_production_request() -> None:
-    simulation = Simulation(_runtime_map())
-    simulation.resources["player"] = 10_000
-    first_target = rectangle_region(Point(14, 2), Point(18, 6))
-    second_target = rectangle_region(Point(18, 2), Point(22, 6))
-    first = simulation.execute(
-        CreateProductionCommand(
-            "factory",
-            EntityKind.SCOUT,
-            1,
-            continuous=True,
-            defend_target=first_target,
-        )
-    )
-    simulation.advance(5)
-    first_automation = simulation.automations[first.automation_id or ""]
-    assert isinstance(first_automation.parameters, ProductionParameters)
-    first_defend = simulation.automations[first_automation.parameters.defend_automation_id or ""]
-
-    second = simulation.execute(
-        CreateProductionCommand(
-            "factory",
-            EntityKind.LIGHT_TANK,
-            1,
-            continuous=True,
-            defend_target=second_target,
-        )
-    )
-
-    second_id = second.automation_id or ""
-    assert first_automation.status is AutomationStatus.CANCELED
-    assert first_automation.reason_code == "SUPERSEDED_BY_LATEST_CONTINUOUS_PRODUCTION"
-    assert first_defend.status is AutomationStatus.ACTIVE
-    assert first_defend.entity_ids == ["scout_001"]
-    assert [item.automation_id for item in simulation.production_queue("factory")] == [second_id]
-    assert simulation.assignments["factory"] == second_id
-
-    simulation.advance(5)
-    second_parameters = simulation.automations[second_id].parameters
-    assert isinstance(second_parameters, ProductionParameters)
-    second_defend = simulation.automations[second_parameters.defend_automation_id or ""]
-    assert isinstance(second_defend.parameters, DefendParameters)
-    assert second_defend.parameters.target == second_target
-    assert second_defend.parameters.gathering_point
-    assert second_defend.entity_ids == ["light_tank_002"]
-
-
-def test_replacing_continuous_production_preserves_older_finite_jobs() -> None:
-    simulation = Simulation(_runtime_map())
-    finite = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 2))
-    older = simulation.execute(
-        CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1, continuous=True)
-    )
-    latest = simulation.execute(
-        CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1, continuous=True)
-    )
-
-    assert simulation.automations[older.automation_id or ""].status is AutomationStatus.CANCELED
-    assert [item.automation_id for item in simulation.production_queue("factory")] == [
-        finite.automation_id,
-        latest.automation_id,
-    ]
-    assert simulation.assignments["factory"] == finite.automation_id
-    assert simulation.automations[latest.automation_id or ""].reason_code == "FACTORY_QUEUED"
-
-
-def test_production_waits_when_no_spawn_cell_is_available() -> None:
-    game_map = load_map_data(
-        {
-            "id": "blocked_factory",
-            "name": "Blocked Factory",
-            "width": 6,
-            "height": 6,
-            "terrain": {"default": "water", "rectangles": [[1, 1, 4, 4, "grass"]]},
-            "entities": [{"id": "factory", "kind": "factory", "position": [1, 1]}],
-        }
-    )
-    simulation = Simulation(game_map)
-    created = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-
-    simulation.advance(10)
-
-    automation = simulation.automations[created.automation_id or ""]
-    assert automation.status is AutomationStatus.WAITING
-    assert automation.reason_code == "SPAWN_BLOCKED"
-
-
-def test_manual_factory_override_pauses_and_resume_reclaims_factory() -> None:
-    simulation = Simulation(_runtime_map())
-    created = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    automation_id = created.automation_id or ""
-
-    simulation.execute(StopCommand(("factory",)))
-
-    assert simulation.automations[automation_id].status is AutomationStatus.PAUSED
-    assert "factory" not in simulation.assignments
-
-    resumed = simulation.execute(ResumeAutomationCommand(automation_id))
-    assert resumed.accepted
-    assert simulation.assignments["factory"] == automation_id
-    assert simulation.automations[automation_id].status is AutomationStatus.ACTIVE
-
-
-def test_factory_production_requests_run_fifo_and_paused_jobs_resume_without_conflict() -> None:
-    simulation = Simulation(_runtime_map())
-    first = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    second = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    third = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    first_id = first.automation_id or ""
-    second_id = second.automation_id or ""
-    third_id = third.automation_id or ""
-
-    assert first.accepted and second.accepted and third.accepted
-    assert simulation.automations[first_id].status is AutomationStatus.ACTIVE
-    assert simulation.automations[second_id].reason_code == "FACTORY_QUEUED"
-    assert simulation.automations[third_id].reason_code == "FACTORY_QUEUED"
-    assert [item.automation_id for item in simulation.production_queue("factory")] == [
-        first_id,
-        second_id,
-        third_id,
-    ]
-    assert simulation.execute(PauseAutomationCommand(second_id)).accepted
-    resumed_queued = simulation.execute(ResumeAutomationCommand(second_id))
-    assert resumed_queued.accepted
-    assert simulation.automations[second_id].status is AutomationStatus.WAITING
-    assert simulation.automations[second_id].reason_code == "FACTORY_QUEUED"
-
-    assert simulation.execute(PauseAutomationCommand(first_id)).accepted
-    resumed_active = simulation.execute(ResumeAutomationCommand(first_id))
-    assert resumed_active.accepted
-    assert simulation.assignments["factory"] == first_id
-
-    simulation.advance(30)
-
-    assert [simulation.automations[item].status for item in (first_id, second_id, third_id)] == [
-        AutomationStatus.COMPLETED
-    ] * 3
-    assert [_production_ids(simulation, item) for item in (first_id, second_id, third_id)] == [
-        ["scout_001"],
-        ["scout_002"],
-        ["scout_003"],
-    ]
-    active_ticks = [
-        next(
-            transition.tick
-            for transition in simulation.automations[item].transition_history
-            if transition.reason_code == reason
-        )
-        for item, reason in (
-            (first_id, "VALIDATION_SUCCEEDED"),
-            (second_id, "FACTORY_QUEUE_STARTED"),
-            (third_id, "FACTORY_QUEUE_STARTED"),
-        )
-    ]
-    assert active_ticks == [0, 5, 10]
-
-
-def test_canceling_factory_job_starts_next_without_disturbing_the_active_job() -> None:
-    simulation = Simulation(_runtime_map())
-    first = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    second = simulation.execute(CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 1))
-    third = simulation.execute(CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1))
-
-    assert simulation.execute(CancelAutomationCommand(third.automation_id or "")).accepted
-    assert simulation.assignments["factory"] == first.automation_id
-    assert [item.automation_id for item in simulation.production_queue("factory")] == [
-        first.automation_id,
-        second.automation_id,
-    ]
-
-    assert simulation.execute(CancelAutomationCommand(first.automation_id or "")).accepted
-    assert simulation.assignments["factory"] == second.automation_id
-    assert simulation.automations[second.automation_id or ""].status is AutomationStatus.ACTIVE
-    assert simulation.automations[second.automation_id or ""].reason_code == "FACTORY_QUEUE_STARTED"
-
-
-def test_removing_production_source_fails_automation() -> None:
-    simulation = Simulation(_runtime_map())
-    created = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 2))
-
-    simulation.remove_entity("factory", "DESTROYED")
-
-    automation = simulation.automations[created.automation_id or ""]
-    assert automation.status is AutomationStatus.FAILED
-    assert automation.reason_code == "SOURCE_ENTITY_REMOVED"
-
-
 def test_reinforcement_transfers_units_to_target_automation() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     target = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=5)
     )
@@ -637,7 +356,7 @@ def test_reinforcement_transfers_units_to_target_automation() -> None:
 
 
 def test_reinforcement_waits_when_higher_priority_claims_block_candidates() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     target = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3)), priority=0)
     )
@@ -654,7 +373,7 @@ def test_reinforcement_waits_when_higher_priority_claims_block_candidates() -> N
 
 
 def test_reinforcement_fails_if_target_automation_is_canceled() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     target = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(10, 3))))
     reinforcement = simulation.execute(
         CreateReinforcementCommand(("unit_02",), target.automation_id or "", 2)
@@ -669,7 +388,7 @@ def test_reinforcement_fails_if_target_automation_is_canceled() -> None:
 
 
 def test_emergency_repair_suspends_and_restores_original_assignment() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(
         CreatePatrolCommand(("unit_01",), PointTarget(Point(12, 3)), priority=100)
     )
@@ -697,7 +416,7 @@ def test_emergency_repair_suspends_and_restores_original_assignment() -> None:
 
 
 def test_repair_prefers_repair_hub_before_closer_factory() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     simulation.entities["unit_03"].position = Point(10.5, 7.5)
     simulation.occupancy.move("unit_03", frozenset({(10, 7)}))
     simulation.entities["unit_03"].health = 20
@@ -709,21 +428,8 @@ def test_repair_prefers_repair_hub_before_closer_factory() -> None:
     assert automation.parameters.destinations["unit_03"] == "repair"
 
 
-def test_canceling_repair_restores_suspended_assignment() -> None:
-    simulation = Simulation(_runtime_map())
-    patrol = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(12, 3))))
-    simulation.entities["unit_01"].health = 10
-    repair = simulation.execute(CreateRepairAndReturnCommand(("unit_01",)))
-
-    canceled = simulation.execute(CancelAutomationCommand(repair.automation_id or ""))
-
-    assert canceled.accepted
-    assert simulation.assignments["unit_01"] == patrol.automation_id
-    assert "unit_01" not in simulation.suspended_assignments
-
-
 def test_repair_only_claims_selected_units_strictly_below_thirty_percent() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     patrol = simulation.execute(
         CreatePatrolCommand(("unit_01", "unit_02", "unit_03"), PointTarget(Point(12, 3)))
     )
@@ -741,7 +447,7 @@ def test_repair_only_claims_selected_units_strictly_below_thirty_percent() -> No
 
 
 def test_unassigned_repaired_unit_returns_to_its_pre_repair_position() -> None:
-    simulation = Simulation(_runtime_map())
+    simulation = Simulation(runtime_map())
     origin = simulation.entities["unit_01"].position
     simulation.entities["unit_01"].health = 5
 

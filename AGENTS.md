@@ -1,38 +1,57 @@
 # AIRTS repository instructions
 
 Read [docs/design.md](docs/design.md) before substantial work, then only the relevant owner docs
-and code. Stay within the requested milestone; later phases require explicit scope.
+and code. Infer scope from the user's request and conversation; do not add roadmap phases.
+User instructions take precedence over repository and skill guidance, subject to higher-priority
+system/developer instructions and tool permissions.
 
 ## Environment
 
-- Native Windows, PowerShell, Python 3.13, and repository-local `.venv` only; use
-  [README setup](README.md#requirements-and-setup). The launcher may create `.venv`;
-  global Python/pip or Conda otherwise requires explicit approval.
+- Use native Windows, PowerShell, Python 3.13, and repository-local `.venv` for project work.
+  Follow [README setup](README.md#requirements-and-setup): creating `.venv` with `py -3.13`
+  and installing declared task-required dependencies into it are authorized.
+  Other global Python/pip use or Conda requires explicit approval.
+  These interpreter restrictions apply to local work; the existing Windows CI workflow uses
+  its isolated runner's configured Python environment.
 - [pyproject.toml](pyproject.toml) owns dependencies. Explain new dependencies before adding them;
   do not install undeclared/speculative packages. Use `pygame-ce`, never install it with `pygame`.
 
 ## Workflow
 
-1. Read relevant code/docs, check `git status`, and state a concise plan and design conflicts.
-2. Implement the requested scope autonomously; routine boundaries/types/tests need no approval.
+1. Read relevant code/docs and check `git status`. For substantial work, briefly state the plan
+   and any actual design conflicts; simple edits need no formal plan.
+2. Carry implementation requests through implementation and validation. Resolve routine choices
+   from context; boundaries/types/tests need no approval. Ask only when missing information
+   materially affects correctness or scope and cannot be inferred, or required authorization
+   is absent. Continue independent authorized work while awaiting an answer; do not ask again
+   for authorization already given in the conversation.
 3. Reuse meaningful tests; add coverage only for uncovered behavior. Follow
    [test ownership](docs/architecture/engineering.md#test-ownership).
-4. Run required validation and report changes, decisions, results, and remaining uncertainty.
+4. Run required validation. Report the outcome, key decisions, results, and remaining uncertainty
+   concisely in the user's language.
+
+If an instruction blocks work, cite its file and relevant wording and explain the concrete
+conflict. Distinguish an explicit requirement from an interpretation; do not invent approval gates.
 
 Preserve the public `Simulation` facade, shared command boundary, deterministic headless core,
 and [dependency direction](docs/architecture/engineering.md#ownership). Keep changes focused;
 no speculative abstractions, silent error swallowing, or fallbacks that conceal failure.
-Fix root causes and provide useful diagnostics. A rewrite needs an explicit migration contract.
+Fix root causes and provide useful diagnostics. For a requested rewrite, define replacement scope
+and compatibility/save/replay migration in the owning document as part of the work; ask only for
+consequential choices that the request and existing contracts do not resolve.
 
 ## Git and outputs
 
 Keep environments, caches, logs, weights, and generated/experiment outputs out of Git.
+Preserve existing user and other-agent changes, including untracked files. A dirty worktree alone
+is not a blocker; inspect overlapping edits and ask only when they cannot be safely reconciled.
 No destructive Git commands. Do not create/change branches or worktrees, commit, push, or open
 PRs unless requested. Put validation artifacts under ignored `outputs/` when needed.
 
 ## Validation
 
-For coding or test/config changes, run:
+Choose validation based on this task's changes, not unrelated pre-existing worktree changes.
+For coding or test/config changes, run from the repository root:
 
 - `.\.venv\Scripts\python -m ruff check .`
 - `.\.venv\Scripts\python -m ruff format --check .`
@@ -55,4 +74,4 @@ Follow [change policy](docs/architecture/engineering.md#change-policy): each fac
 README owns setup/runtime/controls, this file owns contributor workflow, and design links the
 focused contracts. Condense or update the owner instead of adding repeated specifications.
 Change these instructions when requested or when a rule is incorrect, contradictory, or missing
-for safe completion. User instructions take precedence over repository guidance.
+for safe completion.

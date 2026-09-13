@@ -53,6 +53,9 @@ use descriptive parameter IDs. Do not freeze obsolete filenames or private candi
 Architecture checks inspect real imports, including nested/relative imports and type-only guards.
 
 Keep fixtures local until independent tests need identical setup; never share mutable simulations.
+Integration modules are organized by behavior rather than historical phase or milestone.
+[Shared scenario constructors](../../tests/integration/scenarios.py) return fresh maps/simulations;
+[persistence tests](../../tests/integration/test_persistence.py) own save/load continuation cases.
 Renderer startup checks use small worlds; full-scene/timing tests retain their required scale.
 Backend stress tests share `tests/scout_scenario.py`. Persistence scenarios retain distinct patrol,
 repair, queues, spawns, and defense cases and compare complete exported state after continuation.

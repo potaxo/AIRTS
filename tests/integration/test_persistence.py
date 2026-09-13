@@ -1,4 +1,4 @@
-"""Integration tests for versioned complete-state persistence."""
+"""Complete-state save/load and continuation across runtime scenarios."""
 
 from __future__ import annotations
 
@@ -7,16 +7,148 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from tests.integration.scenarios import builder_factory_simulation, economy_combat_simulation
 
 from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
+from airts.adapters.replay import load_replay, run_replay, save_replay
+from airts.automations import (
+    AutomationStatus,
+    ProductionParameters,
+)
 from airts.commands import (
+    AttackCommand,
+    CreateConstructionCommand,
+    CreateEconomyCommand,
     CreatePatrolCommand,
+    CreateProductionBatchCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
+    CreateSpatialReferenceCommand,
+    SetSelectionCommand,
 )
 from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.simulation import Simulation
 from airts.world.map_model import EntityKind, GameMap, load_example_map
+
+
+def test_save_restores_spatial_state(make_map: Callable[[int], GameMap], tmp_path: Path) -> None:
+    simulation = Simulation(make_map())
+    region = simulation.execute(
+        CreateSpatialReferenceCommand(rectangle_region(Point(2, 2), Point(6, 6)), "North")
+    )
+    simulation.execute(SetSelectionCommand(region_ids=(region.reference_id or "",)))
+    destination = tmp_path / "phase4-save.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    assert restored.export_state() == simulation.export_state()
+    assert restored.spatial.references[region.reference_id or ""].persistent
+    _assert_continues_identically(simulation, restored, 5)
+
+
+def test_save_and_replay_preserve_resources_and_combat(
+    tmp_path: Path,
+) -> None:
+    simulation = economy_combat_simulation()
+    simulation.execute(CreateEconomyCommand(("generator",), 520))
+    simulation.execute(AttackCommand(("tank",), "enemy"))
+    simulation.advance(12)
+
+    save_path = tmp_path / "phase5-save.json"
+    replay_path = tmp_path / "phase5-replay.json"
+    save_simulation(simulation, save_path)
+    save_replay(simulation, replay_path)
+
+    restored = load_simulation(save_path)
+    replayed = run_replay(load_replay(replay_path))
+    assert restored.export_state() == simulation.export_state()
+    assert replayed.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 10)
+    replayed.advance(10)
+    assert replayed.export_state() == simulation.export_state()
+
+
+def test_construction_and_batch_progress_round_trip(tmp_path: Path) -> None:
+    simulation = builder_factory_simulation()
+    construction = simulation.execute(
+        CreateConstructionCommand(
+            "builder",
+            EntityKind.REPAIR_HUB,
+            Point(6, 10),
+            builder_ids=("builder", "builder_2"),
+        )
+    )
+    batch = simulation.execute(
+        CreateProductionBatchCommand("factory", ((EntityKind.SCOUT, 1), (EntityKind.BUILDER, 1)))
+    )
+    simulation.advance(3)
+    destination = tmp_path / "builder-factory.json"
+    save_simulation(simulation, destination)
+
+    restored = load_simulation(destination)
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(
+        simulation,
+        restored,
+        max(Simulation.CONSTRUCTION_BUILD_TICKS, Simulation.PRODUCTION_BUILD_TICKS * 2),
+    )
+
+    assert (
+        restored.automations[construction.automation_id or ""].status is AutomationStatus.COMPLETED
+    )
+    assert restored.automations[construction.automation_id or ""].entity_ids == [
+        "builder",
+        "builder_2",
+    ]
+    batch_parameters = restored.automations[batch.automation_id or ""].parameters
+    assert isinstance(batch_parameters, ProductionParameters)
+    assert [restored.entities[item].kind for item in batch_parameters.produced_entity_ids] == [
+        EntityKind.SCOUT,
+        EntityKind.BUILDER,
+    ]
+
+
+def test_construction_queue_round_trips_through_save_and_replay(tmp_path: Path) -> None:
+    simulation = builder_factory_simulation()
+    simulation.resources["player"] = 500
+    first = simulation.execute(
+        CreateConstructionCommand(
+            "builder",
+            EntityKind.RESOURCE_GENERATOR,
+            Point(6, 10),
+            builder_ids=("builder", "builder_2"),
+            queued=True,
+        )
+    )
+    second = simulation.execute(
+        CreateConstructionCommand(
+            "builder",
+            EntityKind.RESOURCE_GENERATOR,
+            Point(16, 16),
+            builder_ids=("builder", "builder_2"),
+            queued=True,
+        )
+    )
+    simulation.advance()
+    assert simulation.automations[second.automation_id or ""].reason_code == "BUILDERS_QUEUED"
+
+    save_path = tmp_path / "construction-queue.json"
+    replay_path = tmp_path / "construction-queue-replay.json"
+    save_simulation(simulation, save_path)
+    save_replay(simulation, replay_path)
+    restored = load_simulation(save_path)
+    replayed = run_replay(load_replay(replay_path))
+
+    assert restored.export_state() == simulation.export_state()
+    assert replayed.export_state() == simulation.export_state()
+
+    simulation.resources["player"] = 10_000
+    restored.resources["player"] = 10_000
+    replayed.resources["player"] = 10_000
+    _assert_continues_identically(simulation, restored, 200)
+    replayed.advance(200)
+    assert replayed.export_state() == simulation.export_state()
+    assert simulation.automations[first.automation_id or ""].status is AutomationStatus.COMPLETED
+    assert simulation.automations[second.automation_id or ""].status is AutomationStatus.COMPLETED
 
 
 def test_save_load_round_trip_preserves_active_runtime_and_continuation(
@@ -51,7 +183,7 @@ def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:
         load_simulation(destination)
 
 
-def test_phase3_controller_progress_and_suspended_assignments_round_trip(
+def test_controller_progress_and_suspended_assignments_round_trip(
     tmp_path: Path,
 ) -> None:
     simulation = Simulation(load_example_map(), random_seed=9)

@@ -16,9 +16,8 @@ Direct control and persistent automations are implemented. Language-model contro
 
 ## Document owners
 
-Read this index first, then only the owner relevant to the task. These five documents replace
-previous architecture chapters, milestone narratives, ADR files, and the historical movement
-proposal; their retained contracts are consolidated here without changing runtime behavior.
+Read this index first, then the owners relevant to the task. Each contract has one owning document;
+cross-references provide context without creating a second specification.
 
 | Concern | Owner |
 | --- | --- |
@@ -42,7 +41,7 @@ measurement limits belong to the performance document, not a blanket claim of pa
 Movement currently combines shared routing, local collision/pushing, and a separate large-force
 reservation controller. Packed motion can look grid-like; passing selected scenarios does not
 establish general crowd correctness. A replacement must explicitly define movement and save/replay
-migration contracts. This documentation/test cleanup does not implement that replacement.
+migration contracts.
 
 No language provider, voice, MCP, scouting reports, map editor, multiplayer, Unity, dynamic terrain,
 semantic map regions, or multi-region automation is implemented. Visibility has no occlusion,

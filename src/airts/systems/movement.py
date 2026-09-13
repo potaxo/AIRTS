@@ -14,6 +14,7 @@ from airts.navigation.collision import (
     steering_candidates,
     unit_mass,
 )
+from airts.navigation.motion import constrain_motion, contact_fraction
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import Entity, UnitState
@@ -69,10 +70,6 @@ def move_entities(simulation: Simulation) -> None:
         track_movement_progress(simulation, movable_entities)
         return
     simulation._open_force_slots = None
-    if continuous_topology_force:
-        collision_radii = {
-            entity_id: radius * 0.91 for entity_id, radius in collision_radii.items()
-        }
     active_ids = tuple(
         entity_id
         for entity_id, entity in movable_entities.items()
@@ -293,7 +290,7 @@ def _move_large_force(
     # scouts and light tanks means a large order does not first shuffle every identity onto an
     # unrelated fractional lattice.  Larger vehicles widen it to the accepted moving-clearance
     # envelope.
-    spacing = max(1.0, traffic_radius * 2 * 0.91 + 1e-6)
+    spacing = max(1.0, traffic_radius * 2 + 1e-6)
     origin = 0.5 if spacing == 1.0 else spacing / 2
     if (
         not has_fixed_units
@@ -308,16 +305,6 @@ def _move_large_force(
             static_occupant_cells,
             collision_radii=collision_radii,
         )
-    ):
-        return
-    if (
-        not has_fixed_units
-        and not static_occupant_cells
-        and (
-            len(active_ids) == len(movable_entities)
-            or len(simulation.assignments) == len(movable_entities)
-        )
-        and _move_coherent_force(simulation, movable_entities, movable_ids, active_ids, spacing)
     ):
         return
     traffic_ids = tuple(
@@ -539,6 +526,7 @@ def _move_large_force(
         )
         > 1e-12
     )
+    candidates: dict[str, Point] = {}
     for entity_id in motion_ids:
         entity = movable_entities[entity_id]
         destination = _large_force_slot_point(source_slots[entity_id], spacing, origin)
@@ -592,29 +580,10 @@ def _move_large_force(
             simulation._open_force_slots = None
             entity.collision_pressure += 1
             continue
-        if candidate != entity.position:
-            if crossed_cell:
-                try:
-                    simulation.occupancy.move(
-                        entity_id,
-                        candidate_cells,
-                        movable_ids,
-                    )
-                except OccupancyError as error:
-                    raise RuntimeError(
-                        f"large-force slot move failed for {entity_id}: {error}"
-                    ) from error
-            entity.position = candidate
-        simulation._movement_blocked.discard(entity_id)
-        simulation._blocked_ticks.pop(entity_id, None)
-        if entity.path:
-            _advance_large_force_path(simulation, entity, spacing)
-    if has_fixed_units:
-        traffic_index = SpatialIndex(
-            {entity_id: movable_entities[entity_id].position for entity_id in traffic_ids},
-            bucket_size=1.0,
-        )
-        separate_overlapping_colliders(simulation, traffic_ids, traffic_index)
+        candidates[entity_id] = candidate
+    _commit_group_motion(
+        simulation, movable_entities, movable_ids, candidates, collision_radii, spacing
+    )
 
 
 def _move_separated_coherent_flows(
@@ -693,24 +662,18 @@ def _move_separated_coherent_flows(
         collision_radii,
     ):
         return False
+    safe, checks = constrain_motion(
+        {key: entity.position for key, entity in movable_entities.items()},
+        candidates,
+        collision_radii,
+    )
+    simulation._collision_pair_check_count += checks
+    if safe != candidates:
+        return False
     simulation._open_force_slots = None
-    for entity_id in sorted(active_ids):
-        simulation._movement_step_attempt_count += 1
-        entity = movable_entities[entity_id]
-        candidate = candidates[entity_id]
-        if int(candidate.x) != int(entity.position.x) or int(candidate.y) != int(entity.position.y):
-            try:
-                simulation.occupancy.move(
-                    entity_id,
-                    simulation._cells_at(entity, candidate),
-                    movable_ids,
-                )
-            except OccupancyError as error:
-                raise RuntimeError(f"coherent-flow move failed for {entity_id}: {error}") from error
-        entity.position = candidate
-        simulation._movement_blocked.discard(entity_id)
-        simulation._blocked_ticks.pop(entity_id, None)
-        _advance_large_force_path(simulation, entity, 1.0)
+    _commit_group_motion(
+        simulation, movable_entities, movable_ids, safe, collision_radii, 1.0, checked=True
+    )
     return True
 
 
@@ -786,76 +749,34 @@ def _coherent_flows_contact(
     return contact
 
 
-def _move_coherent_force(
+def _commit_group_motion(
     simulation: Simulation,
-    movable_entities: dict[str, Entity],
+    entities: dict[str, Entity],
     movable_ids: frozenset[str],
-    active_ids: tuple[str, ...],
+    proposals: dict[str, Point],
+    radii: dict[str, float],
     spacing: float,
-) -> bool:
-    """Translate one unobstructed flow continuously without reassigning unit identities."""
-
-    directions: list[tuple[float, float]] = []
-    for entity_id in active_ids:
-        entity = movable_entities[entity_id]
-        target = entity.path[0]
-        offset_x = target.x - entity.position.x
-        offset_y = target.y - entity.position.y
-        distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-        if distance <= 1e-9:
-            continue
-        directions.append((offset_x / distance, offset_y / distance))
-    if not directions:
-        return False
-    reference_x, reference_y = directions[0]
-    if any(
-        reference_x * direction_x + reference_y * direction_y < 0.80
-        for direction_x, direction_y in directions[1:]
-    ):
-        return False
-
-    candidates: dict[str, Point] = {}
-    for entity_id in sorted(active_ids):
-        entity = movable_entities[entity_id]
-        target = entity.path[0]
-        distance = entity.position.distance_to(target)
-        maximum_step = entity.speed * simulation.TICK_SECONDS
-        candidate = (
-            target
-            if distance <= maximum_step
-            else Point(
-                entity.position.x + (target.x - entity.position.x) * maximum_step / distance,
-                entity.position.y + (target.y - entity.position.y) * maximum_step / distance,
-            )
+    *,
+    checked: bool = False,
+) -> None:
+    if not checked:
+        proposals, checks = constrain_motion(
+            {key: entity.position for key, entity in entities.items()}, proposals, radii
         )
-        if not simulation.game_map.is_passable(candidate):
-            return False
-        candidates[entity_id] = candidate
-
-    simulation._open_force_slots = None
-    for entity_id in sorted(active_ids):
-        simulation._movement_step_attempt_count += 1
-        entity = movable_entities[entity_id]
-        candidate = candidates[entity_id]
-        if candidate != entity.position:
-            if int(candidate.x) != int(entity.position.x) or int(candidate.y) != int(
-                entity.position.y
-            ):
-                try:
-                    simulation.occupancy.move(
-                        entity_id,
-                        simulation._cells_at(entity, candidate),
-                        movable_ids,
-                    )
-                except OccupancyError as error:
-                    raise RuntimeError(
-                        f"coherent-force move failed for {entity_id}: {error}"
-                    ) from error
-            entity.position = candidate
+        simulation._collision_pair_check_count += checks
+    for entity_id, position in proposals.items():
+        entity = entities[entity_id]
+        if position != entity.position:
+            simulation.occupancy.move(
+                entity_id, simulation._cells_at(entity, position), movable_ids
+            )
+            entity.position = position
+        elif entity.path:
+            entity.collision_pressure += 1
         simulation._movement_blocked.discard(entity_id)
         simulation._blocked_ticks.pop(entity_id, None)
-        _advance_large_force_path(simulation, entity, spacing)
-    return True
+        if entity.path:
+            _advance_large_force_path(simulation, entity, spacing)
 
 
 def _advance_large_force_path(
@@ -1419,40 +1340,26 @@ def clamp_to_collider_contact(
     entity_radius: float,
     local_colliders: tuple[LocalCollider, ...],
 ) -> Point:
-    direction_x = candidate.x - entity.position.x
-    direction_y = candidate.y - entity.position.y
-    squared_length = direction_x * direction_x + direction_y * direction_y
-    if squared_length <= 1e-12:
-        return candidate
-    maximum_fraction = 1.0
-    for other_id, other_position, other_radius, _ in local_colliders:
+    dx = candidate.x - entity.position.x
+    dy = candidate.y - entity.position.y
+    fraction = 1.0
+    for other_id, position, other_radius, _ in local_colliders:
         if other_id == entity.entity_id:
             continue
-        radius = entity_radius + other_radius
-        radius_squared = radius * radius
-        candidate_distance_squared = _squared_distance(candidate, other_position)
-        if candidate_distance_squared >= radius_squared:
-            continue
-        current_distance_squared = _squared_distance(entity.position, other_position)
-        if current_distance_squared <= radius_squared:
-            current_distance = current_distance_squared**0.5
-            if candidate_distance_squared**0.5 < current_distance - 1e-9:
-                return entity.position
-            continue
-        offset_x = entity.position.x - other_position.x
-        offset_y = entity.position.y - other_position.y
-        linear = 2 * (offset_x * direction_x + offset_y * direction_y)
-        constant = offset_x * offset_x + offset_y * offset_y - radius * radius
-        discriminant = linear * linear - 4 * squared_length * constant
-        if discriminant < 0:
-            continue
-        fraction = (-linear - discriminant**0.5) / (2 * squared_length)
-        if 0 <= fraction <= maximum_fraction:
-            maximum_fraction = max(0.0, fraction - 1e-6)
-    return Point(
-        entity.position.x + direction_x * maximum_fraction,
-        entity.position.y + direction_y * maximum_fraction,
-    )
+        fraction = min(
+            fraction,
+            contact_fraction(
+                entity.position.x - position.x,
+                entity.position.y - position.y,
+                dx,
+                dy,
+                entity_radius + other_radius - 1e-8,
+            ),
+        )
+    if fraction == 1.0:
+        return candidate
+    fraction = max(0.0, fraction - 1e-7)
+    return Point(entity.position.x + dx * fraction, entity.position.y + dy * fraction)
 
 
 def contact_has_stationary_blocker(

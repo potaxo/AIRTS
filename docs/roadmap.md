@@ -1,7 +1,8 @@
 # Research roadmap
 
-[Design](design.md) describes the implemented baseline. Everything below is future scope unless
-an explicit task activates it; proposal language must not override current runtime contracts.
+[Design](design.md) describes the implemented baseline, summarized in the 0-5 row below.
+Phases 6-10 and the deferred proposals are future scope until explicitly requested; proposal
+language must not override current runtime contracts.
 
 ## Question and sequence
 
@@ -39,6 +40,6 @@ proposals for clearance-aware routes, stable formation slots, and reciprocal avo
 implemented requirements or current benchmark evidence. Retain relevant research entry points:
 [Continuum Crowds](https://grail.cs.washington.edu/projects/crowd-flows/78-treuille.pdf),
 [ORCA](https://gamma-web.iacs.umd.edu/ORCA/), and
-[ClearPath](https://diglib.eg.org/items/bdfea054-b571-4b5a-a44c-38b47876604f).
+[ClearPath](https://gamma-web.iacs.umd.edu/CA/).
 Native extensions, workers, GPU simulation, dynamic terrain, multiplayer, and engine migration
 require demonstrated need and explicit scope. They are not prerequisites for the prototype.
