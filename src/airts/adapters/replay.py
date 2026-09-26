@@ -10,7 +10,7 @@ from airts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map_model import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v6"
+REPLAY_SCHEMA = "airts-replay-v7"
 
 
 class ReplayError(ValueError):

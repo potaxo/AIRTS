@@ -46,7 +46,7 @@ from airts.world.occupancy import OccupancyError, OccupancyGrid
 from airts.world.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v7"
+SAVE_SCHEMA = "airts-save-v8"
 
 
 class PersistenceError(ValueError):
@@ -74,7 +74,8 @@ def load_simulation(path: str | Path) -> Simulation:
 
 def load_simulation_data(raw_data: object) -> Simulation:
     document = _mapping(raw_data, "save document")
-    if document.get("schema") != SAVE_SCHEMA:
+    legacy_movement = document.get("schema") == "airts-save-v7"
+    if document.get("schema") != SAVE_SCHEMA and not legacy_movement:
         raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
     try:
         game_map = load_map_data(document.get("map"))
@@ -107,7 +108,9 @@ def load_simulation_data(raw_data: object) -> Simulation:
         enemy_spawn_cap=enemy_spawn_cap,
     )
     simulation.tick = tick
-    simulation.entities = _load_entities(state.get("entities"), game_map, tick)
+    simulation.entities = _load_entities(
+        state.get("entities"), game_map, tick, legacy_movement=legacy_movement
+    )
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
     simulation.projectiles = _load_projectiles(state.get("projectiles", {}), simulation)
@@ -170,7 +173,40 @@ def load_simulation_data(raw_data: object) -> Simulation:
     }
     if not set(simulation._blocked_ticks).issubset(simulation.entities):
         raise PersistenceError("blocked_ticks references an unknown entity")
+    _load_traffic_reservations(state.get("traffic_reservations"), simulation)
     return simulation
+
+
+def _load_traffic_reservations(raw_data: object, simulation: Simulation) -> None:
+    if raw_data is None:
+        return
+    data = _mapping(raw_data, "state.traffic_reservations")
+    spacing = _number(data.get("spacing"), "traffic spacing", minimum=1.0)
+    origin = 0.5 if spacing == 1.0 else spacing / 2
+    slots: dict[str, tuple[int, int]] = {}
+    occupied: dict[tuple[int, int], str] = {}
+    for entity_id, raw_slot in _mapping(data.get("slots"), "traffic slots").items():
+        entity = simulation.entities.get(entity_id)
+        if entity is None or not entity.is_movable:
+            raise PersistenceError(f"traffic reservation references invalid unit: {entity_id}")
+        values = _list(raw_slot, "traffic slot")
+        if len(values) != 2:
+            raise PersistenceError("traffic slot must have two coordinates")
+        slot = (
+            _integer(values[0], "traffic slot x", minimum=0),
+            _integer(values[1], "traffic slot y", minimum=0),
+        )
+        if slot in occupied:
+            raise PersistenceError("traffic reservations contain duplicate slots")
+        point = Point(origin + slot[0] * spacing, origin + slot[1] * spacing)
+        if (
+            not simulation.game_map.is_passable(point)
+            or simulation.game_map.cell_for(point) in simulation._building_cells()
+        ):
+            raise PersistenceError(f"traffic reservation is obstructed: {entity_id}")
+        slots[entity_id] = slot
+        occupied[slot] = entity_id
+    simulation._open_force_slots = (spacing, slots, occupied)
 
 
 def _load_spatial(raw_data: object, simulation: Simulation, tick: int) -> SpatialStore:
@@ -244,7 +280,9 @@ def _load_selection(raw_data: object, simulation: Simulation) -> GroundingSelect
     return selection
 
 
-def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> dict[str, Entity]:
+def _load_entities(
+    raw_data: object, game_map: GameMap, current_tick: int, *, legacy_movement: bool = False
+) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
     for entity_id, raw_entity in entities_data.items():
@@ -308,6 +346,15 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
             raise PersistenceError(
                 f"entity {entity_id} movement progress fields must both be set or null"
             )
+        if (
+            legacy_movement
+            and progress_target is not None
+            and (not path or progress_target != path[0])
+        ):
+            # v7 could leave progress pointing at a consumed large-force waypoint.
+            progress_target = path[0] if path else None
+            progress_distance = position.distance_to(path[0]) if path else None
+            no_progress_ticks = 0
         if progress_target is not None and (not path or progress_target != path[0]):
             raise PersistenceError(
                 f"entity {entity_id} movement progress target must match its next waypoint"
@@ -389,12 +436,15 @@ def _load_entities(raw_data: object, game_map: GameMap, current_tick: int) -> di
 
 def _build_occupancy(simulation: Simulation) -> OccupancyGrid:
     occupancy = OccupancyGrid(simulation.game_map.width, simulation.game_map.height)
+    mobile_ids = frozenset(key for key, entity in simulation.entities.items() if entity.is_movable)
     for entity_id in sorted(simulation.entities):
         entity = simulation.entities[entity_id]
         if any(not simulation.game_map.is_cell_passable(cell) for cell in entity.occupied_cells):
             raise PersistenceError(f"entity {entity_id} occupies impassable terrain")
         try:
-            occupancy.place(entity_id, entity.occupied_cells)
+            occupancy.place(
+                entity_id, entity.occupied_cells, mobile_ids if entity.is_movable else frozenset()
+            )
         except OccupancyError as error:
             raise PersistenceError(f"invalid saved occupancy: {error}") from error
     return occupancy

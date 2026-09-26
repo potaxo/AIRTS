@@ -50,13 +50,17 @@ def steering_candidates(
         return (waypoint,)
     step = min(maximum_step, distance)
     desired = (dx / distance, dy / distance)
-    nearby = neighbors
     separation_x = 0.0
     separation_y = 0.0
-    for neighbor in nearby:
+    scoring_neighbors: list[Point] = []
+    scoring_radius_squared = (step + PREFERRED_SEPARATION + 1e-12) ** 2
+    for neighbor in neighbors:
         offset_x = position.x - neighbor.x
         offset_y = position.y - neighbor.y
-        squared_distance = max(offset_x * offset_x + offset_y * offset_y, 0.01)
+        squared_distance = offset_x * offset_x + offset_y * offset_y
+        if squared_distance <= scoring_radius_squared:
+            scoring_neighbors.append(neighbor)
+        squared_distance = max(squared_distance, 0.01)
         separation_x += offset_x / squared_distance
         separation_y += offset_y / squared_distance
 
@@ -83,7 +87,7 @@ def steering_candidates(
             raise ValueError("candidate_limit must be positive")
         directions = directions[:candidate_limit]
 
-    ranked: list[tuple[float, int, float, float, Point]] = []
+    ranked: list[tuple[float, int, Point]] = []
     seen: set[tuple[int, int]] = set()
     for direction_x, direction_y, order in directions:
         candidate = Point(position.x + direction_x * step, position.y + direction_y * step)
@@ -91,19 +95,21 @@ def steering_candidates(
         if key in seen:
             continue
         seen.add(key)
-        squared_clearance = NEIGHBOR_RADIUS * NEIGHBOR_RADIUS
-        for item in nearby:
+        # Farther neighbors cannot enter the scoring envelope during this step. They still
+        # contribute to the separation direction above, but need no per-candidate checks.
+        squared_clearance = PREFERRED_SEPARATION * PREFERRED_SEPARATION
+        for item in scoring_neighbors:
             offset_x = candidate.x - item.x
             offset_y = candidate.y - item.y
-            squared_clearance = min(
-                squared_clearance,
-                offset_x * offset_x + offset_y * offset_y,
-            )
+            squared_distance = offset_x * offset_x + offset_y * offset_y
+            if squared_distance < squared_clearance:
+                squared_clearance = squared_distance
         clearance = sqrt(squared_clearance)
         separation_penalty = max(0.0, PREFERRED_SEPARATION - clearance) * 8.0
         imminent_penalty = max(0.0, 0.72 - clearance) * 100.0
         route_cost = candidate.distance_to(waypoint)
         score = route_cost + separation_penalty + imminent_penalty + order * 0.002
-        ranked.append((score, order, candidate.y, candidate.x, candidate))
-    ranked.sort(key=lambda item: item[:-1])
+        # Direction order is unique, so coordinates cannot break an additional tie.
+        ranked.append((score, order, candidate))
+    ranked.sort()
     return tuple(item[-1] for item in ranked)

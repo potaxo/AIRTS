@@ -16,10 +16,15 @@ class OccupancyGrid:
         self._cells: dict[Cell, set[str]] = {}
         self._entity_cells: dict[str, frozenset[Cell]] = {}
 
-    def place(self, entity_id: str, cells: frozenset[Cell]) -> None:
+    def place(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
         if entity_id in self._entity_cells:
             raise OccupancyError(f"entity already placed: {entity_id}")
-        self._validate_available(entity_id, cells)
+        self._validate_available(entity_id, cells, allowed_conflicts)
         self._set_cells(entity_id, cells)
 
     def move(

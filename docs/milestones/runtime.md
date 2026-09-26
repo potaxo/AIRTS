@@ -48,17 +48,25 @@ Patrol groups follow the same cycle direction. Small defenses use exact stations
 expand into unique reachable holding space. Same-owner, same-target defenses coordinate membership
 and retain valid stations on growth; contraction can reassign outer survivors into compact slots.
 Line defenses cover the full polyline. Glow follows the authoritative assembly radius.
+Shared-station reconciliation excludes proposed/validating defenses so an ownership transfer
+cannot erase the new order's station plan before activation.
 
 Current movement uses continuous steering/push for small forces and topology-sensitive manual
 traffic, with coherent translation/reservation slots for large forces. Idle friendlies may yield;
 held units, stationary enemies, and docked defenders are anchors. Reservations retain surviving
-identities while spacing is valid; topology changes invalidate unsafe derived state. Queueing must
+identities while spacing is valid; topology changes invalidate unsafe reservations. A reservation
+does not bypass physical collision: ordered approaches with persistent lack of progress use local
+steering after the existing 30-tick stall threshold, and a faster follower
+slows without stopping a leader that is moving away. Units unable to acquire a traffic slot retain
+their orders and report `TRAFFIC_CAPACITY` while waiting for space. Queueing must
 not trigger unbounded replanning or cut across water. Large expanded defenses may adopt valid,
 pressure-free arrival positions inside their envelope; small groups retain exact stations.
 [Movement tests](../../tests/movement/test_swarm_movement.py) and
 [crowd contracts](performance.md#crowd-and-routing) retain the acceptance details.
 
-Opportunistic fire does not cancel locomotion. Explicit attack pursuit stops at weapon range.
+Opportunistic fire does not cancel locomotion, including defenders traveling past enemies outside
+their assigned defense area. Only an actual pursuit can interrupt that travel; explicit attack
+pursuit stops at weapon range.
 Projectiles retain their last target destination: a removed target leaves the shot/trace alive
 until arrival, with no damage to bystanders. Repair is explicitly requested, selects units strictly
 below the default 30% health threshold, prefers repair hubs, and restores suspended work or returns
@@ -100,8 +108,16 @@ publishing a building. Queue, progress, resource, and assignment state survive s
 or incompatible input. Saves preserve complete authoritative state, selections, queues, combat,
 movement progress, events, and counters; replay compares the final `snapshot()` and ordered events
 against recorded expectations, rather than comparing the full `export_state()` representation.
-Loaders reject schema versions other than their current constants; no automatic migration exists.
-Derived navigation/traffic caches rebuild deterministically; presentation history is not saved.
+Saves use v8 and include pending traffic reservations so collision-constrained arrivals continue
+identically after loading. The inverse slot index and navigation caches rebuild deterministically;
+presentation history is not saved. Mobile units may share occupancy cells, while buildings remain
+exclusive obstacles.
+
+The loader also accepts v7 saves: it preserves entities/orders, resets progress that references a
+consumed waypoint, and rebuilds the formerly unsaved reservations from current positions. Subsequent
+movement follows the corrected collision rules; saving again writes v8. Other old save versions
+remain unsupported. Replays use v7 because corrected collision and defender behavior changes future
+trajectories/events; v6 recordings are rejected explicitly, with no automatic replay migration.
 [events.py](../../src/airts/events.py) provides ordered, filterable events and JSON Lines export.
 
 The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays

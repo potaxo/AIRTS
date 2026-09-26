@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from random import Random
+
+import pytest
+
 from airts.geometry import Point
 from airts.navigation.spatial_index import SpatialIndex
 
@@ -56,3 +60,36 @@ def test_nearest_uses_distance_then_stable_id_without_sorting_a_result_set() -> 
 
     assert index.nearest(Point(1.0, 1.0), 1.1) == "alpha"
     assert index.nearest(Point(1.0, 1.0), 0.5) is None
+
+
+@pytest.mark.parametrize("bucket_size", (0.5, 2.5))
+@pytest.mark.parametrize("radius", (0.0, 0.9, 3.0))
+def test_broadphase_matches_brute_force_after_bucket_crossings(
+    bucket_size: float, radius: float
+) -> None:
+    random = Random(73)
+    positions = {
+        str(index): Point(random.uniform(-4, 4), random.uniform(-4, 4)) for index in range(40)
+    }
+    index = SpatialIndex(positions, bucket_size)
+    for entity_id in tuple(positions)[::3]:
+        positions[entity_id] = Point(random.uniform(-4, 4), random.uniform(-4, 4))
+        index.move(entity_id, positions[entity_id])
+    active = tuple(positions)[::2]
+    for point in positions.values():
+        assert index.nearby(point, radius) == tuple(
+            sorted(
+                entity_id
+                for entity_id, position in positions.items()
+                if point.distance_to(position) <= radius
+            )
+        )
+    expected = tuple(
+        (first, second)
+        for first in sorted(positions)
+        for second in sorted(positions)
+        if first < second
+        and (first in active or second in active)
+        and positions[first].distance_to(positions[second]) <= radius
+    )
+    assert index.candidate_pairs_for((*active, active[0], "missing"), radius) == expected

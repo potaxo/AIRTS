@@ -366,3 +366,44 @@ def test_resource_generators_produce_without_an_automation() -> None:
     simulation.advance(20)
 
     assert simulation.resources["player"] == 2500
+
+
+def test_defenders_keep_their_route_when_firing_at_an_enemy_far_from_their_station() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "defend_opportunistic_fire",
+                "name": "Defend travel under opportunistic fire",
+                "width": 48,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": "defender",
+                        "kind": "heavy_tank",
+                        "owner": "player",
+                        "position": [5.5, 5.5],
+                    },
+                    {"id": "enemy", "kind": "heavy_tank", "owner": "enemy", "position": [8.5, 5.5]},
+                ],
+            }
+        )
+    )
+    result = simulation.execute(CreateDefendCommand(("defender",), PointTarget(Point(40.5, 5.5))))
+    assert result.accepted
+    simulation.advance()
+    defender = simulation.entities["defender"]
+    assert defender.attack_target_id == "enemy"
+    assert not defender.pursue_target
+    first_route = tuple(defender.path)
+    first_position = defender.position
+    simulation.advance()
+    assert defender.position != first_position
+    assert tuple(defender.path) in (first_route, first_route[1:])
+    routes = simulation.events.query(
+        event_types=frozenset({EventType.PATH_COMPUTED}), subject_id="defender"
+    )
+    assert len(routes) == 1
+    assert simulation.events.query(
+        event_types=frozenset({EventType.PROJECTILE_LAUNCHED}), subject_id="defender"
+    )

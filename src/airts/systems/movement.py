@@ -15,7 +15,7 @@ from airts.navigation.collision import (
     unit_mass,
 )
 from airts.navigation.motion import constrain_motion, contact_fraction
-from airts.navigation.pathfinding import PathfindingError
+from airts.navigation.pathfinding import PathfindingError, passable_segment_cells
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import Entity, UnitState
 from airts.world.map_model import Cell, EntityKind
@@ -385,7 +385,7 @@ def _move_large_force(
             if entity_id in source_slots:
                 continue
             entity = movable_entities[entity_id]
-            source_slots[entity_id] = _nearest_large_force_slot(
+            slot = _nearest_large_force_slot(
                 simulation,
                 entity,
                 entity.position,
@@ -400,13 +400,17 @@ def _move_large_force(
                 maximum_ring,
                 has_fixed_units,
             )
-            occupied.add(source_slots[entity_id])
+            if slot is None:
+                record_movement_blocked(simulation, entity, "TRAFFIC_CAPACITY")
+                continue
+            source_slots[entity_id] = slot
+            occupied.add(slot)
         occupant_by_slot = {slot: entity_id for entity_id, slot in source_slots.items()}
         simulation._open_force_slots = (spacing, source_slots, occupant_by_slot)
 
     ordered_ids = tuple(
         sorted(
-            active_ids,
+            (entity_id for entity_id in active_ids if entity_id in source_slots),
             key=lambda entity_id: (
                 -unit_mass(movable_entities[entity_id].kind),
                 _movement_order_key(movable_entities[entity_id]),
@@ -440,7 +444,13 @@ def _move_large_force(
                 and len(entity.path) == 1
                 and entity.route_ticks >= simulation.DESTINATION_REPATH_TICKS
                 and entity.route_ticks % simulation.DESTINATION_REPATH_TICKS == repath_phase
-                and _passable_segment_cells(simulation, entity.position, entity.path[0]) is None
+                and passable_segment_cells(
+                    simulation.game_map,
+                    entity.position,
+                    entity.path[0],
+                    simulation._building_cells(),
+                )
+                is None
             ):
                 repath_stalled_entity(simulation, entity, reason="STATIC_TOPOLOGY_REPATH")
             _skip_large_force_path_prefix(simulation, entity, spacing, route_obstacle_cells)
@@ -519,12 +529,15 @@ def _move_large_force(
     motion_ids = tuple(
         entity_id
         for entity_id in traffic_ids
-        if entity_id in planned
-        or _squared_distance(
-            movable_entities[entity_id].position,
-            _large_force_slot_point(source_slots[entity_id], spacing, origin),
+        if entity_id in source_slots
+        and (
+            entity_id in planned
+            or _squared_distance(
+                movable_entities[entity_id].position,
+                _large_force_slot_point(source_slots[entity_id], spacing, origin),
+            )
+            > 1e-12
         )
-        > 1e-12
     )
     candidates: dict[str, Point] = {}
     for entity_id in motion_ids:
@@ -573,16 +586,78 @@ def _move_large_force(
             (crossed_cell and not simulation.game_map.is_passable(candidate))
             or (crossed_cell and not candidate_cells.isdisjoint(static_occupant_cells))
             or (
+                crossed_cell
+                and not _large_force_step_is_passable(
+                    simulation, entity.position, candidate, static_occupant_cells
+                )
+            )
+            or (
                 distance > spacing + 1e-9
-                and _passable_segment_cells(simulation, entity.position, candidate) is None
+                and passable_segment_cells(
+                    simulation.game_map, entity.position, candidate, simulation._building_cells()
+                )
+                is None
             )
         ):
             simulation._open_force_slots = None
             entity.collision_pressure += 1
             continue
         candidates[entity_id] = candidate
+    positions = {key: entity.position for key, entity in movable_entities.items()}
+    safe, checks = constrain_motion(positions, candidates, collision_radii)
+    simulation._collision_pair_check_count += checks
+    approach_index: SpatialIndex | None = None
+    steered = False
+    for entity_id, candidate in candidates.items():
+        entity = movable_entities[entity_id]
+        if not entity.path or entity.no_progress_ticks < simulation.NO_PROGRESS_YIELD_TICKS:
+            continue
+        if _squared_distance(safe[entity_id], candidate) <= 1e-18 or _squared_distance(
+            safe[entity_id], positions[entity_id]
+        ) >= 0.01 * _squared_distance(candidate, positions[entity_id]):
+            continue
+        # A reservation is not a collision-free physical route. Only blocked approaches
+        # need steering; freely moving queues reuse the simultaneous collision result.
+        if approach_index is None:
+            approach_index = SpatialIndex(positions, bucket_size=1.5)
+        colliders = tuple(
+            (key, positions[key], collision_radii[key], not movable_entities[key].path)
+            for key in approach_index.nearby(entity.position, NEIGHBOR_RADIUS)
+        )
+        neighbors = tuple(position for key, position, _, _ in colliders if key != entity_id)
+        destination = _large_force_slot_point(source_slots[entity_id], spacing, origin)
+        for alternative in steering_candidates(
+            entity.position, destination, entity.speed * simulation.TICK_SECONDS, neighbors
+        ):
+            alternative = clamp_to_collider_contact(
+                simulation, entity, alternative, collision_radii[entity_id], colliders
+            )
+            if (
+                _squared_distance(alternative, entity.position) > 1e-12
+                and local_move_is_available(
+                    simulation,
+                    entity,
+                    alternative,
+                    collision_radii[entity_id],
+                    colliders,
+                    static_occupant_cells,
+                )
+                and passable_segment_cells(
+                    simulation.game_map, entity.position, alternative, static_occupant_cells
+                )
+                is not None
+            ):
+                candidates[entity_id] = alternative
+                steered = True
+                break
     _commit_group_motion(
-        simulation, movable_entities, movable_ids, candidates, collision_radii, spacing
+        simulation,
+        movable_entities,
+        movable_ids,
+        candidates if steered else safe,
+        collision_radii,
+        spacing,
+        checked=not steered,
     )
 
 
@@ -832,7 +907,9 @@ def _skip_large_force_path_prefix(
     best = entity.path[best_index]
     if _squared_distance(entity.position, best) >= first_distance - (spacing * 0.5) ** 2:
         return
-    segment_cells = _passable_segment_cells(simulation, entity.position, best)
+    segment_cells = passable_segment_cells(
+        simulation.game_map, entity.position, best, simulation._building_cells()
+    )
     if segment_cells is not None and route_obstacle_cells.isdisjoint(segment_cells[1:]):
         del entity.path[:best_index]
 
@@ -851,7 +928,7 @@ def _nearest_large_force_slot(
     static_occupant_cells: frozenset[Cell],
     maximum_ring: int,
     has_fixed_units: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int] | None:
     center = (
         round((desired.x - origin) / spacing),
         round((desired.y - origin) / spacing),
@@ -892,7 +969,12 @@ def _nearest_large_force_slot(
             cells = simulation._cells_at(entity, candidate)
             if static_occupant_cells and not cells.isdisjoint(static_occupant_cells):
                 continue
-            if _passable_segment_cells(simulation, desired, candidate) is None:
+            if (
+                passable_segment_cells(
+                    simulation.game_map, desired, candidate, simulation._building_cells()
+                )
+                is None
+            ):
                 continue
             if not has_fixed_units or _large_force_slot_clears_fixed_units(
                 simulation,
@@ -904,7 +986,7 @@ def _nearest_large_force_slot(
                 maximum_radius,
             ):
                 return slot
-    raise RuntimeError(f"no collision-safe traffic slot for {entity.entity_id}")
+    return None
 
 
 def _large_force_step_is_passable(
@@ -994,6 +1076,17 @@ def track_movement_progress(
         for entity in entities:
             if entity.path:
                 entity.route_ticks += 1
+                distance = entity.position.distance_to(entity.path[0])
+                if (
+                    entity.progress_target != entity.path[0]
+                    or entity.progress_distance is None
+                    or distance <= entity.progress_distance - simulation.MIN_PROGRESS_DISTANCE
+                ):
+                    entity.progress_target = entity.path[0]
+                    entity.progress_distance = distance
+                    entity.no_progress_ticks = 0
+                else:
+                    entity.no_progress_ticks += 1
             elif (
                 entity.progress_target is not None
                 or entity.progress_distance is not None
@@ -1195,7 +1288,9 @@ def simplify_waypoints(
 
     if len(waypoints) <= 1:
         return waypoints
-    direct_cells = _passable_segment_cells(simulation, start, waypoints[-1])
+    direct_cells = passable_segment_cells(
+        simulation.game_map, start, waypoints[-1], simulation._building_cells()
+    )
     if direct_cells is not None:
         direct_cost = sum(
             simulation.game_map.terrain_at_cell(cell).movement_cost for cell in direct_cells[1:]
@@ -1215,38 +1310,6 @@ def simplify_waypoints(
     if not simplified or simplified[-1] != waypoints[-1]:
         simplified.append(waypoints[-1])
     return tuple(simplified)
-
-
-def _passable_segment_cells(
-    simulation: Simulation,
-    start: Point,
-    end: Point,
-) -> tuple[Cell, ...] | None:
-    distance = start.distance_to(end)
-    sample_count = max(1, int(distance * 4))
-    blocked = simulation._building_cells()
-    cells: list[Cell] = [simulation.game_map.cell_for(start)]
-    for index in range(1, sample_count + 1):
-        fraction = index / sample_count
-        point = Point(
-            start.x + (end.x - start.x) * fraction,
-            start.y + (end.y - start.y) * fraction,
-        )
-        cell = simulation.game_map.cell_for(point)
-        if cell == cells[-1]:
-            continue
-        previous = cells[-1]
-        if cell[0] != previous[0] and cell[1] != previous[1]:
-            corners = ((cell[0], previous[1]), (previous[0], cell[1]))
-            if any(
-                not simulation.game_map.is_cell_passable(corner) or corner in blocked
-                for corner in corners
-            ):
-                return None
-        if not simulation.game_map.is_cell_passable(cell) or cell in blocked:
-            return None
-        cells.append(cell)
-    return tuple(cells)
 
 
 def skip_crowded_waypoints(simulation: Simulation, entity: Entity) -> None:

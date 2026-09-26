@@ -41,16 +41,17 @@ class SpatialIndex:
         maximum_y = floor((point.y + radius) / self.bucket_size)
         squared_radius = radius * radius
         candidates: list[str] = []
+        positions = self._positions
         for bucket_y in range(minimum_y, maximum_y + 1):
             for bucket_x in range(minimum_x, maximum_x + 1):
-                candidates.extend(self._buckets.get((bucket_x, bucket_y), ()))
-        return tuple(
-            sorted(
-                entity_id
-                for entity_id in candidates
-                if _squared_distance(point, self._positions[entity_id]) <= squared_radius
-            )
-        )
+                for entity_id in self._buckets.get((bucket_x, bucket_y), ()):
+                    position = positions[entity_id]
+                    dx = point.x - position.x
+                    dy = point.y - position.y
+                    if dx * dx + dy * dy <= squared_radius:
+                        candidates.append(entity_id)
+        candidates.sort()
+        return tuple(candidates)
 
     def nearest(self, point: Point, radius: float) -> str | None:
         """Return the nearest in-range ID with deterministic ID tie-breaking."""

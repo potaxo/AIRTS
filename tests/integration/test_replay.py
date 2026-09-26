@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from airts.adapters.replay import ReplayData, ReplayError, load_replay, run_replay, save_replay
+from airts.adapters.replay import (
+    ReplayData,
+    ReplayError,
+    capture_replay,
+    load_replay,
+    load_replay_data,
+    run_replay,
+    save_replay,
+)
 from airts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
@@ -82,3 +90,10 @@ def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
 
     assert replayed.snapshot() == simulation.snapshot()
     assert replayed.automations[production.automation_id or ""].status.value == "failed"
+
+
+def test_replay_rejects_recordings_from_before_the_traffic_correction() -> None:
+    document = capture_replay(Simulation(load_example_map())).to_dict()
+    document["schema"] = "airts-replay-v6"
+    with pytest.raises(ReplayError, match="unsupported replay schema: airts-replay-v6"):
+        load_replay_data(document)

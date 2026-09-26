@@ -29,22 +29,6 @@ class _NavigationField:
     goal_indices: frozenset[int]
     width: int
 
-    def index(self, cell: Cell) -> int:
-        return cell[1] * self.width + cell[0]
-
-    def reachable(self, cell: Cell) -> bool:
-        return self.costs[self.index(cell)] != float("inf")
-
-    def is_goal(self, cell: Cell) -> bool:
-        return self.index(cell) in self.goal_indices
-
-    def next_cell(self, cell: Cell) -> Cell:
-        index = self.next_indices[self.index(cell)]
-        return index % self.width, index // self.width
-
-    def cost_at(self, cell: Cell) -> float:
-        return self.costs[self.index(cell)]
-
 
 class Pathfinder:
     """Cache deterministic reverse paths for many units sharing destinations."""
@@ -63,9 +47,6 @@ class Pathfinder:
             next(iter(passable_costs)) if len(passable_costs) == 1 else None
         )
         self._cell_count = game_map.width * game_map.height
-        self._passable_indices = tuple(
-            terrain.passable for row in game_map.terrain for terrain in row
-        )
         self._movement_costs = tuple(
             terrain.movement_cost for row in game_map.terrain for terrain in row
         )
@@ -75,7 +56,9 @@ class Pathfinder:
                 for neighbor_x, neighbor_y in _neighbors(
                     (index % game_map.width, index // game_map.width)
                 )
-                if 0 <= neighbor_x < game_map.width and 0 <= neighbor_y < game_map.height
+                if 0 <= neighbor_x < game_map.width
+                and 0 <= neighbor_y < game_map.height
+                and game_map.terrain[neighbor_y][neighbor_x].passable
             )
             for index in range(self._cell_count)
         )
@@ -132,16 +115,19 @@ class Pathfinder:
                 self._fields.popitem(last=False)
         else:
             self._fields.move_to_end(key)
-        if not field.reachable(start_cell):
+        index = start_cell[1] * field.width + start_cell[0]
+        cost = field.costs[index]
+        if cost == float("inf"):
             raise PathfindingError("NO_PATH")
         cells = [start_cell]
-        while not field.is_goal(cells[-1]):
-            cells.append(field.next_cell(cells[-1]))
+        while index not in field.goal_indices:
+            index = field.next_indices[index]
+            cells.append((index % field.width, index // field.width))
         goal = goal_points[cells[-1]]
         waypoints = tuple(
             goal if cell == cells[-1] else Point(cell[0] + 0.5, cell[1] + 0.5) for cell in cells[1:]
         )
-        return goal, PathResult(tuple(cells), waypoints, field.cost_at(start_cell))
+        return goal, PathResult(tuple(cells), waypoints, cost)
 
     def _build_field(
         self,
@@ -179,7 +165,7 @@ class Pathfinder:
                 continue
             step_cost = self._movement_costs[current]
             for predecessor in self._neighbor_indices[current]:
-                if predecessor in blocked_indices or not self._passable_indices[predecessor]:
+                if predecessor in blocked_indices:
                     continue
                 cost = current_cost + step_cost
                 previous_cost = costs[predecessor]
@@ -221,33 +207,34 @@ class Pathfinder:
         for index in goal_indices:
             costs[index] = 0.0
             goal_for[index] = index
-        frontier = list(goal_indices)
+        frontier = sorted(goal_indices)
         blocked_indices = frozenset(cell[1] * self.game_map.width + cell[0] for cell in blocked)
         distance = 0
         while frontier:
-            candidates: dict[int, tuple[int, int]] = {}
+            following: list[int] = []
+            distance += 1
+            cost = distance * movement_cost
             for current in frontier:
                 goal = goal_for[current]
-                candidate_key = (goal, current)
                 for predecessor in self._neighbor_indices[current]:
-                    if (
-                        goal_for[predecessor] >= 0
-                        or predecessor in blocked_indices
-                        or not self._passable_indices[predecessor]
-                    ):
+                    previous_cost = costs[predecessor]
+                    if previous_cost < cost:
                         continue
-                    existing = candidates.get(predecessor)
-                    if existing is None or candidate_key < existing:
-                        candidates[predecessor] = candidate_key
-            if not candidates:
-                break
-            distance += 1
-            frontier = list(candidates)
-            cost = distance * movement_cost
-            for predecessor, (goal, next_index) in candidates.items():
-                costs[predecessor] = cost
-                goal_for[predecessor] = goal
-                next_indices[predecessor] = next_index
+                    if predecessor in blocked_indices:
+                        continue
+                    if previous_cost > cost:
+                        costs[predecessor] = cost
+                        goal_for[predecessor] = goal
+                        next_indices[predecessor] = current
+                        following.append(predecessor)
+                    elif goal < goal_for[predecessor] or (
+                        goal == goal_for[predecessor] and current < next_indices[predecessor]
+                    ):
+                        # Finish this layer before expanding the next one, including its
+                        # equal-distance goal/next-cell ties. Each cell is queued only once.
+                        goal_for[predecessor] = goal
+                        next_indices[predecessor] = current
+            frontier = following
         return _NavigationField(
             costs,
             next_indices,
@@ -355,6 +342,41 @@ class RoutingService:
         """Use a cheap deterministic clear L-corridor before falling back to A*."""
 
         return find_local_path(self.game_map, start, goal, blocked)
+
+    def formation_path(
+        self,
+        start: Point,
+        target: Point,
+        anchor: Point,
+        blocked: frozenset[Cell],
+        *,
+        branch_distance: int,
+    ) -> PathResult:
+        """Share the approach to an anchor, then branch into an individual formation slot."""
+
+        shared = self.shared_path(start, anchor, blocked)
+        if anchor == target:
+            return shared
+        target_cell = self.game_map.cell_for(target)
+        branch_index = next(
+            (
+                index
+                for index, cell in enumerate(shared.cells)
+                if abs(cell[0] - target_cell[0]) + abs(cell[1] - target_cell[1]) <= branch_distance
+            ),
+            len(shared.cells) - 1,
+        )
+        junction = start if branch_index == 0 else shared.waypoints[branch_index - 1]
+        local = self.local_path(junction, target, blocked)
+        prefix_cost = sum(
+            self.game_map.terrain_at_cell(cell).movement_cost
+            for cell in shared.cells[1 : branch_index + 1]
+        )
+        return PathResult(
+            shared.cells[: branch_index + 1] + local.cells[1:],
+            shared.waypoints[:branch_index] + local.waypoints,
+            prefix_cost + local.cost,
+        )
 
     def clear(self) -> None:
         self._shared.clear()
@@ -480,6 +502,42 @@ def _axis_cells(
             else:
                 y = value
             cells.append((x, y))
+    return tuple(cells)
+
+
+def passable_segment_cells(
+    game_map: GameMap,
+    start: Point,
+    end: Point,
+    blocked: frozenset[Cell] = frozenset(),
+) -> tuple[Cell, ...] | None:
+    """Sample a straight approach with conservative clearance at diagonal cell crossings.
+
+    Keep the route sampler's quarter-cell resolution and cell order; interpolate coordinates
+    directly to avoid allocating a Point and repeating map bounds checks for every sample.
+    """
+
+    start_cell = game_map.cell_for(start)
+    game_map.cell_for(end)
+    sample_count = max(1, int(start.distance_to(end) * 4))
+    offset_x = end.x - start.x
+    offset_y = end.y - start.y
+    cells = [start_cell]
+    for index in range(1, sample_count + 1):
+        fraction = index / sample_count
+        cell = (int(start.x + offset_x * fraction), int(start.y + offset_y * fraction))
+        previous = cells[-1]
+        if cell == previous:
+            continue
+        if cell[0] != previous[0] and cell[1] != previous[1]:
+            corners = ((cell[0], previous[1]), (previous[0], cell[1]))
+            if any(
+                not game_map.is_cell_passable(corner) or corner in blocked for corner in corners
+            ):
+                return None
+        if not game_map.is_cell_passable(cell) or cell in blocked:
+            return None
+        cells.append(cell)
     return tuple(cells)
 
 

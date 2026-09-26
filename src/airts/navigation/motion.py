@@ -6,6 +6,7 @@ two safe endpoints can still intersect between ticks (including GPU interpolatio
 
 from __future__ import annotations
 
+from collections import deque
 from math import sqrt
 
 from airts.geometry import Point
@@ -47,6 +48,12 @@ def constrain_motion(
     active = tuple(key for key, velocity in velocities.items() if velocity != (0.0, 0.0))
     if not active:
         return proposals, 0
+    if len(proposals) == len(positions):
+        xs, ys = zip(*velocities.values(), strict=True)
+        if (max(xs) - min(xs)) + (max(ys) - min(ys)) <= 1e-12:
+            # A common translation has no relative motion. This is the same tolerance used
+            # by the pair solver, and includes every body so a stationary anchor cannot hide.
+            return proposals, 0
     maximum_step = max(sqrt(x * x + y * y) for x, y in velocities.values())
     index = SpatialIndex(positions, bucket_size=1.5)
     pairs = index.candidate_pairs_for(active, 2 * (max(radii.values()) + maximum_step))
@@ -70,6 +77,40 @@ def constrain_motion(
             fraction = contact_fraction(dx, dy, vx, vy, radius)
             if fraction >= 1.0:
                 continue
+            first_approach = dx * ax + dy * ay
+            second_approach = -(dx * bx + dy * by)
+            if first_approach * second_approach < 0:
+                # Let a leader move away instead of stopping it together with its faster
+                # follower. Only the participant closing the gap needs to slow down.
+                if abs(ax * by - ay * bx) <= 1e-12:
+                    # Same-heading queues have an exact solution: preserve the leader's
+                    # velocity and shorten only the relative closing motion.
+                    fraction = max(0.0, fraction - 1e-7)
+                    if first_approach < 0:
+                        velocities[first] = (bx + vx * fraction, by + vy * fraction)
+                    else:
+                        velocities[second] = (ax - vx * fraction, ay - vy * fraction)
+                    changed = True
+                    continue
+                lower, upper = 0.0, 1.0
+                for _ in range(16):
+                    checks += 1
+                    scale = (lower + upper) / 2
+                    relative_x, relative_y = (
+                        (ax * scale - bx, ay * scale - by)
+                        if first_approach < 0
+                        else (ax - bx * scale, ay - by * scale)
+                    )
+                    if contact_fraction(dx, dy, relative_x, relative_y, radius) >= 1.0:
+                        lower = scale
+                    else:
+                        upper = scale
+                if first_approach < 0:
+                    velocities[first] = (ax * lower, ay * lower)
+                else:
+                    velocities[second] = (bx * lower, by * lower)
+                changed = True
+                continue
             fraction = max(0.0, fraction - 1e-7)
             velocities[first] = (ax * fraction, ay * fraction)
             velocities[second] = (bx * fraction, by * fraction)
@@ -77,20 +118,33 @@ def constrain_motion(
         if not changed:
             break
     else:
-        # Each pass permanently stops at least one further moving participant.
-        while True:
-            changed = False
-            for first, second, dx, dy, radius in constraints:
-                ax, ay = velocities.get(first, (0.0, 0.0))
-                bx, by = velocities.get(second, (0.0, 0.0))
-                if ax == bx and ay == by:
+        # Propagate stops only to incident pairs. Rescanning the whole army for each
+        # stopped follower makes a long queue quadratic even with a spatial broadphase.
+        incident: dict[str, list[int]] = {}
+        for pair_index, (first, second, *_rest) in enumerate(constraints):
+            incident.setdefault(first, []).append(pair_index)
+            incident.setdefault(second, []).append(pair_index)
+        pending = deque(range(len(constraints)))
+        queued = set(pending)
+        while pending:
+            pair_index = pending.popleft()
+            queued.remove(pair_index)
+            first, second, dx, dy, radius = constraints[pair_index]
+            ax, ay = velocities.get(first, (0.0, 0.0))
+            bx, by = velocities.get(second, (0.0, 0.0))
+            if ax == bx and ay == by:
+                continue
+            checks += 1
+            if contact_fraction(dx, dy, ax - bx, ay - by, radius) >= 1.0:
+                continue
+            for key in (first, second):
+                if velocities.get(key, (0.0, 0.0)) == (0.0, 0.0):
                     continue
-                checks += 1
-                if contact_fraction(dx, dy, ax - bx, ay - by, radius) < 1.0:
-                    velocities[first] = velocities[second] = (0.0, 0.0)
-                    changed = True
-            if not changed:
-                break
+                velocities[key] = (0.0, 0.0)
+                for affected in incident[key]:
+                    if affected not in queued:
+                        pending.append(affected)
+                        queued.add(affected)
     result = {}
     for key, target in proposals.items():
         dx, dy = velocities[key]

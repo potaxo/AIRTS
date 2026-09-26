@@ -4,15 +4,21 @@ from __future__ import annotations
 
 from statistics import median
 
+import pytest
+from tests.integration.scenarios import growing_factory_simulation
+
 from airts.automations import DefendParameters, ProductionParameters
 from airts.commands import (
     CreateDefendCommand,
     CreateProductionCommand,
     HoldPositionCommand,
     MoveCommand,
+    PauseAutomationCommand,
 )
+from airts.events import EventType
 from airts.geometry import Point, rectangle_region
 from airts.simulation import Simulation
+from airts.world.entities import Entity, UnitState
 from airts.world.map_model import EntityKind, load_map_data
 
 
@@ -601,3 +607,131 @@ def test_large_force_routes_around_a_held_group_without_moving_the_holders() -> 
     assert crossed == len(mover_ids), (
         f"only {crossed}/{len(mover_ids)} moving units routed around the held formation"
     )
+
+
+@pytest.mark.parametrize("enemies", (False, True), ids=("peaceful", "mixed_army_under_fire"))
+def test_growing_factory_army_keeps_crossing_and_accepts_a_new_move(enemies: bool) -> None:
+    simulation, production_ids = growing_factory_simulation(enemies=enemies)
+    simulation.advance(200)
+    crossed_at_200 = sum(
+        entity.is_movable and entity.owner_id == "player" and entity.position.x >= 34
+        for entity in simulation.entities.values()
+    )
+    simulation.advance(300)
+    productions = [simulation.automations[key] for key in production_ids]
+    assert all(
+        isinstance(item.parameters, ProductionParameters) and item.parameters.produced_count >= 70
+        for item in productions
+    )
+    selected = tuple(
+        key
+        for key, entity in simulation.entities.items()
+        if entity.is_movable and entity.owner_id == "player"
+    )
+    crossed_before_move = sum(simulation.entities[key].position.x >= 34 for key in selected)
+    assert len(selected) > 160
+    assert crossed_before_move >= crossed_at_200 + 40
+    for production_id in production_ids:
+        assert simulation.execute(PauseAutomationCommand(production_id)).accepted
+    assert simulation.execute(MoveCommand(selected, Point(46.5, 31.5))).accepted
+    before = {key: simulation.entities[key].position for key in selected}
+    simulation.advance(150)
+    assert (
+        sum(
+            key in simulation.entities and simulation.entities[key].position.distance_to(point) > 2
+            for key, point in before.items()
+        )
+        >= len(selected) // 3
+    )
+    assert (
+        sum(
+            simulation.entities[key].position.x >= 34
+            for key in selected
+            if key in simulation.entities
+        )
+        > crossed_before_move
+    )
+    buildings = simulation._building_cells()
+    assert all(
+        entity.occupied_cells.isdisjoint(buildings)
+        for entity in simulation.entities.values()
+        if entity.is_movable
+    )
+
+
+def test_large_move_near_map_edge_skips_an_out_of_bounds_staging_leg() -> None:
+    ids = tuple(f"unit_{index:03d}" for index in range(132))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "edge_staging",
+                "name": "Army staging near map edge",
+                "width": 64,
+                "height": 32,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": key,
+                        "kind": "light_tank",
+                        "position": [63.5, 10.5]
+                        if index == 131
+                        else [2.5 + index % 44, 4.5 + index // 44],
+                    }
+                    for index, key in enumerate(ids)
+                ],
+            }
+        )
+    )
+    assert simulation.execute(MoveCommand(ids, Point(50.5, 20.5))).accepted
+    assert all(
+        simulation.game_map.contains(point)
+        for key in ids
+        for point in simulation.entities[key].path
+    )
+    simulation.advance(5)
+
+
+def test_full_traffic_lattice_waits_without_crashing_or_losing_the_queued_unit() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "full_traffic",
+                "name": "No free reservation slot",
+                "width": 13,
+                "height": 13,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": f"unit_{index:03d}",
+                        "kind": "scout",
+                        "position": [0.1, 0.1]
+                        if index == 0
+                        else [index % 13 + 0.5, index // 13 + 0.5],
+                    }
+                    for index in range(169)
+                ],
+            }
+        )
+    )
+    # Valid continuous disc packing can contain more units than the discrete traffic grid.
+    queued = Entity(
+        "zz_queued",
+        EntityKind.SCOUT,
+        "player",
+        Point(0.8, 0.8),
+        EntityKind.SCOUT.profile.max_health,
+        state=UnitState.MOVING,
+        move_target=Point(12.5, 12.5),
+        path=[Point(12.5, 12.5)],
+    )
+    simulation.entities[queued.entity_id] = queued
+    simulation.occupancy.place(
+        queued.entity_id, queued.occupied_cells, frozenset(simulation.entities)
+    )
+    simulation.advance()
+    assert queued.path and queued.move_target == Point(12.5, 12.5)
+    assert queued.position == Point(0.8, 0.8)
+    blocked = simulation.events.query(
+        event_types=frozenset({EventType.MOVEMENT_BLOCKED}), subject_id=queued.entity_id
+    )
+    assert blocked and blocked[0].details["evidence"] == "TRAFFIC_CAPACITY"

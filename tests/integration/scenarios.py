@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from airts.commands import CreateProductionCommand
+from airts.geometry import Point, rectangle_region
 from airts.simulation import Simulation
-from airts.world.map_model import GameMap, load_map_data
+from airts.world.map_model import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
 
 
 def runtime_map() -> GameMap:
@@ -104,3 +108,36 @@ def interaction_simulation() -> Simulation:
         ),
         random_seed=7,
     )
+
+
+def growing_factory_simulation(*, enemies: bool = False) -> tuple[Simulation, tuple[str, ...]]:
+    game_map = load_example_map()
+    game_map = replace(
+        game_map,
+        entities=tuple(
+            entity for entity in game_map.entities if enemies or entity.owner_id == "player"
+        )
+        + tuple(
+            EntitySpec(f"factory_{index}", EntityKind.FACTORY, "player", Point(11, 48 + index * 5))
+            for index in range(3)
+        ),
+    )
+    simulation = Simulation(game_map, ambient_enemy_spawns=enemies)
+    simulation.resources["player"] = 1_000_000
+    production_ids = []
+    factories = tuple(
+        entity for entity in simulation.entities.values() if entity.kind is EntityKind.FACTORY
+    )
+    for index, factory in enumerate(factories):
+        result = simulation.execute(
+            CreateProductionCommand(
+                factory.entity_id,
+                EntityKind.HEAVY_TANK if enemies and index % 2 else EntityKind.LIGHT_TANK,
+                1,
+                continuous=True,
+                defend_target=rectangle_region(Point(46, 28), Point(52, 35)),
+            )
+        )
+        assert result.accepted and result.automation_id is not None
+        production_ids.append(result.automation_id)
+    return simulation, tuple(production_ids)

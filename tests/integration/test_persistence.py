@@ -7,9 +7,19 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from tests.integration.scenarios import builder_factory_simulation, economy_combat_simulation
+from tests.integration.scenarios import (
+    builder_factory_simulation,
+    economy_combat_simulation,
+    growing_factory_simulation,
+)
 
-from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
+from airts.adapters.persistence import (
+    SAVE_SCHEMA,
+    PersistenceError,
+    load_simulation,
+    load_simulation_data,
+    save_simulation,
+)
 from airts.adapters.replay import load_replay, run_replay, save_replay
 from airts.automations import (
     AutomationStatus,
@@ -274,3 +284,40 @@ def _assert_continues_identically(original: Simulation, restored: Simulation, ti
     original.advance(ticks)
     restored.advance(ticks)
     assert restored.export_state() == original.export_state()
+
+
+def test_growing_army_save_preserves_shared_cells_and_pending_reservations() -> None:
+    simulation, _ = growing_factory_simulation()
+    simulation.advance(260)
+    document = {
+        "schema": SAVE_SCHEMA,
+        "map": simulation.game_map.to_dict(),
+        "state": simulation.export_state(),
+    }
+    restored = load_simulation_data(document)
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 20)
+    traffic = document["state"]["traffic_reservations"]
+    assert traffic is not None and len(traffic["slots"]) > 160
+    ids = tuple(traffic["slots"])
+    traffic["slots"][ids[0]] = traffic["slots"][ids[1]]
+    with pytest.raises(PersistenceError, match="duplicate slots"):
+        load_simulation_data(document)
+
+
+def test_previous_save_version_rebuilds_traffic_and_repairs_consumed_waypoint_progress() -> None:
+    simulation, _ = growing_factory_simulation()
+    simulation.advance(260)
+    state = simulation.export_state()
+    state.pop("traffic_reservations")
+    entity = next(value for value in state["entities"].values() if value["path"])
+    entity["progress_target"] = [2.5, 2.5]
+    entity["progress_distance"] = 10.0
+    restored = load_simulation_data(
+        {"schema": "airts-save-v7", "map": simulation.game_map.to_dict(), "state": state}
+    )
+    loaded_entity = restored.entities[entity["id"]]
+    assert loaded_entity.progress_target == loaded_entity.path[0]
+    restored.advance(5)
+    assert restored.tick == 265
+    assert loaded_entity.progress_target == (loaded_entity.path[0] if loaded_entity.path else None)

@@ -38,7 +38,7 @@ from airts.control import ControlAuthority
 from airts.events import EventType
 from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.navigation.collision import collision_radius
-from airts.navigation.pathfinding import PathfindingError, PathResult
+from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.systems.automation_runtime import coordinate_shared_defend_stations
 from airts.validation import (
     ValidationFailure,
@@ -287,49 +287,25 @@ def _prepend_coherent_staging_leg(
         if not entity.path:
             continue
         stage = Point(entity.position.x + offset_x, entity.position.y + offset_y)
-        if not _straight_segment_is_passable(simulation, entity.position, stage, blocked):
+        if not simulation.game_map.contains(stage):
+            continue
+        if passable_segment_cells(simulation.game_map, entity.position, stage, blocked) is None:
             continue
         entity.path.insert(0, stage)
         destination = entity.move_target
-        if destination is not None and _straight_segment_is_passable(
-            simulation,
-            entity.position,
-            destination,
-            blocked,
+        if (
+            destination is not None
+            and passable_segment_cells(
+                simulation.game_map,
+                entity.position,
+                destination,
+                blocked,
+            )
+            is not None
         ):
             entity.path[:] = [stage, destination]
         entity.progress_target = stage
         entity.progress_distance = stage_distance
-
-
-def _straight_segment_is_passable(
-    simulation: Simulation,
-    start: Point,
-    end: Point,
-    blocked: frozenset[Cell],
-) -> bool:
-    sample_count = max(1, int(start.distance_to(end) * 4))
-    previous = simulation.game_map.cell_for(start)
-    for index in range(1, sample_count + 1):
-        fraction = index / sample_count
-        point = Point(
-            start.x + (end.x - start.x) * fraction,
-            start.y + (end.y - start.y) * fraction,
-        )
-        cell = simulation.game_map.cell_for(point)
-        if cell == previous:
-            continue
-        if cell[0] != previous[0] and cell[1] != previous[1]:
-            corners = ((cell[0], previous[1]), (previous[0], cell[1]))
-            if any(
-                not simulation.game_map.is_cell_passable(corner) or corner in blocked
-                for corner in corners
-            ):
-                return False
-        if not simulation.game_map.is_cell_passable(cell) or cell in blocked:
-            return False
-        previous = cell
-    return True
 
 
 def _group_route_obstacles(
@@ -430,38 +406,16 @@ def plan_group_paths(
             ]
             for route_index, entity_id in enumerate(ordered_route_entities)
         }
-    branch_distance = 8
-    paths: dict[str, PathResult] = {}
-    for entity_id in sorted(entity_ids):
-        start = simulation.entities[entity_id].position
-        route_anchor = route_anchor_by_entity[entity_id]
-        shared = simulation._routes.shared_path(start, route_anchor, blocked)
-        destination = destinations[entity_id]
-        if destination == route_anchor:
-            paths[entity_id] = shared
-            continue
-        destination_cell = simulation.game_map.cell_for(destination)
-        branch_index = next(
-            (
-                index
-                for index, cell in enumerate(shared.cells)
-                if abs(cell[0] - destination_cell[0]) + abs(cell[1] - destination_cell[1])
-                <= branch_distance
-            ),
-            len(shared.cells) - 1,
+    return {
+        entity_id: simulation._routes.formation_path(
+            simulation.entities[entity_id].position,
+            destinations[entity_id],
+            route_anchor_by_entity[entity_id],
+            blocked,
+            branch_distance=8,
         )
-        junction = start if branch_index == 0 else shared.waypoints[branch_index - 1]
-        local = simulation._routes.local_path(junction, destination, blocked)
-        prefix_cost = sum(
-            simulation.game_map.terrain_at_cell(cell).movement_cost
-            for cell in shared.cells[1 : branch_index + 1]
-        )
-        paths[entity_id] = PathResult(
-            shared.cells[: branch_index + 1] + local.cells[1:],
-            shared.waypoints[:branch_index] + local.waypoints,
-            prefix_cost + local.cost,
-        )
-    return paths
+        for entity_id in sorted(entity_ids)
+    }
 
 
 def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:

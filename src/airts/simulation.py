@@ -457,6 +457,18 @@ class Simulation:
             "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
             "movement_blocked": sorted(self._movement_blocked),
             "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
+            "traffic_reservations": (
+                None
+                if self._open_force_slots is None
+                else {
+                    "spacing": self._open_force_slots[0],
+                    "slots": {
+                        entity_id: list(slot)
+                        for entity_id, slot in sorted(self._open_force_slots[1].items())
+                        if entity_id in self.entities
+                    },
+                }
+            ),
         }
 
     def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
@@ -820,7 +832,7 @@ class Simulation:
         if cached is None:
             center = target_center(target)
             blocked = self._building_cells()
-            ordered_cells = sorted(
+            anchor = min(
                 (
                     (x, y)
                     for y in range(self.game_map.height)
@@ -832,10 +844,10 @@ class Simulation:
                     cell[1],
                     cell[0],
                 ),
+                default=None,
             )
-            if not ordered_cells:
+            if anchor is None:
                 raise ValueError("gathering point has no passable space")
-            anchor = ordered_cells[0]
             reachable = {anchor}
             frontier = deque([anchor])
             while frontier:

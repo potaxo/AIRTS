@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
 from airts.geometry import Point
-from airts.navigation.pathfinding import Pathfinder, PathfindingError, RoutingService, find_path
+from airts.navigation.pathfinding import (
+    Pathfinder,
+    PathfindingError,
+    RoutingService,
+    find_path,
+    passable_segment_cells,
+)
 from airts.world.map_model import Terrain, load_example_map, load_map_data
 
 
@@ -159,3 +167,66 @@ def test_five_hundred_military_obstacles_are_costly_but_not_an_impassable_wall()
     assert len(military_cells) == 500
     assert path.cells[-1] == (70, 10)
     assert any(cell in military_cells for cell in path.cells)
+
+
+@pytest.mark.parametrize("terrain", ("grass", "road", "forest"))
+def test_uniform_multi_goal_fields_match_optimal_costs_and_stable_goal_ties(terrain: str) -> None:
+    game_map = load_map_data(
+        {
+            "id": "multi_goal",
+            "name": "Multi-goal routing",
+            "width": 8,
+            "height": 7,
+            "terrain": {"default": terrain, "rectangles": [[3, 0, 1, 5, "water"]]},
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.5, 0.5]}],
+        }
+    )
+    blocked = frozenset({(5, 3), (5, 4)})
+    goals = (Point(6.5, 1.5), Point(1.5, 5.5), Point(6.5, 5.5))
+    pathfinder = Pathfinder(game_map)
+    for y in range(game_map.height):
+        for x in range(game_map.width):
+            if not game_map.is_cell_passable((x, y)) or (x, y) in blocked:
+                continue
+            start = Point(x + 0.5, y + 0.5)
+            optimal = min(
+                (find_path(game_map, start, goal, blocked).cost, goal.y, goal.x) for goal in goals
+            )
+            goal, path = pathfinder.find_path_to_any(start, goals, blocked)
+            assert (path.cost, goal.y, goal.x) == optimal
+            assert path.cells[0] == (x, y)
+            assert path.cells[-1] == game_map.cell_for(goal)
+            assert blocked.isdisjoint(path.cells)
+            assert all(
+                abs(first[0] - second[0]) + abs(first[1] - second[1]) == 1
+                for first, second in pairwise(path.cells)
+            )
+            assert pathfinder.find_path_to_any(start, tuple(reversed(goals)), blocked) == (
+                goal,
+                path,
+            )
+    assert pathfinder.field_build_count == 1
+
+
+def test_segment_clearance_preserves_corner_obstacles_and_sampled_cell_order() -> None:
+    game_map = load_map_data(
+        {
+            "id": "segment",
+            "name": "Segment clearance",
+            "width": 5,
+            "height": 5,
+            "terrain": {"default": "grass", "rectangles": [[2, 1, 1, 1, "water"]]},
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.5, 0.5]}],
+        }
+    )
+    assert passable_segment_cells(game_map, Point(0.5, 2.5), Point(4.5, 2.5)) == tuple(
+        (x, 2) for x in range(5)
+    )
+    assert passable_segment_cells(game_map, Point(1.5, 1.5), Point(3.5, 3.5)) is None
+    assert (
+        passable_segment_cells(game_map, Point(0.5, 2.5), Point(4.5, 2.5), frozenset({(3, 2)}))
+        is None
+    )
+    assert passable_segment_cells(game_map, Point(0.1, 0.1), Point(0.9, 0.9)) == ((0, 0),)
+    with pytest.raises(ValueError, match="point outside map"):
+        passable_segment_cells(game_map, Point(0.5, 0.5), Point(5.5, 0.5))

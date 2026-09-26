@@ -20,10 +20,10 @@ from airts.automations import (
 from airts.events import EventType
 from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
 from airts.navigation.collision import SETTLED_FORMATION_SPACING, collision_radius
-from airts.navigation.pathfinding import PathfindingError, PathResult
+from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import UnitState
-from airts.world.map_model import Cell, EntityKind
+from airts.world.map_model import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -112,8 +112,7 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
         try:
             if area_unit_radius is not None:
                 assert formation_anchor is not None
-                path = _formation_path(
-                    simulation,
+                path = simulation._routes.formation_path(
                     entity.position,
                     target,
                     formation_anchor,
@@ -133,40 +132,6 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
             )
             return
         simulation._start_path(entity, target, path, automation.automation_id, UnitState.PATROLLING)
-
-
-def _formation_path(
-    simulation: Simulation,
-    start: Point,
-    target: Point,
-    anchor: Point,
-    building_cells: frozenset[Cell],
-    *,
-    branch_distance: int,
-) -> PathResult:
-    shared = simulation._routes.shared_path(start, anchor, building_cells)
-    if anchor == target:
-        return shared
-    target_cell = simulation.game_map.cell_for(target)
-    branch_index = next(
-        (
-            index
-            for index, cell in enumerate(shared.cells)
-            if abs(cell[0] - target_cell[0]) + abs(cell[1] - target_cell[1]) <= branch_distance
-        ),
-        len(shared.cells) - 1,
-    )
-    junction = start if branch_index == 0 else shared.waypoints[branch_index - 1]
-    local = simulation._routes.local_path(junction, target, building_cells)
-    prefix_cost = sum(
-        simulation.game_map.terrain_at_cell(cell).movement_cost
-        for cell in shared.cells[1 : branch_index + 1]
-    )
-    return PathResult(
-        shared.cells[: branch_index + 1] + local.cells[1:],
-        shared.waypoints[:branch_index] + local.waypoints,
-        prefix_cost + local.cost,
-    )
 
 
 def drive_defend(simulation: Simulation, automation: Automation) -> None:
@@ -281,13 +246,16 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             entity.position.y - formation_center.y
         ) ** 2
         target = simulation.entities.get(entity.attack_target_id or "")
-        if target is not None and target.owner_id != automation.owner_id:
-            if target.position.distance_to(station) <= simulation.DEFEND_PURSUIT_RADIUS:
+        if entity.pursue_target:
+            if (
+                target is not None
+                and target.owner_id != automation.owner_id
+                and target.position.distance_to(station) <= simulation.DEFEND_PURSUIT_RADIUS
+            ):
                 entity.state = UnitState.ATTACKING
                 continue
             entity.last_attacker_id = None
             entity.last_attacked_tick = None
-        if entity.attack_target_id is not None:
             entity.attack_target_id = None
             entity.pursue_target = False
             entity.path.clear()
@@ -361,8 +329,12 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             if saturated_formation
             else station
         )
-        if saturated_formation and _straight_route_is_clear(
-            simulation, entity.position, route_station, building_cells
+        if (
+            saturated_formation
+            and passable_segment_cells(
+                simulation.game_map, entity.position, route_station, building_cells
+            )
+            is not None
         ):
             start_cell = simulation.game_map.cell_for(entity.position)
             destination_cell = simulation.game_map.cell_for(route_station)
@@ -378,8 +350,7 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
         else:
             try:
                 if station_anchor is not None:
-                    path = _formation_path(
-                        simulation,
+                    path = simulation._routes.formation_path(
                         entity.position,
                         route_station,
                         station_anchor,
@@ -426,38 +397,6 @@ def _defend_arrival_point(
     )
 
 
-def _straight_route_is_clear(
-    simulation: Simulation,
-    start: Point,
-    end: Point,
-    blocked: frozenset[Cell],
-) -> bool:
-    """Check a short final formation segment without rebuilding an A* route."""
-
-    sample_count = max(1, int(start.distance_to(end) * 4))
-    previous = simulation.game_map.cell_for(start)
-    for index in range(1, sample_count + 1):
-        fraction = index / sample_count
-        point = Point(
-            start.x + (end.x - start.x) * fraction,
-            start.y + (end.y - start.y) * fraction,
-        )
-        cell = simulation.game_map.cell_for(point)
-        if cell == previous:
-            continue
-        if cell[0] != previous[0] and cell[1] != previous[1]:
-            corners = ((cell[0], previous[1]), (previous[0], cell[1]))
-            if any(
-                not simulation.game_map.is_cell_passable(corner) or corner in blocked
-                for corner in corners
-            ):
-                return False
-        if not simulation.game_map.is_cell_passable(cell) or cell in blocked:
-            return False
-        previous = cell
-    return True
-
-
 def _shared_defend_entity_ids(
     simulation: Simulation,
     automation: Automation,
@@ -500,9 +439,6 @@ def _position_has_formation_clearance(
 
 def settle_automation_formations(simulation: Simulation) -> None:
     """Recognize safe physical arrivals without teleporting bodies or rematching identities."""
-    positions = {
-        key: entity.position for key, entity in simulation.entities.items() if entity.is_movable
-    }
     index: SpatialIndex | None = None
     for automation in sorted(simulation.automations.values(), key=lambda item: item.automation_id):
         if automation.kind is not AutomationKind.DEFEND or automation.status.terminal:
@@ -514,7 +450,14 @@ def settle_automation_formations(simulation: Simulation) -> None:
         if simulation.tick - automation.created_tick < simulation.DEFEND_FORMATION_SETTLE_TICKS:
             continue
         if index is None:
-            index = SpatialIndex(positions, bucket_size=1.0)
+            index = SpatialIndex(
+                {
+                    key: entity.position
+                    for key, entity in simulation.entities.items()
+                    if entity.is_movable
+                },
+                bucket_size=1.0,
+            )
         center = target_center(parameters.target)
         radius = parameters.assembly_radius + simulation.DEFEND_FORMATION_TOLERANCE
         for entity_id in automation.entity_ids:
@@ -726,6 +669,7 @@ def coordinate_shared_defend_stations(
         if automation.kind is AutomationKind.DEFEND
         and automation.owner_id == owner_id
         and not automation.status.terminal
+        and automation.status not in {AutomationStatus.PROPOSED, AutomationStatus.VALIDATING}
         and isinstance(automation.parameters, DefendParameters)
         and automation.parameters.target == target
     )

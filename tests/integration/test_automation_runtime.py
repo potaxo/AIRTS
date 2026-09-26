@@ -478,3 +478,45 @@ def test_repair_validation_fails_without_supported_friendly_building() -> None:
 
     assert not result.accepted
     assert result.reason == "NO_REPAIR_DESTINATION"
+
+
+@pytest.mark.parametrize("replacement_ids", (("unit_0", "unit_1", "unit_2"), ("unit_0",)))
+@pytest.mark.parametrize("gathering_point", (False, True))
+def test_repeating_expanded_defend_preserves_stations_during_ownership_transfer(
+    replacement_ids: tuple[str, ...],
+    gathering_point: bool,
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "repeat_defend",
+                "name": "Repeat expanded defense",
+                "width": 20,
+                "height": 20,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": f"unit_{index}", "kind": "heavy_tank", "position": [2.5 + index, 2.5]}
+                    for index in range(3)
+                ],
+            }
+        )
+    )
+    target = rectangle_region(Point(12, 12), Point(13, 13))
+    assert simulation.execute(
+        CreateDefendCommand(("unit_0", "unit_1", "unit_2"), target, gathering_point=True)
+    ).accepted
+    for _ in range(3):
+        result = simulation.execute(
+            CreateDefendCommand(replacement_ids, target, gathering_point=gathering_point)
+        )
+        assert result.accepted
+        stations = {}
+        for automation in simulation.automations.values():
+            if automation.status.terminal:
+                continue
+            assert isinstance(automation.parameters, DefendParameters)
+            assert set(automation.parameters.stations) == set(automation.entity_ids)
+            stations.update(automation.parameters.stations)
+        assert len(stations) == len(set(stations.values())) == 3
+        assert all(simulation.assignments[key] == result.automation_id for key in replacement_ids)
+    simulation.advance(10)
