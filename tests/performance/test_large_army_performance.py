@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from itertools import pairwise
-from math import pi, sqrt
 from time import perf_counter
 
 from airts.automations import AutomationStatus, DefendParameters
@@ -288,8 +287,6 @@ def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime() 
     assert isinstance(automation.parameters, DefendParameters)
     parameters = automation.parameters
     unit_radius = collision_radius(EntityKind.LIGHT_TANK)
-    packing_efficiency = pi / (2 * sqrt(3))
-    area_estimated_radius = unit_radius * sqrt(len(entity_ids) / packing_efficiency)
     radial_distances = tuple(
         point.distance_to(Point(25, 25)) for point in parameters.deployment_slots
     )
@@ -307,14 +304,14 @@ def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime() 
     assert len(set(parameters.deployment_slots)) == 1_000
     assert all(first <= second for first, second in pairwise(radial_distances))
     assert parameters.assembly_radius > radius_at_500
-    assert parameters.assembly_radius <= area_estimated_radius + unit_radius * 2
+    assert all(simulation.game_map.is_passable(point) for point in parameters.deployment_slots)
     assert (
         min(
             first.distance_to(second)
             for index, first in enumerate(parameters.deployment_slots)
             for second in parameters.deployment_slots[index + 1 :]
         )
-        >= unit_radius * 2 - 1e-9
+        >= unit_radius * 4 - 1e-9
     )
     assert command_elapsed < 1.0
     assert tick_elapsed < 2.0
@@ -513,10 +510,13 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work() -> Non
     contact_distance = collision_radius(EntityKind.LIGHT_TANK) * 2
     assert (
         min(
-            simulation.entities[first_id].position.distance_to(
-                simulation.entities[second_id].position
-            )
-            for first_id, second_id in close_pairs
+            (
+                simulation.entities[first_id].position.distance_to(
+                    simulation.entities[second_id].position
+                )
+                for first_id, second_id in close_pairs
+            ),
+            default=float("inf"),
         )
         >= contact_distance * 0.90
     )

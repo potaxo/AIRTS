@@ -46,7 +46,7 @@ from airts.world.occupancy import OccupancyError, OccupancyGrid
 from airts.world.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v8"
+SAVE_SCHEMA = "airts-save-v9"
 
 
 class PersistenceError(ValueError):
@@ -74,7 +74,7 @@ def load_simulation(path: str | Path) -> Simulation:
 
 def load_simulation_data(raw_data: object) -> Simulation:
     document = _mapping(raw_data, "save document")
-    legacy_movement = document.get("schema") == "airts-save-v7"
+    legacy_movement = document.get("schema") in {"airts-save-v7", "airts-save-v8"}
     if document.get("schema") != SAVE_SCHEMA and not legacy_movement:
         raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
     try:
@@ -173,11 +173,21 @@ def load_simulation_data(raw_data: object) -> Simulation:
     }
     if not set(simulation._blocked_ticks).issubset(simulation.entities):
         raise PersistenceError("blocked_ticks references an unknown entity")
-    _load_traffic_reservations(state.get("traffic_reservations"), simulation)
+    if legacy_movement:
+        _validate_legacy_traffic(state.get("traffic_reservations"), simulation)
+        for entity in simulation.entities.values():
+            entity.congestion_stopped = False
+            entity.no_progress_ticks = 0
+            entity.progress_target = entity.path[0] if entity.path else None
+            entity.progress_distance = (
+                entity.position.distance_to(entity.path[0]) if entity.path else None
+            )
+    elif state.get("traffic_reservations") is not None:
+        raise PersistenceError("traffic reservations are unsupported by save v9")
     return simulation
 
 
-def _load_traffic_reservations(raw_data: object, simulation: Simulation) -> None:
+def _validate_legacy_traffic(raw_data: object, simulation: Simulation) -> None:
     if raw_data is None:
         return
     data = _mapping(raw_data, "state.traffic_reservations")
@@ -206,7 +216,6 @@ def _load_traffic_reservations(raw_data: object, simulation: Simulation) -> None
             raise PersistenceError(f"traffic reservation is obstructed: {entity_id}")
         slots[entity_id] = slot
         occupied[slot] = entity_id
-    simulation._open_force_slots = (spacing, slots, occupied)
 
 
 def _load_spatial(raw_data: object, simulation: Simulation, tick: int) -> SpatialStore:

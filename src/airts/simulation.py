@@ -16,6 +16,7 @@ from airts.automations import (
     ProductionParameters,
     ReinforcementParameters,
     RepairParameters,
+    assign_formation_slots,
     target_center,
 )
 from airts.commands import (
@@ -47,9 +48,10 @@ from airts.commands import (
 )
 from airts.control import ControlAuthority
 from airts.events import EventLog, EventType
-from airts.geometry import Point, PolygonRegion, PolylineTarget, SpatialTarget
-from airts.navigation.collision import SETTLED_FORMATION_SPACING
+from airts.geometry import Point, PointTarget, PolygonRegion, PolylineTarget, SpatialTarget
+from airts.navigation.collision import collision_radius, warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
+from airts.navigation.spatial_index import warm_spatial_index
 from airts.spatial import GroundingSelection, SpatialStore
 from airts.systems import (
     automation_lifecycle,
@@ -72,8 +74,6 @@ from airts.world.occupancy import OccupancyGrid
 from airts.world.projectiles import Projectile, ProjectileTrace
 from airts.world.visibility import VisibilitySystem
 
-type LocalCollider = tuple[str, Point, float, bool]
-
 
 class Simulation:
     LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
@@ -82,22 +82,17 @@ class Simulation:
     NO_PROGRESS_YIELD_TICKS = 30
     DESTINATION_REPATH_TICKS = 50
     MIN_PROGRESS_DISTANCE = 0.02
-    CONGESTION_RETRY_TICKS = 5
-    BLOCKED_RECOVERY_BUDGET = 4
     DEFEND_RESPONSE_RADIUS = 4.0
     DEFEND_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
     DEFEND_FORMATION_TOLERANCE = 1.0
-    DEFEND_FORMATION_SETTLE_TICKS = 500
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
     GATHERING_PATH_BUDGET = 4
     AUTOMATION_ROUTE_BUDGET = 16
     TOTAL_AUTOMATION_ROUTE_BUDGET = 32
-    STALLED_REPATH_BUDGET = 4
     COMBAT_PATH_BUDGET = 16
-    MILITARY_OBSTACLE_PATH_PENALTY = 1.5
     PRODUCTION_BUILD_TICKS = 5
     CONSTRUCTION_BUILD_TICKS = 20
     CONSTRUCTION_REQUIRED_VALUE = 100.0
@@ -121,8 +116,11 @@ class Simulation:
             # simulation or presentation p99 stall several ticks later.
             collect_garbage()
         self.game_map = game_map
-        self._all_terrain_passable = all(
-            terrain.passable for row in game_map.terrain for terrain in row
+        self._terrain_obstacles = frozenset(
+            (x, y)
+            for y, row in enumerate(game_map.terrain)
+            for x, terrain in enumerate(row)
+            if not terrain.passable
         )
         self.random_seed = random_seed
         self.ambient_enemy_spawns = ambient_enemy_spawns
@@ -160,19 +158,8 @@ class Simulation:
         self._command_history: list[dict[str, object]] = []
         self._movement_blocked: set[str] = set()
         self._blocked_ticks: dict[str, int] = {}
-        self._push_events_this_tick: set[str] = set()
-        self._stalled_repaths_this_tick = 0
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
-        self._blocked_recoveries_this_tick = 0
-        self._open_force_slots: (
-            tuple[
-                float,
-                dict[str, tuple[int, int]],
-                dict[tuple[int, int], str],
-            ]
-            | None
-        ) = None
         self._building_cells_cache: frozenset[Cell] | None = None
         self._routes = RoutingService(
             game_map,
@@ -181,7 +168,8 @@ class Simulation:
         )
         self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
         self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
-        self._waypoint_corridor_cache: dict[tuple[Cell, Cell], bool] = {}
+        warm_collision_kernel()
+        warm_spatial_index()
         self._update_visibility()
 
     @property
@@ -303,17 +291,13 @@ class Simulation:
             raise ValueError("tick count cannot be negative")
         for _ in range(ticks):
             self.tick += 1
-            self._push_events_this_tick.clear()
-            self._stalled_repaths_this_tick = 0
             self._routes.begin_tick()
             self._movement_step_attempt_count = 0
             self._collision_pair_check_count = 0
-            self._blocked_recoveries_this_tick = 0
             economy_system.generate_income(self)
             economy_system.spawn_ambient_enemy(self)
             automation_runtime.drive_automations(self)
             movement_system.move_entities(self)
-            automation_runtime.settle_automation_formations(self)
             combat_system.drive_projectiles(self)
             combat_system.drive_combat(self)
             self._update_visibility()
@@ -457,19 +441,161 @@ class Simulation:
             "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
             "movement_blocked": sorted(self._movement_blocked),
             "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
-            "traffic_reservations": (
-                None
-                if self._open_force_slots is None
-                else {
-                    "spacing": self._open_force_slots[0],
-                    "slots": {
-                        entity_id: list(slot)
-                        for entity_id, slot in sorted(self._open_force_slots[1].items())
-                        if entity_id in self.entities
-                    },
-                }
-            ),
         }
+
+    @staticmethod
+    def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
+        movement_system.reset_movement_liveness(entity, clear_stop=clear_stop)
+
+    def _skip_crowded_waypoints(self, entity: Entity) -> None:
+        movement_system.skip_crowded_waypoints(self, entity)
+
+    def _start_path(
+        self, entity: Entity, target: Point, path: PathResult, source: str, state: UnitState
+    ) -> None:
+        movement_system.start_path(self, entity, target, path, source, state)
+
+    def _refresh_gathering_formation(self, automation: Automation) -> None:
+        automation_runtime.refresh_gathering_formation(self, automation)
+
+    def _invalidate_navigation_cache(self) -> None:
+        self._building_cells_cache = None
+        self._routes.clear()
+        self._gathering_slot_cache.clear()
+        self._gathering_reachable_cache.clear()
+
+    def _allocate_destinations(
+        self, entity_ids: tuple[str, ...], target: Point
+    ) -> dict[str, Point]:
+        selected = frozenset(entity_ids)
+        blocked = self._building_cells() | frozenset(
+            self.game_map.cell_for(e.position)
+            for key, e in self.entities.items()
+            if key not in selected and e.is_movable and e.state is UnitState.HOLDING
+        )
+        center = Point(
+            sum(self.entities[key].position.x for key in entity_ids) / len(entity_ids),
+            sum(self.entities[key].position.y for key in entity_ids) / len(entity_ids),
+        )
+        # Fit the existing shape at a map edge instead of reshuffling every unit.
+        members = [self.entities[key] for key in entity_ids]
+        dx = max(
+            max(collision_radius(e.kind) - e.position.x for e in members),
+            min(
+                target.x - center.x,
+                min(self.game_map.width - collision_radius(e.kind) - e.position.x for e in members),
+            ),
+        )
+        dy = max(
+            max(collision_radius(e.kind) - e.position.y for e in members),
+            min(
+                target.y - center.y,
+                min(
+                    self.game_map.height - collision_radius(e.kind) - e.position.y for e in members
+                ),
+            ),
+        )
+        translated = {e.entity_id: Point(e.position.x + dx, e.position.y + dy) for e in members}
+        if all(
+            self.game_map.is_passable(point)
+            and self.game_map.cell_for(point) not in blocked
+            and movement_system.position_clear(
+                point,
+                collision_radius(self.entities[key].kind),
+                self.game_map.width,
+                self.game_map.height,
+                self._terrain_obstacles | self._building_cells(),
+            )
+            for key, point in translated.items()
+        ):
+            return translated
+        slots = self._gathering_slots(
+            PointTarget(target),
+            self.game_map.width * self.game_map.height,
+            max(collision_radius(self.entities[key].kind) for key in entity_ids),
+            require_count=False,
+        )
+        available = tuple(p for p in slots if self.game_map.cell_for(p) not in blocked)[
+            : len(entity_ids)
+        ]
+        if len(available) != len(entity_ids):
+            raise PathfindingError("INSUFFICIENT_DESTINATIONS")
+        if len(entity_ids) == 1 and self.game_map.cell_for(target) not in blocked:
+            available = (target,)
+        return assign_formation_slots(
+            {key: self.entities[key].position for key in entity_ids}, available, target
+        )
+
+    def _gathering_slots(
+        self, target: SpatialTarget, count: int, unit_radius: float, *, require_count: bool = True
+    ) -> tuple[Point, ...]:
+        if count <= 0:
+            return ()
+        key = (target, unit_radius)
+        cached = self._gathering_slot_cache.get(key)
+        if cached is None:
+            center = target_center(target)
+            blocked = self._building_cells()
+            candidates = [
+                (x, y)
+                for y in range(self.game_map.height)
+                for x in range(self.game_map.width)
+                if self.game_map.is_cell_passable((x, y)) and (x, y) not in blocked
+            ]
+            if not candidates:
+                raise ValueError("gathering point has no passable space")
+            anchor = min(
+                candidates,
+                key=lambda c: (
+                    (c[0] + 0.5 - center.x) ** 2 + (c[1] + 0.5 - center.y) ** 2,
+                    c[1],
+                    c[0],
+                ),
+            )
+            reachable = {anchor}
+            frontier = deque([anchor])
+            while frontier:
+                x, y = frontier.popleft()
+                for cell in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
+                    if (
+                        cell not in reachable
+                        and cell not in blocked
+                        and self.game_map.is_cell_passable(cell)
+                    ):
+                        reachable.add(cell)
+                        frontier.append(cell)
+            # Leave a unit-width aisle between settled neighbors.
+            spacing = unit_radius * 4 + 0.12
+            row_height = spacing * sqrt(3) / 2
+            points = []
+            for row in range(
+                floor(-center.y / row_height), ceil((self.game_map.height - center.y) / row_height)
+            ):
+                station_y = center.y + row * row_height
+                offset = (row % 2) * spacing / 2
+                for column in range(
+                    floor((-center.x - offset) / spacing),
+                    ceil((self.game_map.width - center.x - offset) / spacing),
+                ):
+                    point = Point(center.x + column * spacing + offset, station_y)
+                    if (
+                        self.game_map.contains(point)
+                        and self.game_map.cell_for(point) in reachable
+                        and movement_system.position_clear(
+                            point,
+                            unit_radius,
+                            self.game_map.width,
+                            self.game_map.height,
+                            self._terrain_obstacles | blocked,
+                        )
+                    ):
+                        points.append(point)
+            cached = tuple(sorted(points, key=lambda p: (p.distance_to(center), p.y, p.x)))
+            self._gathering_slot_cache[key] = cached
+            self._gathering_reachable_cache[target] = frozenset(reachable)
+        if require_count and count > len(cached):
+            raise ValueError("gathering point has insufficient map space")
+        return cached[:count]
 
     def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
         return spatial_commands.validate_geometry(self, target)
@@ -505,13 +631,6 @@ class Simulation:
 
     def _drive_economy(self, automation: Automation) -> None:
         economy_system.drive_economy(self, automation)
-
-    @staticmethod
-    def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
-        movement_system.reset_movement_liveness(entity, clear_stop=clear_stop)
-
-    def _skip_crowded_waypoints(self, entity: Entity) -> None:
-        movement_system.skip_crowded_waypoints(self, entity)
 
     def _activate(
         self,
@@ -559,9 +678,6 @@ class Simulation:
         automation_lifecycle.assign(
             self, entity_id, automation, authority=authority, suspend=suspend
         )
-
-    def _refresh_gathering_formation(self, automation: Automation) -> None:
-        automation_runtime.refresh_gathering_formation(self, automation)
 
     def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
         automation_lifecycle.manual_override_many(self, entity_ids)
@@ -661,151 +777,8 @@ class Simulation:
     ) -> tuple[Automation | None, ValidationFailure | None]:
         return automation_lifecycle.owned_automation(self, automation_id, owner_id)
 
-    def _start_path(
-        self,
-        entity: Entity,
-        destination: Point,
-        path: PathResult,
-        source: str,
-        state: UnitState,
-    ) -> None:
-        self._movement_blocked.discard(entity.entity_id)
-        self._blocked_ticks.pop(entity.entity_id, None)
-        self._reset_movement_liveness(entity, clear_stop=True)
-        entity.path = list(
-            movement_system.simplify_waypoints(
-                self,
-                entity.position,
-                path.waypoints,
-                path.cost,
-            )
-            if source in {"human", "combat"}
-            else path.waypoints
-        )
-        entity.path_cost = path.cost
-        entity.move_target = destination if entity.path else None
-        entity.state = state if entity.path else self._state_for_assignment(entity.entity_id)
-        if entity.path:
-            entity.progress_target = entity.path[0]
-            entity.progress_distance = entity.position.distance_to(entity.path[0])
-        self.events.record(
-            self.tick,
-            EventType.PATH_COMPUTED,
-            entity.entity_id,
-            destination=[destination.x, destination.y],
-            cell_count=len(path.cells),
-            cost=path.cost,
-            source=source,
-        )
-        if entity.path:
-            self.events.record(
-                self.tick,
-                EventType.MOVEMENT_STARTED,
-                entity.entity_id,
-                target=[destination.x, destination.y],
-                source=source,
-            )
-
     def _state_for_assignment(self, entity_id: str) -> UnitState:
         return automation_lifecycle.state_for_assignment(self, entity_id)
-
-    def _allocate_destinations(
-        self, entity_ids: tuple[str, ...], target: Point
-    ) -> dict[str, Point]:
-        selected = frozenset(entity_ids)
-        blocked = set(self.occupancy.blocked_cells(selected))
-        blocked.update(self._reserved_destination_cells(selected))
-        target_cell = self.game_map.cell_for(target)
-        frontier = deque([target_cell])
-        visited = {target_cell}
-        candidates: list[Cell] = []
-        while frontier and len(candidates) < len(entity_ids):
-            cell = frontier.popleft()
-            if self.game_map.is_cell_passable(cell) and cell not in blocked:
-                candidates.append(cell)
-            for neighbor in self._neighbor_cells(cell):
-                if neighbor not in visited and self.game_map.contains_cell(neighbor):
-                    visited.add(neighbor)
-                    frontier.append(neighbor)
-        if len(candidates) < len(entity_ids):
-            raise PathfindingError("INSUFFICIENT_DESTINATIONS")
-        center = Point(
-            sum(self.entities[entity_id].position.x for entity_id in entity_ids) / len(entity_ids),
-            sum(self.entities[entity_id].position.y for entity_id in entity_ids) / len(entity_ids),
-        )
-        direction_x = target.x - center.x
-        direction_y = target.y - center.y
-        length = max((direction_x * direction_x + direction_y * direction_y) ** 0.5, 1.0)
-        direction_x /= length
-        direction_y /= length
-        ordered_entities = sorted(
-            entity_ids,
-            key=lambda entity_id: (
-                -(
-                    (self.entities[entity_id].position.x - center.x) * direction_x
-                    + (self.entities[entity_id].position.y - center.y) * direction_y
-                ),
-                entity_id,
-            ),
-        )
-        ordered_candidates = sorted(
-            candidates,
-            key=lambda cell: (
-                -(
-                    (cell[0] + 0.5 - target.x) * direction_x
-                    + (cell[1] + 0.5 - target.y) * direction_y
-                ),
-                abs(
-                    (cell[0] + 0.5 - target.x) * direction_y
-                    - (cell[1] + 0.5 - target.y) * direction_x
-                ),
-                abs(cell[0] + 0.5 - target.x) + abs(cell[1] + 0.5 - target.y),
-                cell[1],
-                cell[0],
-            ),
-        )
-        destinations: dict[str, Point] = {}
-        for entity_id, cell in zip(ordered_entities, ordered_candidates, strict=True):
-            destinations[entity_id] = (
-                target if cell == target_cell else Point(cell[0] + 0.5, cell[1] + 0.5)
-            )
-        return destinations
-
-    def _reserved_destination_cells(self, excluding: frozenset[str]) -> set[Cell]:
-        return {
-            self.game_map.cell_for(entity.move_target)
-            for entity_id, entity in self.entities.items()
-            if entity_id not in excluding and entity.move_target is not None
-        }
-
-    def _blocked_cells_for_mover(
-        self, entity_id: str, excluding: frozenset[str]
-    ) -> frozenset[Cell]:
-        del entity_id, excluding
-        return self._building_cells()
-
-    def _nearest_unreserved_destination(self, entity: Entity, target: Point) -> Point | None:
-        blocked = set(self.occupancy.blocked_cells(frozenset({entity.entity_id})))
-        blocked.update(self._reserved_destination_cells(frozenset({entity.entity_id})))
-        target_cell = self.game_map.cell_for(target)
-        frontier = deque([target_cell])
-        visited = {target_cell}
-        while frontier:
-            cell = frontier.popleft()
-            if self.game_map.is_cell_passable(cell) and cell not in blocked:
-                point = Point(cell[0] + 0.5, cell[1] + 0.5)
-                if all(
-                    other_id == entity.entity_id
-                    or not other.is_movable
-                    or point.distance_to(other.position) >= 0.9
-                    for other_id, other in self.entities.items()
-                ):
-                    return point
-            for neighbor in self._neighbor_cells(cell):
-                if neighbor not in visited and self.game_map.contains_cell(neighbor):
-                    visited.add(neighbor)
-                    frontier.append(neighbor)
-        return None
 
     def _building_cells(self) -> frozenset[Cell]:
         if self._building_cells_cache is None:
@@ -817,107 +790,12 @@ class Simulation:
             )
         return self._building_cells_cache
 
-    def _gathering_slots(
-        self,
-        target: SpatialTarget,
-        count: int,
-        unit_radius: float,
-    ) -> tuple[Point, ...]:
-        if count <= 0:
-            return ()
-        if unit_radius <= 0:
-            raise ValueError("gathering unit radius must be positive")
-        cache_key = (target, unit_radius)
-        cached = self._gathering_slot_cache.get(cache_key)
-        if cached is None:
-            center = target_center(target)
-            blocked = self._building_cells()
-            anchor = min(
-                (
-                    (x, y)
-                    for y in range(self.game_map.height)
-                    for x in range(self.game_map.width)
-                    if self.game_map.is_cell_passable((x, y)) and (x, y) not in blocked
-                ),
-                key=lambda cell: (
-                    (cell[0] + 0.5 - center.x) ** 2 + (cell[1] + 0.5 - center.y) ** 2,
-                    cell[1],
-                    cell[0],
-                ),
-                default=None,
-            )
-            if anchor is None:
-                raise ValueError("gathering point has no passable space")
-            reachable = {anchor}
-            frontier = deque([anchor])
-            while frontier:
-                cell = frontier.popleft()
-                for neighbor in self._neighbor_cells(cell):
-                    if (
-                        neighbor not in reachable
-                        and self.game_map.contains_cell(neighbor)
-                        and self.game_map.is_cell_passable(neighbor)
-                        and neighbor not in blocked
-                    ):
-                        reachable.add(neighbor)
-                        frontier.append(neighbor)
-            # Keep settled formations outside the solver's 0.03 contact-pressure margin. Exact
-            # diameter packing makes a stationary 1,000-unit formation pay dense collision work
-            # forever even though every destination is unique.
-            packing_radius = (
-                max(unit_radius + 0.02, SETTLED_FORMATION_SPACING / 2)
-                if unit_radius <= 0.31
-                else unit_radius + 0.02
-            )
-            horizontal_spacing = packing_radius * 2
-            vertical_spacing = sqrt(3) * packing_radius
-            minimum_row = floor(-center.y / vertical_spacing) - 1
-            maximum_row = ceil((self.game_map.height - center.y) / vertical_spacing) + 1
-            candidates: list[Point] = []
-            for row in range(minimum_row, maximum_row + 1):
-                y = center.y + row * vertical_spacing
-                if not 0 <= y < self.game_map.height:
-                    continue
-                row_offset = packing_radius if row % 2 else 0.0
-                minimum_column = floor((-center.x - row_offset) / horizontal_spacing) - 1
-                maximum_column = (
-                    ceil((self.game_map.width - center.x - row_offset) / horizontal_spacing) + 1
-                )
-                for column in range(minimum_column, maximum_column + 1):
-                    x = center.x + row_offset + column * horizontal_spacing
-                    if not 0 <= x < self.game_map.width:
-                        continue
-                    point = Point(x, y)
-                    if self.game_map.cell_for(point) in reachable:
-                        candidates.append(point)
-            cached = tuple(
-                sorted(
-                    candidates,
-                    key=lambda point: (
-                        point.distance_to(center),
-                        point.y,
-                        point.x,
-                    ),
-                )
-            )
-            self._gathering_slot_cache[cache_key] = cached
-            self._gathering_reachable_cache[target] = frozenset(reachable)
-        if count > len(cached):
-            raise ValueError("gathering point has insufficient physical map space")
-        return cached[:count]
-
-    def _invalidate_navigation_cache(self) -> None:
-        self._open_force_slots = None
-        self._building_cells_cache = None
-        self._routes.clear()
-        self._gathering_slot_cache.clear()
-        self._gathering_reachable_cache.clear()
-        self._waypoint_corridor_cache.clear()
-
     def _cells_at(self, entity: Entity, position: Point) -> frozenset[Cell]:
         width, height = entity.kind.profile.footprint
         origin_x = int(position.x)
         origin_y = int(position.y)
+        if width == height == 1:
+            return frozenset(((origin_x, origin_y),))
         return frozenset(
             (x, y)
             for y in range(origin_y, origin_y + height)
@@ -976,20 +854,9 @@ class Simulation:
         )
         return CommandResult(False, failure.code)
 
-    @staticmethod
-    def _neighbor_cells(cell: Cell) -> tuple[Cell, ...]:
-        x, y = cell
-        return ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1))
-
 
 def _reason(error: Exception) -> str:
     return str(error).upper().replace(" ", "_")
-
-
-def _squared_distance(first: Point, second: Point) -> float:
-    offset_x = first.x - second.x
-    offset_y = first.y - second.y
-    return offset_x * offset_x + offset_y * offset_y
 
 
 def _patrol_parameters(automation: Automation) -> PatrolParameters:

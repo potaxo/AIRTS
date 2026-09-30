@@ -41,28 +41,31 @@ and economy. Reinforcement transfers eligible units and fails when its target is
 
 ## Movement and combat
 
-All static move/patrol/defend/repair/production/combat routes use shared deterministic routing with
-bounded fields and fair per-controller/global budgets. Dynamic unit-penalty replans are uncached.
-Weighted four-neighbor reachability, terrain/building clearance, and speed bounds remain required.
-Patrol groups follow the same cycle direction. Small defenses use exact stations; undersized targets
-expand into unique reachable holding space. Same-owner, same-target defenses coordinate membership
-and retain valid stations on growth; contraction can reassign outer survivors into compact slots.
-Line defenses cover the full polyline. Glow follows the authoritative assembly radius.
-Shared-station reconciliation excludes proposed/validating defenses so an ownership transfer
-cannot erase the new order's station plan before activation.
+The movement replacement covers routing, local collision, destination allocation, and patrol/defend
+dispatch. The public `Simulation` facade and shared command schemas remain unchanged. There is one
+movement controller for all army sizes; the previous traffic lattice and reservation controller are
+removed.
 
-Current movement uses continuous steering/push for small forces and topology-sensitive manual
-traffic, with coherent translation/reservation slots for large forces. Idle friendlies may yield;
-held units, stationary enemies, and docked defenders are anchors. Reservations retain surviving
-identities while spacing is valid; topology changes invalidate unsafe reservations. A reservation
-does not bypass physical collision: ordered approaches with persistent lack of progress use local
-steering after the existing 30-tick stall threshold, and a faster follower
-slows without stopping a leader that is moving away. Units unable to acquire a traffic slot retain
-their orders and report `TRAFFIC_CAPACITY` while waiting for space. Queueing must
-not trigger unbounded replanning or cut across water. Large expanded defenses may adopt valid,
-pressure-free arrival positions inside their envelope; small groups retain exact stations.
-[Movement tests](../../tests/movement/test_swarm_movement.py) and
-[crowd contracts](performance.md#crowd-and-routing) retain the acceptance details.
+Static routing uses reverse Dijkstra fields over four-neighbor weighted terrain. A bounded LRU cache
+shares each destination field across units; changing building obstacles changes the cache key.
+Group orders preserve translated positions, fitting the group inside map edges. When terrain or
+held units prevent that placement, they allocate reachable destination slots. Ordinary mobile units
+remain local collision obstacles, so an occupied destination can wait for them to move. Groups share
+an approach route and branch through clear terrain to their destinations.
+Movement shortens visible route segments and uses spatially local clearance constraints with a speed
+limit. Held units remain fixed. Opposing groups alternate processing priority and prefer a common
+passing side. Sustained stalls trigger budgeted replanning; a blocked order stays queued.
+Numeric movement, lookahead, and exact visibility unions run in serial compiled CPU loops without
+fastmath or parallel reductions. Compilation happens during simulation construction; compilation
+errors propagate. Numeric buffers and navigation caches rebuild after load and do not enter saves.
+
+Line defenses spread along the line. Area defenses use separated stations, expanding small gathering
+areas into hexagonal slots with a unit-width aisle between neighbors. This deliberately replaces
+maximum-density packing: settled units stay fixed, and later arrivals can pass between them without
+reservations or pushing. Same-owner defenses with the same target share unique stations and retain
+valid slots on membership changes. Patrol and defense route dispatch have per-controller and global
+budgets. Crowd throughput, separation, and frame-time requirements remain owned by
+[performance](performance.md#crowd-and-routing); they must be measured, not inferred from the design.
 
 Opportunistic fire does not cancel locomotion, including defenders traveling past enemies outside
 their assigned defense area. Only an actual pursuit can interrupt that travel; explicit attack
@@ -108,16 +111,16 @@ publishing a building. Queue, progress, resource, and assignment state survive s
 or incompatible input. Saves preserve complete authoritative state, selections, queues, combat,
 movement progress, events, and counters; replay compares the final `snapshot()` and ordered events
 against recorded expectations, rather than comparing the full `export_state()` representation.
-Saves use v8 and include pending traffic reservations so collision-constrained arrivals continue
-identically after loading. The inverse slot index and navigation caches rebuild deterministically;
-presentation history is not saved. Mobile units may share occupancy cells, while buildings remain
-exclusive obstacles.
+Saves use v9 without traffic reservations. Navigation caches rebuild deterministically; presentation
+history is not saved. Mobile units may share occupancy cells, while buildings remain exclusive
+obstacles. Loading v9 must preserve complete state and subsequent deterministic execution.
 
-The loader also accepts v7 saves: it preserves entities/orders, resets progress that references a
-consumed waypoint, and rebuilds the formerly unsaved reservations from current positions. Subsequent
-movement follows the corrected collision rules; saving again writes v8. Other old save versions
-remain unsupported. Replays use v7 because corrected collision and defender behavior changes future
-trajectories/events; v6 recordings are rejected explicitly, with no automatic replay migration.
+The loader accepts v7/v8 saves, preserving entities, orders, and waypoints. It validates and discards
+old traffic reservations and resets congestion/progress tracking for the replacement controller.
+Future trajectories follow the new algorithm; old-run continuation is not promised. Saving again
+writes v9. Other old save versions remain unsupported. Replays use v8 and reject earlier schemas
+explicitly because their recorded trajectories/events belong to the previous movement algorithm;
+there is no automatic replay migration.
 [events.py](../../src/airts/events.py) provides ordered, filterable events and JSON Lines export.
 
 The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays

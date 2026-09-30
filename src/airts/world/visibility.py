@@ -7,6 +7,9 @@ from enum import StrEnum
 from functools import lru_cache
 from math import ceil, floor, sqrt
 
+import numpy as np
+
+from airts._numeric import FloatArray, WordArray, compile_numeric
 from airts.geometry import Point
 from airts.world.entities import Entity
 from airts.world.map_model import Cell, GameMap
@@ -67,15 +70,23 @@ class PlayerVisibility:
         if current_row_masks == self._visible_row_masks:
             self.last_observed_tick.update(dict.fromkeys(self.visible, tick))
             return 0, 0, 0
+        newly_visible: set[Cell] = set()
+        no_longer_visible: set[Cell] = set()
+        previous_masks = self._visible_row_masks
+        if not previous_masks:
+            restored_masks = [0] * self.height
+            for x, y in self.visible:
+                restored_masks[y] |= 1 << x
+            previous_masks = tuple(restored_masks)
+        for y, mask in enumerate(row_masks):
+            previous = previous_masks[y]
+            newly_visible.update(_cells_for_row(y, mask & ~previous))
+            no_longer_visible.update(_cells_for_row(y, previous & ~mask))
+        current = self.visible.difference(no_longer_visible)
+        current.update(newly_visible)
         self._visible_row_masks = current_row_masks
-        previous_visible = self.visible
-        current: set[Cell] = set()
-        for y, row_mask in enumerate(row_masks):
-            current.update(_cells_for_row(y, row_mask))
         self.visible = current
-        newly_visible = current.difference(previous_visible)
-        no_longer_visible = previous_visible.difference(current)
-        newly_explored = current.difference(self.explored)
+        newly_explored = newly_visible.difference(self.explored)
         self.explored.update(current)
         self.last_observed_tick.update(dict.fromkeys(current, tick))
         return len(newly_visible), len(newly_explored), len(no_longer_visible)
@@ -95,6 +106,7 @@ class PlayerVisibility:
 class VisibilitySystem:
     def __init__(self, game_map: GameMap) -> None:
         self.game_map = game_map
+        _visibility_words(np.empty((0, 3), dtype=np.float64), game_map.width, game_map.height)
         self.players: dict[str, PlayerVisibility] = {}
         self._source_masks: dict[
             str,
@@ -139,30 +151,23 @@ class VisibilitySystem:
         entities: dict[str, Entity],
         tick: int,
     ) -> dict[str, tuple[int, int, int]]:
-        """Union dense same-height source rows without rebuilding one circle per unit."""
-
+        """Compute exact circle unions without rebuilding Python masks for every unit."""
         self._source_masks.clear()
-        groups: dict[str, dict[tuple[float, float], list[float]]] = {}
+        sources: dict[str, list[tuple[float, float, float]]] = {}
         for entity in entities.values():
             position = entity.selection_position
-            groups.setdefault(entity.owner_id, {}).setdefault(
-                (position.y, entity.vision_range), []
-            ).append(position.x)
+            sources.setdefault(entity.owner_id, []).append(
+                (position.x, position.y, entity.vision_range)
+            )
         changes: dict[str, tuple[int, int, int]] = {}
-        for player_id in sorted(set(self.players).union(groups)):
-            row_masks = [0] * self.game_map.height
-            for (source_y, radius), source_xs in groups.get(player_id, {}).items():
-                _union_source_row_group(
-                    row_masks,
-                    tuple(sorted(source_xs)),
-                    source_y,
-                    radius,
-                    self.game_map.width,
-                    self.game_map.height,
-                )
+        for player_id in sorted(set(self.players).union(sources)):
+            array = np.asarray(sources.get(player_id, []), dtype=np.float64).reshape((-1, 3))
+            words = _visibility_words(array, self.game_map.width, self.game_map.height)
+            row_masks = [
+                sum(int(word) << (64 * index) for index, word in enumerate(row)) for row in words
+            ]
             visibility = self.players.setdefault(
-                player_id,
-                PlayerVisibility(self.game_map.width, self.game_map.height),
+                player_id, PlayerVisibility(self.game_map.width, self.game_map.height)
             )
             changes[player_id] = visibility.update_combined_masks(row_masks, tick)
         return changes
@@ -211,79 +216,26 @@ def _cells_for_row(y: int, row_mask: int) -> tuple[Cell, ...]:
     return tuple(cells)
 
 
-def _union_source_row_group(
-    row_masks: list[int],
-    source_xs: tuple[float, ...],
-    source_y: float,
-    radius: float,
-    width: int,
-    height: int,
-) -> None:
-    for y, mask in _source_group_row_masks(source_xs, source_y, radius, width, height):
-        row_masks[y] |= mask
-
-
-@lru_cache(maxsize=4_096)
-def _source_group_row_masks(
-    source_xs: tuple[float, ...],
-    source_y: float,
-    radius: float,
-    width: int,
-    height: int,
-) -> tuple[tuple[int, int], ...]:
-    """Return the exact visibility union for one reusable same-height source rank."""
-
-    maximum_gap = max(
-        (second - first for first, second in zip(source_xs, source_xs[1:], strict=False)),
-        default=0.0,
-    )
-    masks: list[tuple[int, int]] = []
-    for y, horizontal_radius in _source_row_extents(source_y, radius, height):
-        if maximum_gap <= horizontal_radius * 2 + 1.0:
-            minimum_x = max(0, ceil(source_xs[0] - horizontal_radius - 0.5))
-            maximum_x = min(width - 1, floor(source_xs[-1] + horizontal_radius - 0.5))
-            if minimum_x <= maximum_x:
-                masks.append((y, ((1 << (maximum_x - minimum_x + 1)) - 1) << minimum_x))
-            continue
-        interval_start: int | None = None
-        interval_end = -1
-        mask = 0
-        for source_x in source_xs:
-            minimum_x = max(0, ceil(source_x - horizontal_radius - 0.5))
-            maximum_x = min(width - 1, floor(source_x + horizontal_radius - 0.5))
-            if minimum_x > maximum_x:
+@compile_numeric
+def _visibility_words(sources: FloatArray, width: int, height: int) -> WordArray:
+    """OR exact cell-center circle intervals into 64-bit row chunks at any map width."""
+    words = np.zeros((height, (width + 63) // 64), dtype=np.uint64)
+    for source in sources:
+        x, y, radius = source
+        for row in range(max(0, int(y - radius)), min(height - 1, ceil(y + radius)) + 1):
+            offset = y - (row + 0.5)
+            remaining = radius * radius - offset * offset
+            if remaining < 0:
                 continue
-            if interval_start is None:
-                interval_start = minimum_x
-                interval_end = maximum_x
-            elif minimum_x <= interval_end + 1:
-                interval_end = max(interval_end, maximum_x)
-            else:
-                mask |= ((1 << (interval_end - interval_start + 1)) - 1) << interval_start
-                interval_start = minimum_x
-                interval_end = maximum_x
-        if interval_start is not None:
-            mask |= ((1 << (interval_end - interval_start + 1)) - 1) << interval_start
-        if mask:
-            masks.append((y, mask))
-    return tuple(masks)
-
-
-@lru_cache(maxsize=8_192)
-def _source_row_extents(
-    source_y: float,
-    radius: float,
-    height: int,
-) -> tuple[tuple[int, float], ...]:
-    """Cache the vertical circle slice shared by every source on one row."""
-
-    squared_radius = radius * radius
-    minimum_y = max(0, int(source_y - radius))
-    maximum_y = min(height - 1, ceil(source_y + radius))
-    extents: list[tuple[int, float]] = []
-    for y in range(minimum_y, maximum_y + 1):
-        offset_y = source_y - (y + 0.5)
-        remaining = squared_radius - offset_y * offset_y
-        if remaining >= 0:
-            extents.append((y, sqrt(remaining)))
-    return tuple(extents)
+            extent = sqrt(remaining)
+            left = max(0, ceil(x - extent - 0.5))
+            right = min(width - 1, floor(x + extent - 0.5))
+            if left > right:
+                continue
+            for column in range(left // 64, right // 64 + 1):
+                low = max(left, column * 64) - column * 64
+                high = min(right, column * 64 + 63) - column * 64
+                count = high - low + 1
+                mask = ~np.uint64(0) if count == 64 else (np.uint64(1) << count) - np.uint64(1)
+                words[row, column] |= mask << low
+    return words

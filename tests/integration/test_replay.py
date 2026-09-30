@@ -92,8 +92,9 @@ def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
     assert replayed.automations[production.automation_id or ""].status.value == "failed"
 
 
-def test_replay_rejects_recordings_from_before_the_traffic_correction() -> None:
+@pytest.mark.parametrize("schema", ["airts-replay-v6", "airts-replay-v7"])
+def test_replay_rejects_recordings_from_before_the_movement_rewrite(schema: str) -> None:
     document = capture_replay(Simulation(load_example_map())).to_dict()
-    document["schema"] = "airts-replay-v6"
-    with pytest.raises(ReplayError, match="unsupported replay schema: airts-replay-v6"):
+    document["schema"] = schema
+    with pytest.raises(ReplayError, match=f"unsupported replay schema: {schema}"):
         load_replay_data(document)

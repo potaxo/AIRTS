@@ -76,9 +76,10 @@ class Entity:
 
     @property
     def selection_position(self) -> Point:
-        width, height = self.kind.profile.footprint
-        if self.category is EntityCategory.UNIT:
+        profile = self.kind.profile
+        if profile.category is EntityCategory.UNIT:
             return self.position
+        width, height = profile.footprint
         return Point(self.position.x + width / 2, self.position.y + height / 2)
 
     def to_dict(self) -> dict[str, object]:

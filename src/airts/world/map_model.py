@@ -28,18 +28,21 @@ class Terrain(StrEnum):
 
     @property
     def passable(self) -> bool:
-        return self not in {Terrain.WATER, Terrain.ROCK}
+        return self is not Terrain.WATER and self is not Terrain.ROCK
 
     @property
     def movement_cost(self) -> float:
-        return {
-            Terrain.ROAD: 0.75,
-            Terrain.BRIDGE: 0.8,
-            Terrain.GRASS: 1.0,
-            Terrain.FOREST: 1.5,
-            Terrain.WATER: float("inf"),
-            Terrain.ROCK: float("inf"),
-        }[self]
+        return _MOVEMENT_COSTS[self]
+
+
+_MOVEMENT_COSTS = {
+    Terrain.ROAD: 0.75,
+    Terrain.BRIDGE: 0.8,
+    Terrain.GRASS: 1.0,
+    Terrain.FOREST: 1.5,
+    Terrain.WATER: float("inf"),
+    Terrain.ROCK: float("inf"),
+}
 
 
 class EntityCategory(StrEnum):

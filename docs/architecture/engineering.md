@@ -13,6 +13,7 @@ forwarders for every system function. Local work calls its owner; retain shared 
 | `simulation.py` | Public facade, state, command boundary, tick order |
 | `commands.py`, `control.py`, `validation.py` | Shared input and validation contracts |
 | `automations.py`, `geometry.py`, `spatial.py`, `events.py` | Schemas, geometry, references, events |
+| `_numeric.py` | Typed serial CPU compilation shared by domain owners |
 | `world/` | Entity/map profiles, occupancy, projectiles, visibility |
 | `navigation/` | Routing, collision support, spatial indexing |
 | `systems/` | Command handling and tick-driven movement, automation, combat, production, construction, economy |
@@ -42,7 +43,6 @@ Do not introduce generic managers, registries, parallel facades, or unrelated re
 | --- | --- |
 | `tests/unit/` | Isolated domain components and codecs |
 | `tests/integration/` | Facade, adapters, controls, and renderer behavior |
-| `tests/movement/` | Collision, traffic, arrival, and specialized movement fixtures |
 | `tests/performance/` | Measured workload and timing contracts |
 | `tests/architecture/` | Dependency direction, public facade, document links/discovery |
 | `tests/gui_scenarios/` | Explicit, blocking visual inspection; excluded from default discovery |

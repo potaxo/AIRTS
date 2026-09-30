@@ -78,9 +78,9 @@ identity (no exact position exchanges), per-tick speed bounds, unobstructed fron
 defenses must yield 160 unique stations; one casualty leaves 159 with at most one survivor remapped.
 Four factories must produce 132 unique, spaced stations. Reinforcements retain valid established
 stations; contraction may replace obsolete outer slots. Stable identities take precedence over
-fresh global minimum-distance matching. Traffic reservations invalidate on unsafe topology,
-not every spawn/docking event. The current controller and its grid-like limitations are described
-in [runtime](runtime.md#movement-and-combat); alternatives need a measured replacement contract.
+fresh global minimum-distance matching. Dense continuous packing must preserve orders and physical
+clearance without requiring a free traffic-lattice slot. The replacement movement contract is
+described in [runtime](runtime.md#movement-and-combat).
 
 ## Visual inspection
 

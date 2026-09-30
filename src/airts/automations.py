@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from math import ceil, floor, hypot
+from math import ceil, floor
 
 from airts.geometry import (
     Point,
@@ -460,67 +460,6 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
     return passable
 
 
-def build_defend_stations(
-    target: SpatialTarget, entity_ids: tuple[str, ...], game_map: GameMap
-) -> dict[str, Point]:
-    if isinstance(target, PolylineTarget):
-        line_stations = _evenly_spaced_polyline_points(target.points, len(entity_ids))
-        if any(not game_map.is_passable(point) for point in line_stations):
-            raise ValueError("defend line contains an invalid station")
-        return {entity_id: line_stations[index] for index, entity_id in enumerate(entity_ids)}
-    candidates = (
-        tuple(
-            point
-            for point in _area_waypoints(target, maximum=max(24, len(entity_ids)))
-            if game_map.is_passable(point)
-        )
-        if isinstance(target, PolygonRegion)
-        else build_patrol_waypoints(target, game_map)
-    )
-    if not candidates:
-        raise ValueError("defend target contains no passable stations")
-    selected: tuple[Point, ...]
-    if len(entity_ids) <= 1:
-        selected = (candidates[len(candidates) // 2],)
-    elif len(entity_ids) <= len(candidates):
-        step = (len(candidates) - 1) / (len(entity_ids) - 1)
-        selected = tuple(candidates[round(index * step)] for index in range(len(entity_ids)))
-    else:
-        selected = tuple(candidates[index % len(candidates)] for index in range(len(entity_ids)))
-    return {entity_id: selected[index] for index, entity_id in enumerate(entity_ids)}
-
-
-def _evenly_spaced_polyline_points(points: tuple[Point, ...], count: int) -> tuple[Point, ...]:
-    if count <= 0:
-        return ()
-    segments = tuple(zip(points, points[1:], strict=False))
-    lengths = tuple(first.distance_to(second) for first, second in segments)
-    total_length = sum(lengths)
-    if total_length <= 1e-9:
-        return (points[0],) * count
-    stations: list[Point] = []
-    segment_index = 0
-    distance_before = 0.0
-    for index in range(count):
-        requested = total_length / 2 if count == 1 else total_length * index / (count - 1)
-        while (
-            segment_index < len(segments) - 1
-            and requested > distance_before + lengths[segment_index]
-        ):
-            distance_before += lengths[segment_index]
-            segment_index += 1
-        first, second = segments[segment_index]
-        segment_length = lengths[segment_index]
-        fraction = 0.0 if segment_length <= 1e-9 else (requested - distance_before) / segment_length
-        stations.append(
-            Point(
-                first.x + (second.x - first.x) * fraction,
-                first.y + (second.y - first.y) * fraction,
-            )
-        )
-    return tuple(stations)
-
-
 def target_center(target: SpatialTarget) -> Point:
     if isinstance(target, PointTarget):
         return target.point
@@ -532,183 +471,85 @@ def target_center(target: SpatialTarget) -> Point:
     )
 
 
-def assign_formation_slots(
-    entity_positions: Mapping[str, Point],
-    slots: tuple[Point, ...],
-    center: Point,
+def build_defend_stations(
+    target: SpatialTarget, entity_ids: tuple[str, ...], game_map: GameMap
 ) -> dict[str, Point]:
-    """Match front-to-back unit order to far-to-near slots along the approach axis."""
-
-    if len(entity_positions) != len(slots):
-        raise ValueError("formation entity and slot counts must match")
-    if not entity_positions:
-        return {}
-    group_center = Point(
-        sum(point.x for point in entity_positions.values()) / len(entity_positions),
-        sum(point.y for point in entity_positions.values()) / len(entity_positions),
+    """Evenly distribute stations along a line or the target's patrol perimeter."""
+    points = (
+        target.points
+        if isinstance(target, PolylineTarget)
+        else build_patrol_waypoints(target, game_map)
     )
-    direction_x = center.x - group_center.x
-    direction_y = center.y - group_center.y
-    if hypot(direction_x, direction_y) <= 1e-9:
-        ordered_ids = sorted(
-            entity_positions,
-            key=lambda entity_id: (
-                entity_positions[entity_id].y,
-                entity_positions[entity_id].x,
-                entity_id,
-            ),
-        )
-        ordered_slots = sorted(slots, key=lambda point: (point.y, point.x))
-    else:
-
-        def formation_key(point: Point) -> tuple[float, float]:
-            forward = point.x * direction_x + point.y * direction_y
-            lateral = -point.x * direction_y + point.y * direction_x
-            return -forward, lateral
-
-        ordered_ids = sorted(
-            entity_positions,
-            key=lambda entity_id: (*formation_key(entity_positions[entity_id]), entity_id),
-        )
-        ordered_slots = sorted(slots, key=lambda point: (*formation_key(point), point.y, point.x))
-    return dict(zip(ordered_ids, ordered_slots, strict=True))
-
-
-def retain_formation_slots(
-    entity_positions: Mapping[str, Point],
-    slots: tuple[Point, ...],
-    center: Point,
-    previous_stations: Mapping[str, Point],
-) -> dict[str, Point]:
-    """Preserve valid unique stations and assign only genuinely displaced entities."""
-
-    if len(entity_positions) != len(slots):
-        raise ValueError("formation entity and slot counts must match")
-    slot_indices = {slot: index for index, slot in enumerate(slots)}
-    available_indices = set(range(len(slots)))
-    retained: dict[str, Point] = {}
-    displaced: dict[str, Point] = {}
-    for entity_id, position in entity_positions.items():
-        previous = previous_stations.get(entity_id)
-        slot_index = None if previous is None else slot_indices.get(previous)
-        if slot_index is None or slot_index not in available_indices:
-            displaced[entity_id] = position
-            continue
-        assert previous is not None
-        retained[entity_id] = previous
-        available_indices.remove(slot_index)
-    free_slots = tuple(slots[index] for index in sorted(available_indices))
-    retained.update(assign_formation_slots(displaced, free_slots, center))
-    if len(retained) != len(entity_positions) or len(set(retained.values())) != len(retained):
-        raise RuntimeError("stable formation matching did not produce a bijection")
-    return retained
-
-
-def minimum_cost_slot_assignment(
-    entity_positions: Mapping[str, Point],
-    slots: tuple[Point, ...],
-) -> dict[str, Point]:
-    """Match entities to slots with deterministic minimum total squared travel."""
-
-    count = len(entity_positions)
-    if count != len(slots):
-        raise ValueError("formation entity and slot counts must match")
-    ordered_ids = tuple(sorted(entity_positions))
-    ordered_slots = tuple(sorted(slots, key=lambda point: (point.y, point.x)))
-    costs = tuple(
-        tuple(
-            (entity_positions[entity_id].x - slot.x) ** 2
-            + (entity_positions[entity_id].y - slot.y) ** 2
-            for slot in ordered_slots
-        )
-        for entity_id in ordered_ids
-    )
-    row_potential = [0.0] * (count + 1)
-    column_potential = [0.0] * (count + 1)
-    column_match = [0] * (count + 1)
-    predecessor = [0] * (count + 1)
-    for row in range(1, count + 1):
-        column_match[0] = row
-        minimum = [float("inf")] * (count + 1)
-        used = [False] * (count + 1)
-        column = 0
-        while True:
-            used[column] = True
-            matched_row = column_match[column]
-            delta = float("inf")
-            next_column = 0
-            for candidate_column in range(1, count + 1):
-                if used[candidate_column]:
-                    continue
-                cost = (
-                    costs[matched_row - 1][candidate_column - 1]
-                    - row_potential[matched_row]
-                    - column_potential[candidate_column]
+    if not isinstance(target, PolylineTarget):
+        return {
+            key: points[round(i * (len(points) - 1) / max(1, len(entity_ids) - 1))]
+            for i, key in enumerate(entity_ids)
+        }
+    segments = tuple(zip(points, points[1:], strict=False))
+    lengths = tuple(a.distance_to(b) for a, b in segments)
+    stations: dict[str, Point] = {}
+    for i, entity_id in enumerate(entity_ids):
+        distance = sum(lengths) * (i / (len(entity_ids) - 1) if len(entity_ids) > 1 else 0.5)
+        for (a, b), length in zip(segments, lengths, strict=True):
+            if distance <= length and length > 0:
+                point = Point(
+                    a.x + (b.x - a.x) * distance / length, a.y + (b.y - a.y) * distance / length
                 )
-                if cost < minimum[candidate_column]:
-                    minimum[candidate_column] = cost
-                    predecessor[candidate_column] = column
-                if minimum[candidate_column] < delta:
-                    delta = minimum[candidate_column]
-                    next_column = candidate_column
-            for candidate_column in range(count + 1):
-                if used[candidate_column]:
-                    row_potential[column_match[candidate_column]] += delta
-                    column_potential[candidate_column] -= delta
-                else:
-                    minimum[candidate_column] -= delta
-            column = next_column
-            if column_match[column] == 0:
                 break
-        while True:
-            previous_column = predecessor[column]
-            column_match[column] = column_match[previous_column]
-            column = previous_column
-            if column == 0:
-                break
-    return {
-        ordered_ids[column_match[column] - 1]: ordered_slots[column - 1]
-        for column in range(1, count + 1)
-    }
+            distance -= length
+        else:
+            point = points[-1]
+        if not game_map.is_passable(point):
+            raise ValueError("defend station is not passable")
+        stations[entity_id] = point
+    return stations
 
 
-def patrol_formation_waypoint(
-    parameters: PatrolParameters,
-    entity_ids: tuple[str, ...],
-    entity_id: str,
-    waypoint_index: int,
-    game_map: GameMap,
-    slot_index: int | None = None,
-) -> Point:
-    """Give line patrols same-direction formation slots around each route vertex."""
-
-    base = parameters.waypoints[waypoint_index]
-    if not isinstance(parameters.target, PolylineTarget) or len(entity_ids) == 1:
-        return base
-    previous = parameters.waypoints[(waypoint_index - 1) % len(parameters.waypoints)]
-    direction_x = base.x - previous.x
-    direction_y = base.y - previous.y
-    length = hypot(direction_x, direction_y)
-    if length <= 1e-9:
-        return base
-    direction_x /= length
-    direction_y /= length
-    if slot_index is None:
-        ordered_ids = tuple(sorted(entity_ids))
-        slot_index = ordered_ids.index(entity_id)
-    columns = min(5, len(entity_ids))
-    column = slot_index % columns
-    row = slot_index // columns
-    lateral = (column - (columns - 1) / 2) * 0.9
-    trailing = row * 0.95
-    for scale in (1.0, 0.5):
-        candidate = Point(
-            base.x - direction_y * lateral * scale - direction_x * trailing * scale,
-            base.y + direction_x * lateral * scale - direction_y * trailing * scale,
+def assign_formation_slots(
+    positions: Mapping[str, Point],
+    slots: tuple[Point, ...],
+    center: Point,
+    previous: Mapping[str, Point] | None = None,
+) -> dict[str, Point]:
+    """Retain stations, then recursively match nearby spatial halves."""
+    if len(positions) != len(slots) or len(set(slots)) != len(slots):
+        raise ValueError("formation requires one unique slot per unit")
+    free = set(slots)
+    assigned: dict[str, Point] = {}
+    for entity_id in sorted(positions):
+        point = (previous or {}).get(entity_id)
+        if point in free:
+            assert point is not None
+            assigned[entity_id] = point
+            free.remove(point)
+    if center in free:
+        nearest = min(
+            (key for key in positions if key not in assigned),
+            key=lambda key: (positions[key].distance_to(center), key),
         )
-        if game_map.is_passable(candidate):
-            return candidate
-    return base
+        assigned[nearest] = center
+        free.remove(center)
+
+    def match(ids: list[str], points: list[Point]) -> None:
+        if not ids:
+            return
+        if len(ids) == 1:
+            assigned[ids[0]] = points[0]
+            return
+        span_x = max(p.x for p in points) - min(p.x for p in points)
+        span_y = max(p.y for p in points) - min(p.y for p in points)
+
+        def rank(point: Point) -> tuple[float, float]:
+            return (point.x, point.y) if span_x >= span_y else (point.y, point.x)
+
+        ids.sort(key=lambda key: (rank(positions[key]), key))
+        points.sort(key=rank)
+        middle = len(ids) // 2
+        match(ids[:middle], points[:middle])
+        match(ids[middle:], points[middle:])
+
+    match([key for key in positions if key not in assigned], list(free))
+    return assigned
 
 
 def target_contains(target: SpatialTarget, point: Point) -> bool:

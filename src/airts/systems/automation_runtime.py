@@ -13,17 +13,17 @@ from airts.automations import (
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
-    patrol_formation_waypoint,
-    retain_formation_slots,
+    assign_formation_slots,
+    build_defend_stations,
     target_center,
 )
 from airts.events import EventType
-from airts.geometry import Point, PointTarget, PolylineTarget, SpatialTarget
-from airts.navigation.collision import SETTLED_FORMATION_SPACING, collision_radius
-from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
+from airts.geometry import Point, PointTarget, SpatialTarget
+from airts.navigation.collision import collision_radius
+from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
+from airts.systems import command_handlers
 from airts.world.entities import UnitState
-from airts.world.map_model import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -65,416 +65,6 @@ def scheduled_entity_ids(simulation: Simulation, automation: Automation) -> tupl
     stable_offset = sum(ord(character) for character in automation.automation_id)
     offset = (simulation.tick + stable_offset) % len(entity_ids)
     return tuple(entity_ids[offset:] + entity_ids[:offset])
-
-
-def drive_patrol(simulation: Simulation, automation: Automation) -> None:
-    building_cells = simulation._building_cells()
-    parameters = _patrol_parameters(automation)
-    allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
-    ordered_ids = tuple(sorted(automation.entity_ids))
-    formation_indices = {entity_id: index for index, entity_id in enumerate(ordered_ids)}
-    area_slots: dict[int, tuple[Point, ...]] = {}
-    area_unit_radius: float | None = None
-    if len(ordered_ids) > 1 and not isinstance(parameters.target, PolylineTarget):
-        area_unit_radius = max(
-            collision_radius(simulation.entities[entity_id].kind) for entity_id in ordered_ids
-        )
-    for entity_id in scheduled_entity_ids(simulation, automation):
-        if simulation.assignments.get(entity_id) != automation.automation_id:
-            continue
-        entity = simulation.entities[entity_id]
-        if entity.move_target is not None or entity.path:
-            continue
-        if not allowance.claim():
-            continue
-        waypoint_index = parameters.waypoint_indices[entity_id]
-        automation.take_next_waypoint(entity_id)
-        target = patrol_formation_waypoint(
-            parameters,
-            tuple(automation.entity_ids),
-            entity_id,
-            waypoint_index,
-            simulation.game_map,
-            formation_indices.get(entity_id),
-        )
-        formation_anchor: Point | None = None
-        if area_unit_radius is not None:
-            slots = area_slots.get(waypoint_index)
-            if slots is None:
-                slots = simulation._gathering_slots(
-                    PointTarget(parameters.waypoints[waypoint_index], radius=0.01),
-                    len(ordered_ids),
-                    area_unit_radius,
-                )
-                area_slots[waypoint_index] = slots
-            target = slots[formation_indices[entity_id]]
-            formation_anchor = slots[0]
-        try:
-            if area_unit_radius is not None:
-                assert formation_anchor is not None
-                path = simulation._routes.formation_path(
-                    entity.position,
-                    target,
-                    formation_anchor,
-                    building_cells,
-                    branch_distance=16 if area_unit_radius < 0.4 else 10,
-                )
-            else:
-                path = simulation._routes.shared_path(entity.position, target, building_cells)
-        except PathfindingError as error:
-            simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
-            simulation.events.record(
-                simulation.tick,
-                EventType.PATHFINDING_FAILED,
-                entity_id,
-                reason=str(error),
-                automation_id=automation.automation_id,
-            )
-            return
-        simulation._start_path(entity, target, path, automation.automation_id, UnitState.PATROLLING)
-
-
-def drive_defend(simulation: Simulation, automation: Automation) -> None:
-    parameters = _defend_parameters(automation)
-    formation_center = target_center(parameters.target)
-    building_cells = simulation._building_cells()
-    allowance = simulation._routes.automation_allowance(
-        simulation.GATHERING_PATH_BUDGET
-        if parameters.gathering_point
-        else simulation.AUTOMATION_ROUTE_BUDGET
-    )
-    assigned_ids = tuple(
-        entity_id
-        for entity_id in automation.entity_ids
-        if simulation.assignments.get(entity_id) == automation.automation_id
-    )
-    shared_ids = _shared_defend_entity_ids(simulation, automation, parameters.target)
-    saturated_formation = bool(parameters.deployment_slots) and len(shared_ids) > 128
-    shared_assembly_radius = max(
-        (
-            other.parameters.assembly_radius
-            for other in simulation.automations.values()
-            if other.kind is AutomationKind.DEFEND
-            and other.owner_id == automation.owner_id
-            and not other.status.terminal
-            and isinstance(other.parameters, DefendParameters)
-            and other.parameters.target == parameters.target
-        ),
-        default=parameters.assembly_radius,
-    )
-    formation_age = simulation.tick - automation.created_tick
-    formation_index: SpatialIndex | None = None
-    clearance_index: SpatialIndex | None = None
-    station_anchor: Point | None = None
-    formation_cluster_size = 5
-    formation_slots = parameters.deployment_slots
-    if not formation_slots and len(assigned_ids) > 32:
-        formation_slots = tuple(parameters.stations[entity_id] for entity_id in assigned_ids)
-    if formation_slots:
-        formation_cluster_size = (
-            4
-            if len(assigned_ids) > 128
-            and all(
-                simulation.entities[entity_id].kind is EntityKind.SCOUT
-                for entity_id in assigned_ids
-            )
-            else 5
-        )
-        station_anchor = formation_center
-    attacked: list[tuple[str, str]] = []
-    for victim_id in (
-        entity_id
-        for entity_id in assigned_ids
-        if simulation.entities[entity_id].last_attacker_id is not None
-    ):
-        victim = simulation.entities[victim_id]
-        attacker = simulation.entities.get(victim.last_attacker_id or "")
-        attacked_tick = victim.last_attacked_tick
-        if (
-            attacker is None
-            or attacker.owner_id == automation.owner_id
-            or attacked_tick is None
-            or simulation.tick - attacked_tick > simulation.DEFEND_ATTACK_MEMORY_TICKS
-            or attacker.position.distance_to(parameters.stations[victim_id])
-            > simulation.DEFEND_PURSUIT_RADIUS
-        ):
-            victim.last_attacker_id = None
-            victim.last_attacked_tick = None
-            continue
-        attacked.append((victim_id, attacker.entity_id))
-    if attacked:
-        formation_index = SpatialIndex(
-            {entity_id: simulation.entities[entity_id].position for entity_id in assigned_ids}
-        )
-        responder_index = formation_index
-    for victim_id, attacker_id in attacked:
-        victim = simulation.entities[victim_id]
-        attacker = simulation.entities[attacker_id]
-        for responder_id in responder_index.nearby(
-            victim.position,
-            simulation.DEFEND_RESPONSE_RADIUS,
-        ):
-            responder = simulation.entities[responder_id]
-            if (
-                attacker.position.distance_to(parameters.stations[responder_id])
-                > simulation.DEFEND_PURSUIT_RADIUS
-            ):
-                continue
-            if responder.attack_target_id != attacker.entity_id or not responder.pursue_target:
-                responder.path.clear()
-                responder.move_target = None
-                simulation._reset_movement_liveness(responder, clear_stop=True)
-                responder.attack_target_id = attacker.entity_id
-                responder.pursue_target = True
-                responder.state = UnitState.ATTACKING
-                simulation.events.record(
-                    simulation.tick,
-                    EventType.DEFEND_ENGAGED,
-                    responder_id,
-                    automation_id=automation.automation_id,
-                    victim_id=victim_id,
-                    attacker_id=attacker.entity_id,
-                )
-
-    for entity_id in scheduled_entity_ids(simulation, automation):
-        if simulation.assignments.get(entity_id) != automation.automation_id:
-            continue
-        entity = simulation.entities[entity_id]
-        station = parameters.stations[entity_id]
-        station_distance = entity.position.distance_to(station)
-        center_distance_squared = (entity.position.x - formation_center.x) ** 2 + (
-            entity.position.y - formation_center.y
-        ) ** 2
-        target = simulation.entities.get(entity.attack_target_id or "")
-        if entity.pursue_target:
-            if (
-                target is not None
-                and target.owner_id != automation.owner_id
-                and target.position.distance_to(station) <= simulation.DEFEND_PURSUIT_RADIUS
-            ):
-                entity.state = UnitState.ATTACKING
-                continue
-            entity.last_attacker_id = None
-            entity.last_attacked_tick = None
-            entity.attack_target_id = None
-            entity.pursue_target = False
-            entity.path.clear()
-            entity.move_target = None
-            simulation._reset_movement_liveness(entity, clear_stop=True)
-        elif entity.path:
-            continue
-        inside_formation = (
-            center_distance_squared
-            <= (shared_assembly_radius + simulation.DEFEND_FORMATION_TOLERANCE) ** 2
-        )
-        inside_formation_core = center_distance_squared <= shared_assembly_radius**2
-        formation_congested = entity.congestion_stopped or (
-            entity.collision_pressure > 0
-            and entity.route_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
-        )
-        formation_mature = formation_age >= simulation.DEFEND_FORMATION_SETTLE_TICKS
-        safe_current_station = False
-        if (
-            saturated_formation
-            and inside_formation
-            and station_distance <= simulation.DEFEND_FORMATION_TOLERANCE
-        ):
-            if clearance_index is None:
-                clearance_index = SpatialIndex(
-                    {shared_id: simulation.entities[shared_id].position for shared_id in shared_ids}
-                )
-            safe_current_station = _position_has_formation_clearance(
-                clearance_index, simulation, entity_id
-            )
-        relaxed_arrival = (
-            formation_mature
-            and station_distance <= simulation.DEFEND_FORMATION_TOLERANCE
-            and entity.collision_pressure == 0
-            and safe_current_station
-        )
-        if (
-            saturated_formation
-            and inside_formation
-            and station_distance <= simulation.DEFEND_FORMATION_TOLERANCE
-            and safe_current_station
-            and ((formation_congested and inside_formation_core) or relaxed_arrival)
-        ):
-            entity.path.clear()
-            entity.move_target = None
-            entity.state = UnitState.DEFENDING
-            simulation._reset_movement_liveness(entity, clear_stop=True)
-            continue
-        station_tolerance = simulation.DEFEND_STATION_TOLERANCE
-        if station_distance <= station_tolerance and (not saturated_formation or inside_formation):
-            if saturated_formation:
-                assert clearance_index is not None
-                if not _position_has_formation_clearance(clearance_index, simulation, entity_id):
-                    continue
-            entity.path.clear()
-            entity.move_target = None
-            entity.state = UnitState.DEFENDING
-            simulation._reset_movement_liveness(entity, clear_stop=True)
-            continue
-        if entity.path:
-            continue
-        if not allowance.claim():
-            continue
-        route_station = (
-            _defend_arrival_point(
-                entity.position,
-                station,
-                formation_center,
-                simulation.DEFEND_FORMATION_TOLERANCE * 0.85,
-            )
-            if saturated_formation
-            else station
-        )
-        if (
-            saturated_formation
-            and passable_segment_cells(
-                simulation.game_map, entity.position, route_station, building_cells
-            )
-            is not None
-        ):
-            start_cell = simulation.game_map.cell_for(entity.position)
-            destination_cell = simulation.game_map.cell_for(route_station)
-            path = PathResult(
-                (
-                    (start_cell,)
-                    if start_cell == destination_cell
-                    else (start_cell, destination_cell)
-                ),
-                (route_station,),
-                entity.position.distance_to(route_station),
-            )
-        else:
-            try:
-                if station_anchor is not None:
-                    path = simulation._routes.formation_path(
-                        entity.position,
-                        route_station,
-                        station_anchor,
-                        building_cells,
-                        branch_distance=formation_cluster_size * 2,
-                    )
-                else:
-                    path = simulation._routes.shared_path(
-                        entity.position, route_station, building_cells
-                    )
-            except PathfindingError as error:
-                simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
-                return
-        simulation._start_path(entity, station, path, automation.automation_id, UnitState.DEFENDING)
-        simulation.events.record(
-            simulation.tick,
-            EventType.DEFEND_RETURNED,
-            entity_id,
-            automation_id=automation.automation_id,
-            station=[station.x, station.y],
-        )
-
-
-def _defend_arrival_point(
-    position: Point,
-    station: Point,
-    center: Point,
-    radius: float,
-) -> Point:
-    """Approach a dense station from its open side without entering the packed core."""
-
-    offset_x = station.x - center.x
-    offset_y = station.y - center.y
-    distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-    if distance <= 1e-9:
-        offset_x = position.x - station.x
-        offset_y = position.y - station.y
-        distance = (offset_x * offset_x + offset_y * offset_y) ** 0.5
-    if distance <= 1e-9:
-        return Point(station.x - radius, station.y)
-    return Point(
-        station.x + offset_x * radius / distance,
-        station.y + offset_y * radius / distance,
-    )
-
-
-def _shared_defend_entity_ids(
-    simulation: Simulation,
-    automation: Automation,
-    target: SpatialTarget,
-) -> tuple[str, ...]:
-    """Return one deterministic collision group for defenses sharing an area."""
-
-    return tuple(
-        entity_id
-        for other in sorted(simulation.automations.values(), key=lambda item: item.automation_id)
-        if other.kind is AutomationKind.DEFEND
-        and other.owner_id == automation.owner_id
-        and not other.status.terminal
-        and isinstance(other.parameters, DefendParameters)
-        and other.parameters.target == target
-        for entity_id in other.entity_ids
-        if simulation.assignments.get(entity_id) == other.automation_id
-    )
-
-
-def _position_has_formation_clearance(
-    index: SpatialIndex,
-    simulation: Simulation,
-    entity_id: str,
-) -> bool:
-    """Only accept a relaxed large-formation station when it is physically distinct."""
-
-    position = simulation.entities[entity_id].position
-    minimum_squared = (SETTLED_FORMATION_SPACING - 1e-6) ** 2
-    return all(
-        other_id == entity_id
-        or (
-            (position.x - simulation.entities[other_id].position.x) ** 2
-            + (position.y - simulation.entities[other_id].position.y) ** 2
-            >= minimum_squared
-        )
-        for other_id in index.nearby(position, SETTLED_FORMATION_SPACING)
-    )
-
-
-def settle_automation_formations(simulation: Simulation) -> None:
-    """Recognize safe physical arrivals without teleporting bodies or rematching identities."""
-    index: SpatialIndex | None = None
-    for automation in sorted(simulation.automations.values(), key=lambda item: item.automation_id):
-        if automation.kind is not AutomationKind.DEFEND or automation.status.terminal:
-            continue
-        parameters = _defend_parameters(automation)
-        shared_ids = _shared_defend_entity_ids(simulation, automation, parameters.target)
-        if len(shared_ids) <= 128 or not parameters.deployment_slots:
-            continue
-        if simulation.tick - automation.created_tick < simulation.DEFEND_FORMATION_SETTLE_TICKS:
-            continue
-        if index is None:
-            index = SpatialIndex(
-                {
-                    key: entity.position
-                    for key, entity in simulation.entities.items()
-                    if entity.is_movable
-                },
-                bucket_size=1.0,
-            )
-        center = target_center(parameters.target)
-        radius = parameters.assembly_radius + simulation.DEFEND_FORMATION_TOLERANCE
-        for entity_id in automation.entity_ids:
-            if simulation.assignments.get(entity_id) != automation.automation_id:
-                continue
-            entity = simulation.entities[entity_id]
-            if (
-                entity.position.distance_to(center) > radius
-                or entity.position.distance_to(parameters.stations[entity_id])
-                > simulation.DEFEND_FORMATION_TOLERANCE
-                or not _position_has_formation_clearance(index, simulation, entity_id)
-            ):
-                continue
-            entity.path.clear()
-            entity.move_target = None
-            entity.state = UnitState.DEFENDING
-            simulation._reset_movement_liveness(entity, clear_stop=True)
 
 
 def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:
@@ -614,123 +204,6 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
         simulation._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
 
 
-def refresh_gathering_formation(simulation: Simulation, automation: Automation) -> None:
-    if automation.kind is not AutomationKind.DEFEND:
-        return
-    parameters = _defend_parameters(automation)
-    if not parameters.gathering_point and not parameters.deployment_slots:
-        return
-    if coordinate_shared_defend_stations(simulation, parameters.target, automation.owner_id):
-        return
-    if not automation.entity_ids:
-        parameters.stations.clear()
-        parameters.deployment_slots = ()
-        parameters.assembly_radius = 0.0
-        return
-    radius = max(
-        collision_radius(simulation.entities[entity_id].kind) for entity_id in automation.entity_ids
-    )
-    slots = simulation._gathering_slots(parameters.target, len(automation.entity_ids), radius)
-    center = target_center(parameters.target)
-    previous_stations = parameters.stations
-    stations = retain_formation_slots(
-        {entity_id: simulation.entities[entity_id].position for entity_id in automation.entity_ids},
-        slots,
-        center,
-        previous_stations,
-    )
-    parameters.deployment_slots = slots
-    parameters.stations = stations
-    parameters.assembly_radius = max(point.distance_to(center) for point in slots)
-    for entity_id in sorted(automation.entity_ids):
-        if simulation.assignments.get(entity_id) != automation.automation_id:
-            continue
-        if previous_stations.get(entity_id) == stations[entity_id]:
-            continue
-        entity = simulation.entities[entity_id]
-        entity.path.clear()
-        entity.move_target = None
-        simulation._reset_movement_liveness(entity, clear_stop=True)
-
-
-def coordinate_shared_defend_stations(
-    simulation: Simulation,
-    target: SpatialTarget,
-    owner_id: str,
-) -> bool:
-    """Reconcile one compact collision-safe slot set across matching live defenses."""
-
-    defenses = tuple(
-        automation
-        for automation in sorted(
-            simulation.automations.values(),
-            key=lambda item: item.automation_id,
-        )
-        if automation.kind is AutomationKind.DEFEND
-        and automation.owner_id == owner_id
-        and not automation.status.terminal
-        and automation.status not in {AutomationStatus.PROPOSED, AutomationStatus.VALIDATING}
-        and isinstance(automation.parameters, DefendParameters)
-        and automation.parameters.target == target
-    )
-    if len(defenses) <= 1:
-        return False
-    entity_ids = tuple(
-        entity_id
-        for automation in defenses
-        for entity_id in automation.entity_ids
-        if entity_id in simulation.entities
-        and simulation.assignments.get(entity_id) == automation.automation_id
-    )
-    if not entity_ids:
-        for automation in defenses:
-            parameters = _defend_parameters(automation)
-            parameters.stations.clear()
-            parameters.deployment_slots = ()
-            parameters.assembly_radius = 0.0
-        return True
-    radius = max(collision_radius(simulation.entities[entity_id].kind) for entity_id in entity_ids)
-    slots = simulation._gathering_slots(target, len(entity_ids), radius)
-    previous_stations = {
-        entity_id: station
-        for automation in defenses
-        for entity_id, station in _defend_parameters(automation).stations.items()
-        if entity_id in entity_ids
-    }
-    stations = retain_formation_slots(
-        {entity_id: simulation.entities[entity_id].position for entity_id in entity_ids},
-        slots,
-        target_center(target),
-        previous_stations,
-    )
-    center = target_center(target)
-    for automation in defenses:
-        parameters = _defend_parameters(automation)
-        previous = parameters.stations
-        assigned_ids = tuple(
-            entity_id
-            for entity_id in automation.entity_ids
-            if entity_id in stations
-            and simulation.assignments.get(entity_id) == automation.automation_id
-        )
-        parameters.stations = {entity_id: stations[entity_id] for entity_id in assigned_ids}
-        parameters.deployment_slots = tuple(
-            parameters.stations[entity_id] for entity_id in assigned_ids
-        )
-        parameters.assembly_radius = max(
-            (parameters.stations[entity_id].distance_to(center) for entity_id in assigned_ids),
-            default=0.0,
-        )
-        for entity_id in assigned_ids:
-            if previous.get(entity_id) == parameters.stations[entity_id]:
-                continue
-            entity = simulation.entities[entity_id]
-            entity.path.clear()
-            entity.move_target = None
-            simulation._reset_movement_liveness(entity, clear_stop=True)
-    return True
-
-
 def initialize_runtime_entity(
     simulation: Simulation, automation: Automation, entity_id: str
 ) -> None:
@@ -781,3 +254,261 @@ def repair_parameters(automation: Automation) -> RepairParameters:
     if not isinstance(automation.parameters, RepairParameters):
         raise TypeError("automation does not have repair parameters")
     return automation.parameters
+
+
+def drive_patrol(simulation: Simulation, automation: Automation) -> None:
+    parameters = _patrol_parameters(automation)
+    ordered = sorted(automation.entity_ids)
+    indices = {key: index for index, key in enumerate(ordered)}
+    allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
+    held_cells = frozenset(
+        simulation.game_map.cell_for(e.position)
+        for e in simulation.entities.values()
+        if e.state is UnitState.HOLDING and e.is_movable
+    )
+    for key in scheduled_entity_ids(simulation, automation):
+        entity = simulation.entities[key]
+        if entity.path or simulation.assignments.get(key) != automation.automation_id:
+            continue
+        if not allowance.claim():
+            break
+        waypoint_index = parameters.waypoint_indices.get(key, 0)
+        anchor = parameters.waypoints[waypoint_index]
+        target = (
+            simulation._gathering_slots(
+                PointTarget(anchor), len(ordered), collision_radius(entity.kind)
+            )[indices[key]]
+            if len(ordered) > 1
+            else anchor
+        )
+        try:
+            paths = command_handlers.plan_group_paths(
+                simulation, (key,), {key: target}, shared_goal=anchor, held_cells=held_cells
+            )
+        except PathfindingError as error:
+            simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
+            return
+        parameters.waypoint_indices[key] = (waypoint_index + 1) % len(parameters.waypoints)
+        simulation._start_path(
+            entity, target, paths[key], automation.automation_id, UnitState.PATROLLING
+        )
+
+
+def drive_defend(simulation: Simulation, automation: Automation) -> None:
+    parameters = _defend_parameters(automation)
+    allowance = simulation._routes.automation_allowance(
+        simulation.GATHERING_PATH_BUDGET
+        if parameters.gathering_point
+        else simulation.AUTOMATION_ROUTE_BUDGET
+    )
+    buildings = simulation._building_cells()
+    held_cells = frozenset(
+        simulation.game_map.cell_for(e.position)
+        for e in simulation.entities.values()
+        if e.state is UnitState.HOLDING and e.is_movable
+    )
+    if parameters.deployment_slots:
+        anchor = next(
+            (
+                p
+                for p in parameters.deployment_slots
+                if simulation.game_map.cell_for(p) not in buildings
+            ),
+            None,
+        )
+    else:
+        center = target_center(parameters.target)
+        anchor = min(
+            (
+                p
+                for p in parameters.stations.values()
+                if simulation.game_map.cell_for(p) not in buildings
+            ),
+            key=lambda p: (p.distance_to(center), p.y, p.x),
+            default=None,
+        )
+    enemies = {
+        key: e.position
+        for key, e in simulation.entities.items()
+        if e.owner_id != automation.owner_id
+    }
+    enemy_index = SpatialIndex(enemies)
+    attacked = [
+        simulation.entities[other]
+        for other in automation.entity_ids
+        if simulation.entities[other].last_attacker_id in enemies
+        and simulation.entities[other].last_attacked_tick is not None
+        and simulation.tick - (simulation.entities[other].last_attacked_tick or 0)
+        <= simulation.DEFEND_ATTACK_MEMORY_TICKS
+    ]
+    attacked_index = SpatialIndex({e.entity_id: e.position for e in attacked})
+    station_distances = {
+        key: simulation.entities[key].position.distance_to(parameters.stations[key])
+        for key in automation.entity_ids
+    }
+    responding = tuple(
+        key
+        for key in automation.entity_ids
+        if station_distances[key] <= simulation.DEFEND_RESPONSE_RADIUS
+    )
+    enemy_ids = dict(
+        zip(
+            responding,
+            enemy_index.nearest_many(
+                tuple(
+                    (parameters.stations[key], simulation.DEFEND_RESPONSE_RADIUS)
+                    for key in responding
+                )
+            ),
+            strict=True,
+        )
+    )
+    victim_ids = dict(
+        zip(
+            responding,
+            attacked_index.nearest_many(
+                tuple(
+                    (simulation.entities[key].position, simulation.DEFEND_RESPONSE_RADIUS * 2)
+                    for key in responding
+                )
+            ),
+            strict=True,
+        )
+    )
+    # Dispatch front ranks first so early arrivals do not seal off deeper stations.
+    ordered = sorted(automation.entity_ids, key=lambda key: (station_distances[key], key))
+    for key in ordered:
+        if simulation.assignments.get(key) != automation.automation_id:
+            continue
+        entity = simulation.entities[key]
+        station = parameters.stations[key]
+        station_distance = station_distances[key]
+        enemy_id = enemy_ids.get(key)
+        victim_id = victim_ids.get(key)
+        if victim_id is not None:
+            enemy_id = simulation.entities[victim_id].last_attacker_id
+        current = simulation.entities.get(entity.attack_target_id or "")
+        if (
+            entity.pursue_target
+            and current is not None
+            and current.position.distance_to(station) <= simulation.DEFEND_PURSUIT_RADIUS
+        ):
+            continue
+        if (
+            enemy_id is not None
+            and not attacked
+            and entity.position.distance_to(enemies[enemy_id]) <= entity.kind.profile.attack_range
+        ):
+            enemy_id = None
+        if enemy_id is not None:
+            if not entity.pursue_target or entity.attack_target_id != enemy_id:
+                entity.path.clear()
+                entity.move_target = None
+                entity.attack_target_id = enemy_id
+                entity.pursue_target = True
+                entity.state = UnitState.ATTACKING
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.DEFEND_ENGAGED,
+                    key,
+                    automation_id=automation.automation_id,
+                    target_id=enemy_id,
+                )
+            continue
+        if entity.pursue_target:
+            entity.pursue_target = False
+            entity.attack_target_id = None
+            entity.path.clear()
+            entity.move_target = None
+            simulation.events.record(
+                simulation.tick,
+                EventType.DEFEND_RETURNED,
+                key,
+                automation_id=automation.automation_id,
+            )
+        if entity.path:
+            continue
+        entity.state = UnitState.DEFENDING
+        tolerance = simulation.DEFEND_STATION_TOLERANCE
+        if station_distance <= tolerance:
+            continue
+        if not allowance.claim():
+            continue
+        try:
+            paths = command_handlers.plan_group_paths(
+                simulation, (key,), {key: station}, shared_goal=anchor, held_cells=held_cells
+            )
+        except PathfindingError as error:
+            simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
+            return
+        simulation._start_path(
+            entity, station, paths[key], automation.automation_id, UnitState.DEFENDING
+        )
+
+
+def refresh_gathering_formation(simulation: Simulation, automation: Automation) -> None:
+    if isinstance(automation.parameters, DefendParameters):
+        coordinate_shared_defend_stations(
+            simulation, automation.parameters.target, automation.owner_id
+        )
+
+
+def coordinate_shared_defend_stations(
+    simulation: Simulation, target: SpatialTarget, owner_id: str
+) -> None:
+    automations = [
+        a
+        for a in simulation.automations.values()
+        if isinstance(a.parameters, DefendParameters)
+        and a.parameters.target == target
+        and a.owner_id == owner_id
+        and a.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING, AutomationStatus.PAUSED}
+    ]
+    ids = sorted(
+        {
+            key
+            for a in automations
+            for key in a.entity_ids
+            if key in simulation.entities and simulation.assignments.get(key) == a.automation_id
+        }
+    )
+    if not ids:
+        return
+    id_set = frozenset(ids)
+    previous = {
+        key: point
+        for a in automations
+        for key, point in _defend_parameters(a).stations.items()
+        if key in id_set
+    }
+    if not any(
+        _defend_parameters(a).deployment_slots or _defend_parameters(a).gathering_point
+        for a in automations
+    ):
+        stations = build_defend_stations(target, tuple(ids), simulation.game_map)
+        slots: tuple[Point, ...] = ()
+    else:
+        slots = simulation._gathering_slots(
+            target, len(ids), max(collision_radius(simulation.entities[key].kind) for key in ids)
+        )
+        stations = assign_formation_slots(
+            {key: simulation.entities[key].position for key in ids},
+            slots,
+            target_center(target),
+            previous,
+        )
+    center = target_center(target)
+    assembly_radius = max((p.distance_to(center) for p in slots), default=0.0)
+    for automation in automations:
+        parameters = _defend_parameters(automation)
+        parameters.stations = {
+            key: stations[key] for key in automation.entity_ids if key in stations
+        }
+        parameters.deployment_slots = slots
+        parameters.assembly_radius = assembly_radius
+        for key, station in parameters.stations.items():
+            if previous.get(key) != station:
+                entity = simulation.entities[key]
+                entity.path.clear()
+                entity.move_target = None
+                simulation._reset_movement_liveness(entity, clear_stop=True)

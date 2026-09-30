@@ -15,6 +15,9 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python -m airts
 ```
 
+The first simulation startup compiles the serial CPU kernels and can take several seconds.
+NumPy holds numeric buffers; Numba accelerates movement, route lookahead, and visibility.
+
 ## Run
 
 OpenGL 3.3 is the default and needs a compatible graphics driver. Startup failures are reported;

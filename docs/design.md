@@ -38,11 +38,6 @@ patrol/defend/reinforcement/repair automations, JSON saves, and deterministic re
 OpenGL 3.3 is the default; software rendering is explicit. Performance targets and their
 measurement limits belong to the performance document, not a blanket claim of passing FPS.
 
-Movement currently combines shared routing, local collision/pushing, and a separate large-force
-reservation controller. Packed motion can look grid-like; passing selected scenarios does not
-establish general crowd correctness. A replacement must explicitly define movement and save/replay
-migration contracts.
-
 No language provider, voice, MCP, scouting reports, map editor, multiplayer, Unity, dynamic terrain,
 semantic map regions, or multi-region automation is implemented. Visibility has no occlusion,
 last-known enemy memory, or fog overlay. There is no technology tree, armor, cover, splash damage,

@@ -10,6 +10,8 @@ description = "A human-in-the-loop RTS research environment for language-driven 
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "moderngl>=5.12,<6",
+    "numba>=0.63.1,<0.64",
+    "numpy>=2.2,<2.4",
     "pygame-ce>=2.5.7,<3",
 ]
 

@@ -15,7 +15,6 @@ from airts.commands import (
     MoveCommand,
     PauseAutomationCommand,
 )
-from airts.events import EventType
 from airts.geometry import Point, rectangle_region
 from airts.simulation import Simulation
 from airts.world.entities import Entity, UnitState
@@ -517,19 +516,6 @@ def test_large_force_never_moves_an_idle_friendly_through_a_factory() -> None:
         random_seed=127,
     )
     assert simulation.execute(MoveCommand(mover_ids, Point(80.5, 30.5))).accepted
-    source_slots = {
-        entity_id: (
-            int(simulation.entities[entity_id].position.x),
-            int(simulation.entities[entity_id].position.y),
-        )
-        for entity_id in mover_ids
-    }
-    source_slots["idle_victim"] = (12, 42)
-    simulation._open_force_slots = (
-        1.0,
-        source_slots,
-        {slot: entity_id for entity_id, slot in source_slots.items()},
-    )
     idle_cells = simulation.occupancy.cells_for("idle_victim")
 
     simulation.advance()
@@ -691,12 +677,12 @@ def test_large_move_near_map_edge_skips_an_out_of_bounds_staging_leg() -> None:
     simulation.advance(5)
 
 
-def test_full_traffic_lattice_waits_without_crashing_or_losing_the_queued_unit() -> None:
+def test_dense_continuous_packing_preserves_order_and_physical_clearance() -> None:
     simulation = Simulation(
         load_map_data(
             {
                 "id": "full_traffic",
-                "name": "No free reservation slot",
+                "name": "Dense continuous packing",
                 "width": 13,
                 "height": 13,
                 "terrain": {"default": "grass", "rectangles": []},
@@ -730,8 +716,9 @@ def test_full_traffic_lattice_waits_without_crashing_or_losing_the_queued_unit()
     )
     simulation.advance()
     assert queued.path and queued.move_target == Point(12.5, 12.5)
-    assert queued.position == Point(0.8, 0.8)
-    blocked = simulation.events.query(
-        event_types=frozenset({EventType.MOVEMENT_BLOCKED}), subject_id=queued.entity_id
+    assert queued.position.distance_to(Point(0.8, 0.8)) <= queued.speed * Simulation.TICK_SECONDS
+    assert all(
+        queued.position.distance_to(entity.position) >= 0.6 - 1e-8
+        for key, entity in simulation.entities.items()
+        if key != queued.entity_id
     )
-    assert blocked and blocked[0].details["evidence"] == "TRAFFIC_CAPACITY"

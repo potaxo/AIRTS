@@ -9,7 +9,7 @@ from airts.automations import AutomationKind
 from airts.commands import RemoveEntityCommand
 from airts.events import EventType
 from airts.geometry import Point
-from airts.navigation.pathfinding import PathfindingError
+from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.navigation.spatial_index import SpatialIndex
 from airts.world.entities import Entity, UnitState
 from airts.world.projectiles import Projectile, ProjectileTrace, projectile_speed
@@ -32,27 +32,48 @@ def drive_combat(simulation: Simulation) -> None:
     owner_indexes = {
         owner_id: SpatialIndex(positions) for owner_id, positions in positions_by_owner.items()
     }
-    hostile_indexes = {
-        owner_id: tuple(
-            owner_indexes[other_id] for other_id in sorted(owner_indexes) if other_id != owner_id
-        )
-        for owner_id in owner_indexes
+    positions = {
+        key: point for owned in positions_by_owner.values() for key, point in owned.items()
     }
-    owner_bounds = {
-        owner_id: (
-            min(point.x for point in positions.values()),
-            min(point.y for point in positions.values()),
-            max(point.x for point in positions.values()),
-            max(point.y for point in positions.values()),
-        )
-        for owner_id, positions in positions_by_owner.items()
-    }
-    hostile_bounds = {
-        owner_id: tuple(
-            owner_bounds[other_id] for other_id in sorted(owner_bounds) if other_id != owner_id
-        )
-        for owner_id in owner_bounds
-    }
+    nearest_enemies: dict[str, str] = {}
+    for owner_id, owned in positions_by_owner.items():
+        armed = []
+        query_list = []
+        for key in owned:
+            entity = simulation.entities[key]
+            profile = entity.kind.profile
+            if profile.attack_damage <= 0:
+                continue
+            target = simulation.entities.get(entity.attack_target_id or "")
+            if (
+                target is not None
+                and target.owner_id != owner_id
+                and _squared_distance(positions[key], positions[target.entity_id])
+                <= profile.attack_range * profile.attack_range
+            ):
+                continue
+            assigned = simulation.assignments.get(key)
+            if (
+                assigned is not None
+                and simulation.automations[assigned].kind is AutomationKind.REPAIR_AND_RETURN
+            ):
+                continue
+            armed.append(key)
+            query_list.append((positions[key], profile.attack_range))
+        armed_ids, queries = tuple(armed), tuple(query_list)
+        for other_id in sorted(owner_indexes):
+            if other_id == owner_id:
+                continue
+            candidates = owner_indexes[other_id].nearest_many(queries)
+            for key, candidate in zip(armed_ids, candidates, strict=True):
+                if candidate is None:
+                    continue
+                previous = nearest_enemies.get(key)
+                if previous is None or (
+                    _squared_distance(positions[key], positions[candidate]),
+                    candidate,
+                ) < (_squared_distance(positions[key], positions[previous]), previous):
+                    nearest_enemies[key] = candidate
     # Persistence deliberately serializes entity mappings by stable ID.  Combat
     # therefore has to use the same order as a freshly loaded simulation rather
     # than depending on the construction history of the live dict.
@@ -60,6 +81,7 @@ def drive_combat(simulation: Simulation) -> None:
         attacker = simulation.entities.get(entity_id)
         if attacker is None or attacker.kind.profile.attack_damage <= 0:
             continue
+        attacker_position = positions[entity_id]
         assigned_id = simulation.assignments.get(entity_id)
         if (
             assigned_id is not None
@@ -76,7 +98,7 @@ def drive_combat(simulation: Simulation) -> None:
         attack_range = attacker.kind.profile.attack_range
         attack_range_squared = attack_range * attack_range
         ordered_target_distance_squared = (
-            _squared_distance(attacker.selection_position, ordered_target.selection_position)
+            _squared_distance(attacker_position, positions[ordered_target.entity_id])
             if ordered_target is not None
             else None
         )
@@ -121,16 +143,8 @@ def drive_combat(simulation: Simulation) -> None:
             and ordered_target_distance_squared <= attack_range_squared
         ):
             firing_target = ordered_target
-        elif any(
-            _squared_distance_to_bounds(attacker.selection_position, bounds)
-            <= attack_range * attack_range
-            for bounds in hostile_bounds[attacker.owner_id]
-        ):
-            firing_target = nearest_enemy_in_range(
-                simulation, attacker, hostile_indexes[attacker.owner_id]
-            )
         else:
-            firing_target = None
+            firing_target = simulation.entities.get(nearest_enemies.get(entity_id, ""))
         if firing_target is None:
             continue
         if not attacker.pursue_target:
@@ -148,8 +162,8 @@ def drive_combat(simulation: Simulation) -> None:
             target_entity_id=firing_target.entity_id,
             owner_id=attacker.owner_id,
             weapon_kind=attacker.kind,
-            position=attacker.selection_position,
-            destination=firing_target.selection_position,
+            position=attacker_position,
+            destination=positions[firing_target.entity_id],
             damage=attacker.kind.profile.attack_damage,
             speed=speed,
         )
@@ -249,48 +263,9 @@ def finish_projectile(simulation: Simulation, projectile: Projectile) -> None:
     )
 
 
-def nearest_enemy_in_range(
-    simulation: Simulation,
-    attacker: Entity,
-    enemy_indexes: tuple[SpatialIndex, ...],
-) -> Entity | None:
-    """Return the nearest in-range hostile with stable ID tie-breaking."""
-
-    attack_range = attacker.kind.profile.attack_range
-    candidate_ids = tuple(
-        entity_id
-        for entity_index in enemy_indexes
-        if (entity_id := entity_index.nearest(attacker.selection_position, attack_range))
-        is not None
-    )
-    if not candidate_ids:
-        return None
-    nearest_id = min(
-        candidate_ids,
-        key=lambda entity_id: (
-            _squared_distance(
-                attacker.selection_position,
-                simulation.entities[entity_id].selection_position,
-            ),
-            entity_id,
-        ),
-    )
-    return simulation.entities[nearest_id]
-
-
 def _squared_distance(first: Point, second: Point) -> float:
     offset_x = first.x - second.x
     offset_y = first.y - second.y
-    return offset_x * offset_x + offset_y * offset_y
-
-
-def _squared_distance_to_bounds(
-    point: Point,
-    bounds: tuple[float, float, float, float],
-) -> float:
-    minimum_x, minimum_y, maximum_x, maximum_y = bounds
-    offset_x = max(minimum_x - point.x, 0.0, point.x - maximum_x)
-    offset_y = max(minimum_y - point.y, 0.0, point.y - maximum_y)
     return offset_x * offset_x + offset_y * offset_y
 
 
@@ -299,14 +274,29 @@ def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> No
 
     if attacker.congestion_stopped:
         return
+    goals = _firing_approach_points(simulation, attacker, target)
     try:
         point, path = simulation._routes.shared_path_to_any(
             attacker.position,
-            _firing_approach_points(simulation, attacker, target),
+            goals,
             simulation._building_cells(),
         )
     except PathfindingError:
         return
+    slot = sum((index + 1) * ord(char) for index, char in enumerate(attacker.entity_id)) % len(
+        goals
+    )
+    approach = goals[slot]
+    direct = passable_segment_cells(
+        simulation.game_map, attacker.position, approach, simulation._building_cells()
+    )
+    if direct is not None:
+        point = approach
+        path = PathResult(
+            direct,
+            (point,),
+            sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
+        )
     simulation._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
 
 
