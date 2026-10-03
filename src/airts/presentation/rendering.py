@@ -109,19 +109,13 @@ class SoftwareRenderer:
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
         selected_entities = view.selected_entities
-        large_selection = len(selected_entities) > 128
-        if large_selection:
+        if len(selected_entities) > 128:
             self._draw_cached_large_unit_entities(
                 view, screen, colors, tile_size, (origin_x, origin_y)
             )
             return
-        show_full_health_bars = not large_selection
         unit_radius = max(5, round(tile_size * 0.42))
         bar_width = max(12, round(tile_size * 1.4))
-        selected_min_x: int | None = None
-        selected_min_y = 0
-        selected_max_x = 0
-        selected_max_y = 0
         for entity_id, entity in view.simulation.entities.items():
             center = (
                 origin_x + round(entity.selection_position.x * tile_size),
@@ -142,56 +136,18 @@ class SoftwareRenderer:
             else:
                 radius = unit_radius
                 color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
-                if large_selection and entity_id in selected_entities:
-                    color = (
-                        min(255, color[0] + 45),
-                        min(255, color[1] + 45),
-                        min(255, color[2] + 45),
-                    )
                 pygame.draw.circle(screen, color, center, radius)
-                if entity_id in selected_entities and not large_selection:
+                if entity_id in selected_entities:
                     pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
-                elif entity_id in selected_entities:
-                    left = center[0] - radius
-                    top = center[1] - radius
-                    right = center[0] + radius
-                    bottom = center[1] + radius
-                    if selected_min_x is None:
-                        selected_min_x = left
-                        selected_min_y = top
-                        selected_max_x = right
-                        selected_max_y = bottom
-                    else:
-                        selected_min_x = min(selected_min_x, left)
-                        selected_min_y = min(selected_min_y, top)
-                        selected_max_x = max(selected_max_x, right)
-                        selected_max_y = max(selected_max_y, bottom)
                 if entity_id == view.inspected_entity_id and entity_id not in selected_entities:
                     pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
-            if (
-                show_full_health_bars
-                or entity.health < entity.kind.profile.max_health
-                or entity_id == view.inspected_entity_id
-            ):
-                bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
-                pygame.draw.rect(screen, (70, 35, 35), bar)
-                health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
-                pygame.draw.rect(
-                    screen,
-                    (74, 218, 111),
-                    pygame.Rect(bar.x, bar.y, health_width, 3),
-                )
-        if selected_min_x is not None:
+            bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
+            pygame.draw.rect(screen, (70, 35, 35), bar)
+            health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
             pygame.draw.rect(
                 screen,
-                (245, 245, 245),
-                pygame.Rect(
-                    selected_min_x - 3,
-                    selected_min_y - 3,
-                    selected_max_x - selected_min_x + 6,
-                    selected_max_y - selected_min_y + 6,
-                ),
-                1,
+                (74, 218, 111),
+                pygame.Rect(bar.x, bar.y, health_width, 3),
             )
         inspected = view.simulation.entities.get(view.inspected_entity_id or "")
         interaction_range = (
