@@ -97,59 +97,66 @@ def _route_obstacles(
     return blocked - {start, end} if start in blocked or end in blocked else blocked
 
 
+HOLD_TOLERANCE = 0.04
+CONTACT_WAIT_TICKS = 8
+RECOVERY_RETRY_TICKS = 20
+
+
+def _hold_target(simulation: Simulation, entity: Entity) -> Point:
+    anchor = entity.hold_anchor
+    if anchor is None or entity.position.distance_to(anchor) <= HOLD_TOLERANCE:
+        entity.recovery_path.clear()
+        return entity.position
+    if entity.contact_wait_ticks:
+        return entity.position
+    buildings = simulation._building_cells()
+    if (
+        entity.recovery_path
+        and passable_segment_cells(
+            simulation.game_map, entity.position, entity.recovery_path[0], buildings
+        )
+        is None
+    ):
+        entity.recovery_path.clear()
+    if simulation._routes.clear_segment(entity.position, anchor, buildings):
+        entity.recovery_path.clear()
+        entity.recovery_blocked_cells = None
+        return anchor
+    if entity.recovery_blocked_cells == buildings:
+        return entity.position
+    if not entity.recovery_path and simulation.tick >= entity.recovery_retry_tick:
+        if simulation._routes.claim_combat_route():
+            entity.recovery_retry_tick = simulation.tick + RECOVERY_RETRY_TICKS
+            try:
+                route = simulation._routes.shared_path(entity.position, anchor, buildings)
+            except PathfindingError:
+                entity.recovery_blocked_cells = buildings
+                return entity.position
+            entity.recovery_blocked_cells = None
+            entity.recovery_path = list(route.waypoints)
+    while (
+        entity.recovery_path
+        and entity.position.distance_to(entity.recovery_path[0]) <= HOLD_TOLERANCE
+    ):
+        entity.recovery_path.pop(0)
+    return entity.recovery_path[0] if entity.recovery_path else entity.position
+
+
 def move_entities(simulation: Simulation) -> None:
     entities = {key: e for key, e in simulation.entities.items() if e.is_movable}
-    active = [key for key, e in entities.items() if e.path]
-    if not active:
+    if not entities:
         return
     keys = sorted(entities)
-    offsets = {key: index for index, key in enumerate(keys)}
-    records = []
-    fronts: dict[str, tuple[float, float, float]] = {}
-    held_cells = set()
+    obstacles = simulation._building_cells()
+    planned: set[str] = set()
     for key in keys:
         entity = entities[key]
-        point = entity.position
-        goal = entity.move_target or (entity.path[-1] if entity.path else point)
-        is_active = bool(entity.path)
-        records.append(
-            (
-                point.x,
-                point.y,
-                goal.x,
-                goal.y,
-                collision_radius(entity.kind),
-                entity.speed * simulation.TICK_SECONDS,
-                is_active,
-                not is_active and entity.state is not UnitState.HOLDING,
-            )
-        )
-        if entity.state is UnitState.HOLDING:
-            held_cells.add(simulation.game_map.cell_for(point))
-        if is_active:
-            dx, dy = goal.x - point.x, goal.y - point.y
-            length = max(hypot(dx, dy), 1e-9)
-            fronts[key] = dx / length, dy / length, -(point.x * dx + point.y * dy) / length
-    data = np.asarray(records, dtype=np.float64)
-    positions, goals = data[:, :2].copy(), data[:, 2:4].copy()
-    radii, speeds = data[:, 4].copy(), data[:, 5].copy()
-    moving, stationary = data[:, 6].astype(np.bool_), data[:, 7].astype(np.bool_)
-    stationary_cells = simulation._building_cells() | frozenset(held_cells)
-    direction_axis = int(
-        sum(abs(fronts[key][1]) for key in active) > sum(abs(fronts[key][0]) for key in active)
-    )
-
-    def front_order(key: str) -> tuple[int, float, str]:
-        return int(fronts[key][direction_axis] >= 0) ^ (simulation.tick % 2), fronts[key][2], key
-
-    active.sort(key=front_order)
-    planned: list[str] = []
-    simulation._movement_step_attempt_count += len(active)
-    for key in active:
-        entity = entities[key]
-        entity.collision_pressure = 0
+        if entity.contact_wait_ticks:
+            entity.contact_wait_ticks -= 1
+        if not entity.path:
+            continue
         entity.route_ticks += 1
-        skip_crowded_waypoints(simulation, entity, stationary_cells)
+        skip_crowded_waypoints(simulation, entity, obstacles)
         target = entity.path[0]
         distance = entity.position.distance_to(target)
         if entity.progress_target != target:
@@ -178,42 +185,99 @@ def move_entities(simulation: Simulation) -> None:
             entity.path.pop(0)
             entity.progress_target = entity.progress_distance = None
             entity.no_progress_ticks = 0
-            _finish_path(simulation, entity)
-            continue
-        planned.append(key)
-    order = np.asarray([offsets[key] for key in planned], dtype=np.int64)
-    targets = np.asarray(
+            if not entity.path:
+                _finish_path(simulation, entity)
+                continue
+        planned.add(key)
+    records = []
+    for key in keys:
+        entity = entities[key]
+        target = entity.path[0] if entity.path else _hold_target(simulation, entity)
+        point = entity.position
+        goal = entity.move_target or (
+            entity.path[-1] if entity.path else entity.hold_anchor or point
+        )
+        strong_intent = bool(entity.path) and not (
+            entity.defend_arrived and entity.state is UnitState.DEFENDING
+        )
+        profile = entity.kind.profile
+        assert profile.movement_speed is not None
+        records.append(
+            (
+                point.x,
+                point.y,
+                target.x,
+                target.y,
+                goal.x,
+                goal.y,
+                collision_radius(entity.kind),
+                profile.movement_speed * simulation.TICK_SECONDS,
+                strong_intent,
+                bool(entity.path),
+            )
+        )
+    data = np.asarray(records, dtype=np.float64)
+    positions, target_data, goals = data[:, :2].copy(), data[:, 2:4].copy(), data[:, 4:6].copy()
+    radii, speeds = data[:, 6].copy(), data[:, 7].copy()
+    moving = data[:, 8].astype(np.bool_)
+    stationary = ~moving
+    # One stable front ordering for active routes and nearby resting bodies.
+    # Batch the arithmetic; IDs are already sorted and provide the last tie break.
+    routed = data[:, 9].astype(np.bool_)
+    vectors = goals - positions
+    lengths = np.asarray(
         [
-            (p.x, p.y)
-            for key in keys
-            for p in (entities[key].path[0] if entities[key].path else entities[key].position,)
-        ],
-        dtype=np.float64,
+            max(hypot(x, y), 1e-9)
+            for x, y in zip(vectors[:, 0].tolist(), vectors[:, 1].tolist(), strict=True)
+        ]
     )
+    headings = vectors / lengths[:, None]
+    totals = [sum(np.abs(headings[routed, axis]).tolist()) for axis in (0, 1)]
+    axis = int(totals[1] > totals[0])
+    sign = 1.0 if sum(headings[routed, axis].tolist()) >= 0 else -1.0
+    priority = np.where(routed, headings[:, axis] >= 0, sign >= 0).astype(np.int64)
+    priority ^= simulation.tick % 2
+    fronts = np.where(
+        routed,
+        -(positions[:, 0] * vectors[:, 0] + positions[:, 1] * vectors[:, 1]) / lengths,
+        -sign * positions[:, axis],
+    )
+    order = np.asarray(np.lexsort((np.arange(len(keys)), fronts, priority)), dtype=np.int64)
+    simulation._movement_step_attempt_count += len(planned)
     updated, pressure, checks = advance_positions(
         positions,
-        targets,
+        target_data,
         goals,
         radii,
         speeds,
         order,
         moving,
         stationary,
-        simulation._routes.obstacle_mask(simulation._building_cells()),
-        direction_axis,
+        simulation._routes.obstacle_mask(obstacles),
+        axis,
     )
     simulation._collision_pair_check_count += checks
     movable = frozenset(entities)
-    xs, ys = updated[:, 0].tolist(), updated[:, 1].tolist()
-    pressures = pressure.tolist()
-    for key in planned:
+    xs, ys, pressures = updated[:, 0].tolist(), updated[:, 1].tolist(), pressure.tolist()
+    for index, key in enumerate(keys):
         entity = entities[key]
-        index = offsets[key]
-        target = entity.path[0]
+        changed = xs[index] != entity.position.x or ys[index] != entity.position.y
+        candidate = Point(xs[index], ys[index]) if changed else entity.position
+        entity.collision_pressure = int(pressures[index])
+        if changed:
+            if simulation.game_map.cell_for(candidate) != simulation.game_map.cell_for(
+                entity.position
+            ):
+                simulation.occupancy.move(key, footprint_cells(entity.kind, candidate), movable)
+            entity.position = candidate
         if pressures[index]:
-            entity.collision_pressure = 1
+            entity.contact_wait_ticks = CONTACT_WAIT_TICKS
+        if key not in planned:
+            continue
+        target = entity.path[0]
+        if pressures[index] and entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS:
+            simulation._movement_blocked.add(key)
             if entity.no_progress_ticks == simulation.NO_PROGRESS_YIELD_TICKS:
-                simulation._movement_blocked.add(key)
                 simulation.events.record(
                     simulation.tick,
                     EventType.MOVEMENT_BLOCKED,
@@ -221,23 +285,15 @@ def move_entities(simulation: Simulation) -> None:
                     reason="LOCAL_OBSTACLE",
                     target=[target.x, target.y],
                 )
-            if entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS:
-                _recover_path(simulation, entity, stationary_cells)
-            if not entity.path:
-                _finish_path(simulation, entity)
-            continue
-        candidate = Point(xs[index], ys[index])
-        simulation.occupancy.move(key, footprint_cells(entity.kind, candidate), movable)
-        entity.position = candidate
-        simulation._movement_blocked.discard(key)
+        else:
+            simulation._movement_blocked.discard(key)
         if candidate.distance_to(target) <= 1e-9:
-            entity.position = target
             entity.path.pop(0)
         if entity.progress_target != (entity.path[0] if entity.path else None):
             entity.progress_target = entity.progress_distance = None
             entity.no_progress_ticks = 0
         if entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS:
-            _recover_path(simulation, entity, stationary_cells)
+            _recover_path(simulation, entity, obstacles)
         if not entity.path:
             _finish_path(simulation, entity)
 
@@ -248,6 +304,8 @@ def _finish_path(simulation: Simulation, entity: Entity) -> None:
     entity.move_target = None
     reset_movement_liveness(entity, clear_stop=True)
     entity.state = simulation._state_for_assignment(entity.entity_id)
+    if entity.state is UnitState.DEFENDING:
+        entity.defend_arrived = True
     simulation.events.record(
         simulation.tick,
         EventType.MOVEMENT_COMPLETED,
@@ -284,15 +342,8 @@ def plan_group_paths(
     destinations: dict[str, Point],
     *,
     shared_goal: Point | None = None,
-    held_cells: frozenset[Cell] | None = None,
 ) -> dict[str, PathResult]:
-    if held_cells is None:
-        held_cells = frozenset(
-            simulation.game_map.cell_for(e.position)
-            for e in simulation.entities.values()
-            if e.state is UnitState.HOLDING and e.is_movable and e.entity_id not in destinations
-        )
-    blocked = simulation._building_cells() | held_cells
+    blocked = simulation._building_cells()
     center = Point(
         sum(p.x for p in destinations.values()) / len(destinations),
         sum(p.y for p in destinations.values()) / len(destinations),

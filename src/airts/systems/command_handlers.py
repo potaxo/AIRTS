@@ -312,6 +312,7 @@ def stop(
         entity.move_target = None
         entity.pursue_target = False
         entity.state = UnitState.HOLDING if hold and entity.is_movable else UnitState.IDLE
+        entity.hold_anchor = entity.position if hold and entity.is_movable else None
         simulation._reset_movement_liveness(entity, clear_stop=True)
         simulation._movement_blocked.discard(entity_id)
     return simulation._accept("hold_position" if hold else "stop")

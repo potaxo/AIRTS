@@ -531,8 +531,8 @@ def test_large_force_never_moves_an_idle_friendly_through_a_factory() -> None:
     assert "factory" in simulation.occupancy.occupants((11, 43))
 
 
-def test_large_force_routes_around_a_held_group_without_moving_the_holders() -> None:
-    """Held units are fixed obstacles, not a map-wide barrier for friendly traffic."""
+def test_large_force_passes_held_group_with_bounded_motion_and_anchor_recovery() -> None:
+    """Contact may move held bodies; safe passage and subsequent recovery remain required."""
 
     mover_ids = tuple(f"mover_{index:03d}" for index in range(140))
     holder_ids = tuple(f"holder_{index:03d}" for index in range(60))
@@ -574,10 +574,15 @@ def test_large_force_routes_around_a_held_group_without_moving_the_holders() -> 
     crossed = 0
     last_progress_tick = simulation.tick
     while simulation.tick < 1_500 and crossed < len(mover_ids):
+        before = {entity_id: entity.position for entity_id, entity in simulation.entities.items()}
         simulation.advance()
         assert all(
-            simulation.entities[entity_id].position == holder_starts[entity_id]
-            for entity_id in holder_ids
+            simulation.entities[entity_id].state is UnitState.HOLDING for entity_id in holder_ids
+        )
+        assert all(
+            entity.position.distance_to(before[entity_id])
+            <= entity.speed * Simulation.TICK_SECONDS + 1e-8
+            for entity_id, entity in simulation.entities.items()
         )
         next_crossed = sum(
             simulation.entities[entity_id].position.x > 37 for entity_id in mover_ids
@@ -591,8 +596,13 @@ def test_large_force_routes_around_a_held_group_without_moving_the_holders() -> 
         )
 
     assert crossed == len(mover_ids), (
-        f"only {crossed}/{len(mover_ids)} moving units routed around the held formation"
+        f"only {crossed}/{len(mover_ids)} moving units passed the held formation"
     )
+    simulation.advance(180)
+    assert all(
+        simulation.entities[entity_id].position.distance_to(holder_starts[entity_id]) <= 0.05
+        for entity_id in holder_ids
+    ), "held units must recover their original anchors after the traffic clears"
 
 
 @pytest.mark.parametrize("enemies", (False, True), ids=("peaceful", "mixed_army_under_fire"))

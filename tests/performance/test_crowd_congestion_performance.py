@@ -17,6 +17,7 @@ from airts.contracts.commands import (
     MoveCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
+from airts.navigation.collision import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
@@ -308,7 +309,7 @@ def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
     assert mover.path[0] == Point(57.5, 35.5)
 
 
-def test_large_scout_move_flows_past_a_stationary_enemy_heavy_without_jitter() -> None:
+def test_large_scout_move_flows_past_a_yielding_enemy_heavy_without_jitter() -> None:
     scout_count = 152
     scout_ids = tuple(f"scout_{index:04d}" for index in range(scout_count))
     simulation = Simulation(
@@ -342,12 +343,20 @@ def test_large_scout_move_flows_past_a_stationary_enemy_heavy_without_jitter() -
     )
     simulation.entities["stationary_heavy"].health = 1_000_000
     starts = {entity_id: simulation.entities[entity_id].position for entity_id in scout_ids}
-    heavy_start = simulation.entities["stationary_heavy"].position
 
     assert simulation.execute(MoveCommand(scout_ids, Point(17.5, 4.5))).accepted
     for _ in range(50):
+        heavy = simulation.entities["stationary_heavy"]
+        previous = heavy.position
         simulation.advance()
-        assert simulation.entities["stationary_heavy"].position == heavy_start
+        assert heavy.position.distance_to(previous) <= heavy.speed * Simulation.TICK_SECONDS + 1e-8
+        assert not heavy.path and heavy.move_target is None and not heavy.pursue_target
+        assert all(
+            heavy.position.distance_to(entity.position)
+            >= collision_radius(heavy.kind) + collision_radius(entity.kind) - 1e-8
+            for entity in simulation.entities.values()
+            if entity.is_movable and entity.entity_id != heavy.entity_id
+        )
 
     progressed = sum(
         starts[entity_id].y - simulation.entities[entity_id].position.y >= 8.0

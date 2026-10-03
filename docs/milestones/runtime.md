@@ -51,11 +51,11 @@ and patrol/defend dispatch.
 Static routing uses reverse Dijkstra fields over four-neighbor weighted terrain. A bounded LRU cache
 shares each destination field across units; changing building obstacles changes the cache key.
 Group orders preserve translated positions, fitting the group inside map edges. When terrain or
-held units prevent that placement, they allocate reachable destination slots. Ordinary mobile units
+buildings prevent that placement, they allocate reachable destination slots. Ordinary mobile units
 remain local collision obstacles, so an occupied destination can wait for them to move. Groups share
 an approach route and branch through clear terrain to their destinations.
-Movement shortens visible route segments and uses spatially local clearance constraints with a speed
-limit. Held units remain fixed. Opposing groups alternate processing priority and prefer a common
+Movement shortens visible route segments and submits all actual displacement through the local
+contact controller described below. Opposing groups alternate processing priority and prefer a common
 passing side. Sustained stalls trigger budgeted replanning; a blocked order stays queued.
 Numeric movement, lookahead, and exact visibility unions run in serial compiled CPU loops without
 fastmath or parallel reductions. Compilation happens during simulation construction; compilation
@@ -63,13 +63,82 @@ errors propagate. Numeric buffers and navigation caches rebuild after load and d
 
 Line defenses spread along the line. Area defenses use separated stations, expanding small gathering
 areas into hexagonal slots with a unit-width aisle between neighbors. This deliberately replaces
-maximum-density packing: settled units stay fixed, and later arrivals can pass between them without
-reservations or pushing. Same-owner defenses with the same target share unique stations and retain
+maximum-density packing: the aisles reduce contact pressure, while settled units can yield and
+recover their established stations without reservations or global rematching. Same-owner defenses with the same target share unique stations and retain
 valid slots on membership changes. Patrol and defense route dispatch have per-controller and global
 budgets. Crowd throughput, separation, and frame-time requirements remain owned by
 [performance](performance.md#crowd-and-routing); they must be measured, not inferred from the design.
 Ordinary defenses can also acquire deployment slots when their initial stations lack clearance;
 save/load preserves those expanded stations without changing the gathering flag.
+
+### Contact, yielding and Hold anchors
+
+The controller replaces path-only sequential movement, fixed holders and mobile whole-cell route
+obstacles. Its scope includes contact prediction/certification in navigation, intent and all-body
+submission in movement, Hold command state, defense recovery and save/replay. It retains one
+controller, the public facade, command authority, deterministic 10 Hz execution and existing gates.
+
+Idle and Stop units can yield through bounded passive displacement without acquiring a movement
+order or returning to their previous positions. Moving units retain their orders while yielding.
+Friendly and hostile mobile units remain physical colliders. Buildings, impassable terrain and map
+edges remain hard constraints; neither pushing nor recovery may tunnel, exchange identities or
+exceed the existing per-tick total displacement limit. Mobile units, including holders, must not
+become impassable whole-cell walls in static routing. Safe waiting is valid when space is unavailable.
+
+Accepting HoldPosition establishes an authoritative anchor at the unit's current position. Contact
+can displace its body without replacing that anchor, clearing Hold, changing control ownership or
+enabling enemy pursuit. With pressure relieved and a clear reachable anchor, it returns through the
+same constrained movement controller, including ticks with no ordinary movement paths. Recovery
+must settle within a small arrival tolerance rather than oscillate or oppose passing traffic with
+unbounded force. Occupied or incompatible anchors can delay recovery; safety takes precedence over
+exact arrival. Reissuing HoldPosition establishes a new anchor at the current position. Stop, Move
+and other accepted control replacements end Hold recovery; rejected commands preserve it.
+
+Passive contact does not fabricate movement-started/completed events for an absent movement order.
+Occupancy and spatial queries must reflect every submitted displacement, including pathless units.
+Defense stations retain their identities when their units yield; safe recovery must not repeatedly
+remap stations or immediately undo contact displacement. Hold anchors and defense stations are
+distinct owners of intent, not competing independent physical controllers.
+
+Navigation generates a preferred displacement, predicts bounded contact corrections, then certifies
+each submitted swept disc against static supporting planes and relative-motion contact planes.
+Stable ID order supplies separation normals for identical centers; existing overlap recovers
+gradually without becoming deeper. Every mobile body participates, including pathless bodies and
+enemies. Static buildings, terrain and boundaries do not yield. One speed circle bounds the total
+step: contact and recovery cannot add another independently capped displacement. Passive yielding
+and recovery use a lower speed allowance than active travel. A bounded side step away from incoming
+traffic opens a lane instead of dragging stationary bodies through the entire formation.
+
+Two deterministic contact sweeps transmit short-chain pressure; longer chains can advance over
+multiple ticks. Continuous certification is mandatory even when prediction cannot fully resolve
+pressure, so exhausted local work reduces throughput instead of permitting penetration. Original
+position buckets include both units' full displacement envelopes and remain valid throughout the
+solve. Stable resting bodies need no displacement certificate; approaching movers still certify
+against them and wake passive contact. All changed bodies update occupancy before projectiles and
+combat read final positions; automation intent is generated before this movement phase.
+
+Hold has an arrival dead zone and a contact quiet interval. Actual incoming pressure suppresses its
+own return preference; it resumes low-speed recovery after the interval. Internal recovery does
+not acquire control or emit player movement-started/completed events. Nonconflicting anchors may
+request finite local yielding along a return corridor; a substantially displaced returner takes
+precedence over a neighbor's small settling correction. The latter waits after yielding, avoiding
+opposed spring forces. Conflicting goals or a stationary occupant at the anchor cannot be evicted
+indefinitely; safe waiting takes precedence. Settled defenders use the same weak recovery behavior,
+retain station IDs and assignments, and wait under pressure. Initial defense deployment and enemy
+pursuit remain their existing business intents rather than being weakened into station recovery.
+
+Ordinary path progress/stall recovery still uses the shared route budgets. Hold uses its own internal
+waypoints, a retry interval and the existing global route allowance; it never replans every tick.
+A failed static route sleeps until building obstacles change (the terrain is static). Its recorded
+failed-obstacle snapshot prevents an unreachable anchor from consuming route budget forever;
+unavailable dynamic space is handled locally and does not modify the anchor. A newly invalid
+recovery segment is discarded and retried within that same allowance. Recovery ends by stopping
+inside the arrival tolerance, without snapping coordinates or promising impossible exact arrival.
+
+Executable acceptance belongs to [movement tests](../../tests/integration/test_movement.py),
+[large-force regressions](../../tests/integration/test_large_force_behavior_regressions.py), and
+[save/load tests](../../tests/integration/test_persistence.py). Hold fixes an anchor, not the body's
+coordinates at every tick.
 
 Opportunistic fire does not cancel locomotion, including defenders traveling past enemies outside
 their assigned defense area. Only an actual pursuit can interrupt that travel; explicit attack
@@ -116,16 +185,24 @@ publishing a building. Queue, progress, resource, and assignment state survive s
 or incompatible input. Saves preserve complete authoritative state, selections, queues, combat,
 movement progress, events, and counters; replay compares the final `snapshot()` and ordered events
 against recorded expectations, rather than comparing the full `export_state()` representation.
-Saves use v9 without traffic reservations. Navigation caches rebuild deterministically; presentation
-history is not saved. Mobile units may share occupancy cells, while buildings remain exclusive
-obstacles. Loading v9 must preserve complete state and subsequent deterministic execution.
+Saves use v10 without traffic reservations. Anchors, internal recovery waypoints/retry tick,
+contact quiet timers, failed static-route obstacle snapshots and established-defense arrival state
+are authoritative: losing them can change later movement or consume different route budgets.
+They round-trip with ordinary movement progress, ownership, combat, counters and events. Spatial
+buckets, numeric scratch buffers, contact candidates and shared navigation fields are disposable
+caches and rebuild after load. Presentation history is not saved. Mobile units may share occupancy
+cells, while buildings remain exclusive obstacles. Loading v10 preserves subsequent deterministic
+execution, including saves taken while a holder is displaced and still recovering.
 
-The loader accepts v7/v8 saves, preserving entities, orders, and waypoints. It validates and discards
-old traffic reservations and resets congestion/progress tracking for the replacement controller.
-Future trajectories follow the new algorithm; old-run continuation is not promised. Saving again
-writes v9. Other old save versions remain unsupported. Replays use v8 and reject earlier schemas
-explicitly because their recorded trajectories/events belong to the previous movement algorithm;
-there is no automatic replay migration.
+The loader supports v7/v8/v9 saves. Legacy holders use their recorded body position as the migration
+anchor; those files never recorded the original anchor, so it cannot be recovered. Recovery state
+starts fresh and old-run trajectories are not promised. v7/v8 traffic reservations are validated
+and discarded and their obsolete congestion/progress state is reset. Saving again writes v10;
+other older save schemas remain unsupported. Replays use v9 and explicitly reject earlier schemas,
+including v8: their expected trajectories/events belong to the previous movement behavior. There
+is no automatic replay migration. New replay verification still compares snapshot and ordered
+events; save continuation tests additionally compare complete exported authoritative state.
+
 [events.py](../../src/airts/contracts/events.py) provides ordered, filterable events and JSON Lines export.
 
 The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays

@@ -75,13 +75,36 @@ and the 6,000 collision-pair limit in the 500-unit choke; do not omit queued mem
 
 [Behavior regressions](../../tests/integration/test_large_force_behavior_regressions.py) preserve
 identity (no exact position exchanges), per-tick speed bounds, unobstructed front-rank continuity,
-307-scout four-cell bridge progress, stationary held formations, and building clearance. Shared
+307-scout four-cell bridge progress, traffic past held formations with bounded displacement and
+safe anchor recovery, and building clearance. Contact and Hold behavior are defined in
+[runtime](runtime.md#contact-yielding-and-hold-anchors).
+The movement scenarios retain continuous contact clearance and per-tick speed checks; passive
+displacement and anchor recovery count toward both simulated work and collision metrics. Shared
 defenses must yield 160 unique stations; one casualty leaves 159 with at most one survivor remapped.
 Four factories must produce 132 unique, spaced stations. Reinforcements retain valid established
 stations; contraction may replace obsolete outer slots. Stable identities take precedence over
 fresh global minimum-distance matching. Dense continuous packing must preserve orders and physical
 clearance without requiring a free traffic-lattice slot. The current movement contract is
 described in [runtime](runtime.md#movement-and-combat).
+
+## Contact solver measurement
+
+Count all narrow contact-plane evaluations in prediction and final certification, including
+pathless displacement, recovery and repeated sweeps; destination-capacity checks also count.
+Spatial bucket filtering is broadphase work, not a replacement for required collision constraints.
+Stable regions still pay for linear state packing/indexing and local overlap discovery, but do not
+run displacement certificates without an intent/correction. Report tick timing separately from
+completed-frame p99 and Real FPS. Constructor/JIT warm-up stays outside both timing streams;
+specified simulation commands, passive submission, Hold/defense recovery and replanning stay inside.
+Use identical fixture, seed, duration and timer for before/after measurements and keep raw samples
+under ignored `outputs/`. Existing frame and 6,000-pair choke gates remain unchanged.
+
+Fixed contact sweeps bound propagation work, not neighbor count. Ordinary separated distributions
+have small local neighborhoods; dense chains increase those neighborhoods and may need more ticks
+to clear. Identical centers can produce quadratic candidate count, and repeated half-plane solving
+can be worse than quadratic in an extreme dense component. There is no universal linear-time claim,
+neighbor truncation, N-by-N distance matrix or wall-clock-dependent simulation budget. Safety
+certification is not omitted in those cases; blocked space may legitimately prevent passage.
 
 ## Visual inspection
 

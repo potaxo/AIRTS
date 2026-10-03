@@ -235,7 +235,7 @@ class Simulation:
 
     @property
     def collision_pair_check_count(self) -> int:
-        """Broadphase pairs evaluated during the most recent tick."""
+        """Local contact/goal constraints evaluated, including repeated contact sweeps."""
 
         return self._collision_pair_check_count
 
@@ -472,12 +472,7 @@ class Simulation:
     def _allocate_destinations(
         self, entity_ids: tuple[str, ...], target: Point
     ) -> dict[str, Point]:
-        selected = frozenset(entity_ids)
-        blocked = self._building_cells() | frozenset(
-            self.game_map.cell_for(e.position)
-            for key, e in self.entities.items()
-            if key not in selected and e.is_movable and e.state is UnitState.HOLDING
-        )
+        blocked = self._building_cells()
         center = Point(
             sum(self.entities[key].position.x for key in entity_ids) / len(entity_ids),
             sum(self.entities[key].position.y for key in entity_ids) / len(entity_ids),

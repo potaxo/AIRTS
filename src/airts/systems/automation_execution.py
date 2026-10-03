@@ -187,6 +187,11 @@ def initialize_runtime_entity(
 ) -> None:
     entity = simulation.entities[entity_id]
     entity.path.clear()
+    entity.hold_anchor = None
+    entity.defend_arrived = False
+    entity.recovery_path.clear()
+    entity.recovery_blocked_cells = None
+    entity.recovery_retry_tick = entity.contact_wait_ticks = 0
     entity.move_target = None
     entity.attack_target_id = None
     entity.pursue_target = False
@@ -215,11 +220,6 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
     ordered = sorted(automation.entity_ids)
     indices = {key: index for index, key in enumerate(ordered)}
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
-    held_cells = frozenset(
-        simulation.game_map.cell_for(e.position)
-        for e in simulation.entities.values()
-        if e.state is UnitState.HOLDING and e.is_movable
-    )
     for key in scheduled_entity_ids(simulation, automation):
         entity = simulation.entities[key]
         if entity.path or simulation.assignments.get(key) != automation.automation_id:
@@ -236,9 +236,7 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
             else anchor
         )
         try:
-            paths = movement.plan_group_paths(
-                simulation, (key,), {key: target}, shared_goal=anchor, held_cells=held_cells
-            )
+            paths = movement.plan_group_paths(simulation, (key,), {key: target}, shared_goal=anchor)
         except PathfindingError as error:
             simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
             return
@@ -256,11 +254,6 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
         else simulation.AUTOMATION_ROUTE_BUDGET
     )
     buildings = simulation._building_cells()
-    held_cells = frozenset(
-        simulation.game_map.cell_for(e.position)
-        for e in simulation.entities.values()
-        if e.state is UnitState.HOLDING and e.is_movable
-    )
     if parameters.deployment_slots:
         anchor = next(
             (
@@ -384,13 +377,15 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             continue
         entity.state = UnitState.DEFENDING
         tolerance = simulation.DEFEND_STATION_TOLERANCE
-        if station_distance <= tolerance:
+        if station_distance <= tolerance or (entity.defend_arrived and entity.contact_wait_ticks):
+            if station_distance <= tolerance:
+                entity.defend_arrived = True
             continue
         if not allowance.claim():
             continue
         try:
             paths = movement.plan_group_paths(
-                simulation, (key,), {key: station}, shared_goal=anchor, held_cells=held_cells
+                simulation, (key,), {key: station}, shared_goal=anchor
             )
         except PathfindingError as error:
             simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
@@ -463,6 +458,7 @@ def coordinate_shared_defend_stations(
         for key, station in parameters.stations.items():
             if previous.get(key) != station:
                 entity = simulation.entities[key]
+                entity.defend_arrived = False
                 entity.path.clear()
                 entity.move_target = None
                 simulation._reset_movement_liveness(entity, clear_stop=True)

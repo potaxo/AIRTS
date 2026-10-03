@@ -20,6 +20,7 @@ from airts.contracts.commands import (
     CreatePatrolCommand,
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
+    HoldPositionCommand,
     MoveCommand,
 )
 from airts.contracts.events import EventType
@@ -323,12 +324,13 @@ def test_nearby_defenders_retaliate_then_return_when_attacker_runs_away() -> Non
     raider.path.clear()
     raider.move_target = None
     raider.attack_target_id = None
-    raider.state = UnitState.HOLDING
+    assert simulation.execute(HoldPositionCommand(("raider",), owner_id="enemy")).accepted
     simulation.advance(100)
 
     assert all(
         simulation.entities[entity_id].attack_target_id is None
-        and simulation.entities[entity_id].position == station
+        and simulation.entities[entity_id].position.distance_to(station)
+        <= Simulation.DEFEND_STATION_TOLERANCE
         and simulation.entities[entity_id].state is UnitState.DEFENDING
         for entity_id, station in automation.parameters.stations.items()
     )

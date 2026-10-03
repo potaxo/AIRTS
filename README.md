@@ -68,7 +68,7 @@ These measurements do not count physical monitor scan-out;
 | `P` | Attach every selected factory loop to the active line or area defense; start a Loop on each factory first |
 | `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
 | `G` | Develop the economy with selected resource generators until 100 more resources |
-| `S` / `H` | Stop selected units or hold their current position |
+| `S` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/runtime.md#contact-yielding-and-hold-anchors)) |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
 | `Delete` | Delete one selected route or region and explicitly cancel automations using it |

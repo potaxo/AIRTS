@@ -10,6 +10,29 @@ from airts.simulation import Simulation
 from airts.world.map import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
 
 
+def hold_contact_simulation() -> Simulation:
+    """A single-file throat opens into enough space for contact yielding and return."""
+    return Simulation(
+        load_map_data(
+            {
+                "id": "hold_contact",
+                "name": "Hold contact and recovery",
+                "width": 20,
+                "height": 12,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [[0, 0, 7, 5, "rock"], [0, 6, 7, 6, "rock"]],
+                },
+                "entities": [
+                    {"id": "holder", "kind": "scout", "position": [5.5, 5.5]},
+                    {"id": "mover", "kind": "scout", "position": [4.5, 5.5]},
+                ],
+            }
+        ),
+        random_seed=113,
+    )
+
+
 def runtime_map() -> GameMap:
     return load_map_data(
         {

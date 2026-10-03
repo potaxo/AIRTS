@@ -11,6 +11,7 @@ from tests.integration.scenarios import (
     builder_factory_simulation,
     economy_combat_simulation,
     growing_factory_simulation,
+    hold_contact_simulation,
 )
 
 from airts.adapters.persistence import (
@@ -20,7 +21,14 @@ from airts.adapters.persistence import (
     load_simulation_data,
     save_simulation,
 )
-from airts.adapters.replay import capture_replay, load_replay, run_replay, save_replay
+from airts.adapters.replay import (
+    ReplayError,
+    capture_replay,
+    load_replay,
+    load_replay_data,
+    run_replay,
+    save_replay,
+)
 from airts.contracts.automations import (
     AutomationStatus,
     DefendParameters,
@@ -36,13 +44,108 @@ from airts.contracts.commands import (
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
+    HoldPositionCommand,
     ModifyAutomationCommand,
+    MoveCommand,
     PauseAutomationCommand,
     SetSelectionCommand,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.simulation import Simulation
+from airts.world.entities import UnitState
 from airts.world.map import EntityKind, GameMap, load_example_map
+
+
+def test_displaced_hold_round_trips_and_replays_before_anchor_recovery(tmp_path: Path) -> None:
+    """Save during actual contact, so rebuilding an anchor from position cannot pass."""
+    simulation = hold_contact_simulation()
+    anchor = simulation.entities["holder"].position
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    result = simulation.execute(MoveCommand(("mover",), Point(12.5, 5.5)))
+    assert result.accepted, (
+        f"held bodies must not reject a statically reachable route: {result.reason}"
+    )
+    for _ in range(40):
+        simulation.advance()
+        if simulation.entities["holder"].position.distance_to(anchor) > 0.1:
+            break
+    assert simulation.entities["holder"].position.distance_to(anchor) > 0.1
+    assert simulation.entities["holder"].state is UnitState.HOLDING
+    assert simulation.entities["holder"].hold_anchor == anchor
+    destination = tmp_path / "displaced-hold.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    replayed = run_replay(capture_replay(simulation))
+    assert restored.export_state() == simulation.export_state()
+    assert replayed.export_state() == simulation.export_state()
+
+    for instance in (simulation, restored, replayed):
+        assert instance.execute(MoveCommand(("mover",), Point(12.5, 9.5))).accepted
+    for _ in range(20):
+        _assert_continues_identically(simulation, restored, 5)
+        replayed.advance(5)
+        assert replayed.export_state() == simulation.export_state()
+    assert simulation.entities["holder"].position.distance_to(anchor) <= 0.05
+    assert simulation.entities["holder"].state is UnitState.HOLDING
+    # The complete command-driven run must also reproduce the recovered state and events.
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+@pytest.mark.parametrize("schema", ["airts-save-v7", "airts-save-v8", "airts-save-v9"])
+def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) -> None:
+    simulation = hold_contact_simulation()
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    state = simulation.export_state()
+    saved_position = [7.5, 5.5]
+    state["entities"]["holder"]["position"] = saved_position
+    for entity in state["entities"].values():
+        for field in (
+            "hold_anchor",
+            "contact_wait_ticks",
+            "recovery_path",
+            "recovery_retry_tick",
+            "defend_arrived",
+            "recovery_blocked_cells",
+        ):
+            entity.pop(field)
+    restored = load_simulation_data(
+        {"schema": schema, "map": simulation.game_map.to_dict(), "state": state}
+    )
+    assert restored.entities["holder"].hold_anchor == Point(*saved_position)
+    restored.advance(40)
+    assert restored.entities["holder"].position == Point(*saved_position)
+    assert SAVE_SCHEMA == "airts-save-v10"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("hold_anchor", None),
+        ("hold_anchor", [-1.0, 5.5]),
+        ("contact_wait_ticks", -1),
+        ("contact_wait_ticks", 9),
+        ("recovery_retry_tick", -1),
+        ("recovery_path", [[-1.0, 5.5]]),
+        ("defend_arrived", 1),
+        ("recovery_blocked_cells", [[-1, 5]]),
+    ],
+)
+def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) -> None:
+    simulation = hold_contact_simulation()
+    simulation.execute(HoldPositionCommand(("holder",)))
+    state = simulation.export_state()
+    state["entities"]["holder"][field] = value
+    with pytest.raises(PersistenceError):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+def test_previous_replay_schema_is_explicitly_rejected() -> None:
+    document = capture_replay(hold_contact_simulation()).to_dict()
+    document["schema"] = "airts-replay-v8"
+    with pytest.raises(ReplayError, match="unsupported replay schema"):
+        load_replay_data(document)
 
 
 def test_modified_automation_round_trips_without_a_new_lifecycle_transition(

@@ -242,5 +242,6 @@ def test_movers_bypass_held_group_in_gui() -> None:
     _show(
         simulation,
         mover_ids,
-        "Scouts must route around the fixed tank wall while every held tank remains anchored.",
+        "Scouts must pass safely; held tanks may yield and should recover their original anchors "
+        "after traffic clears (contact/Hold runtime replacement pending).",
     )

@@ -1,6 +1,6 @@
 """Deterministic swept-disc movement, compiled as one serial numeric loop."""
 
-from math import ceil, floor, hypot, sqrt
+from math import ceil, cos, floor, hypot, sin, sqrt
 
 import numpy as np
 
@@ -95,8 +95,18 @@ def _neighbors(
                     scratch[count] = other
                     count += 1
                 other = links[other]
-    # Numeric indices correspond to sorted entity IDs, independent of bucket order.
-    scratch[:count].sort()
+    # Tiny local lists need no NumPy sorting workspace. Dense lists retain its
+    # comparison sort; no neighbors are truncated and the final ID order is identical.
+    if count > 16:
+        scratch[:count].sort()
+    else:
+        for index in range(1, count):
+            value = scratch[index]
+            previous = index - 1
+            while previous >= 0 and scratch[previous] > value:
+                scratch[previous + 1] = scratch[previous]
+                previous -= 1
+            scratch[previous + 1] = value
     return count
 
 
@@ -174,6 +184,53 @@ def _steering_obstacles(
 
 
 @compile_numeric
+def _static_planes(
+    x: float,
+    y: float,
+    radius: float,
+    step: float,
+    obstacles: BoolArray,
+    planes: FloatArray,
+) -> int:
+    height, width = obstacles.shape
+    planes[0] = (1.0, 0.0, min(0.0, radius - x))
+    planes[1] = (-1.0, 0.0, min(0.0, x + radius - width))
+    planes[2] = (0.0, 1.0, min(0.0, radius - y))
+    planes[3] = (0.0, -1.0, min(0.0, y + radius - height))
+    count = 4
+    extent = step + radius
+    for oy in range(max(0, floor(y - extent)), min(height - 1, floor(y + extent)) + 1):
+        for ox in range(max(0, floor(x - extent)), min(width - 1, floor(x + extent)) + 1):
+            if not obstacles[oy, ox]:
+                continue
+            px = x - max(ox, min(ox + 1, x))
+            py = y - max(oy, min(oy + 1, y))
+            length = hypot(px, py)
+            if length > 1e-9:
+                planes[count] = (px / length, py / length, min(0.0, radius - length))
+                count += 1
+    return count
+
+
+@compile_numeric
+def _pair_normal(first: int, second: int, positions: FloatArray) -> tuple[float, float, float]:
+    px = positions[first, 0] - positions[second, 0]
+    py = positions[first, 1] - positions[second, 1]
+    length = hypot(px, py)
+    if length > 1e-9:
+        return px / length, py / length, length
+    # Stable ID indices supply an antisymmetric normal even at identical coordinates.
+    px = sqrt(first + 1.0) * cos(first * 2.399963229728653) - sqrt(second + 1.0) * cos(
+        second * 2.399963229728653
+    )
+    py = sqrt(first + 1.0) * sin(first * 2.399963229728653) - sqrt(second + 1.0) * sin(
+        second * 2.399963229728653
+    )
+    length = hypot(px, py)
+    return px / length, py / length, 0.0
+
+
+@compile_numeric
 def advance_positions(
     positions: FloatArray,
     targets: FloatArray,
@@ -186,10 +243,12 @@ def advance_positions(
     obstacles: BoolArray,
     direction_axis: int,
 ) -> tuple[FloatArray, BoolArray, int]:
-    """One sequential controller for all unit counts; no parallel reductions or reservations.
+    """Bounded contact prediction followed by continuous, serial certification.
 
-    Neighbor constraints use the original pair normal and already committed displacement.
-    This keeps the entire relative trajectory outside the contact distance, not just its end.
+    All discs can yield. Original-position buckets cover the full speed envelope, so
+    corrections cannot invalidate the candidate set. Certification uses a common
+    original normal for both displacements; its half-plane contains the entire
+    relative trajectory. Infeasible prediction never licenses penetration.
     """
     result = positions.copy()
     pressure = np.zeros(len(positions), dtype=np.bool_)
@@ -201,82 +260,74 @@ def advance_positions(
     columns, rows = ceil(width / bucket_size), ceil(height / bucket_size)
     heads = np.full(columns * rows, -1, dtype=np.int64)
     links = np.full(len(positions), -1, dtype=np.int64)
+    goal_heads = np.full(columns * rows, -1, dtype=np.int64)
+    goal_links = np.full(len(positions), -1, dtype=np.int64)
     headings = np.zeros_like(positions)
+    preferred = np.zeros_like(positions)
+    driven = active.copy()
     for key in range(len(positions)):
         x, y = positions[key]
-        bx = min(columns - 1, max(0, floor(x / bucket_size)))
-        by = min(rows - 1, max(0, floor(y / bucket_size)))
-        bucket = by * columns + bx
+        bucket = min(rows - 1, max(0, floor(y / bucket_size))) * columns + min(
+            columns - 1, max(0, floor(x / bucket_size))
+        )
         links[key], heads[bucket] = heads[bucket], key
-        if active[key]:
-            gx, gy = goals[key, 0] - x, goals[key, 1] - y
-            length = max(hypot(gx, gy), 1e-9)
-            headings[key, 0], headings[key, 1] = gx / length, gy / length
+        goal_bucket = min(rows - 1, max(0, floor(goals[key, 1] / bucket_size))) * columns + min(
+            columns - 1, max(0, floor(goals[key, 0] / bucket_size))
+        )
+        goal_links[key], goal_heads[goal_bucket] = goal_heads[goal_bucket], key
+        gx, gy = goals[key, 0] - x, goals[key, 1] - y
+        length = max(hypot(gx, gy), 1e-9)
+        headings[key, 0], headings[key, 1] = gx / length, gy / length
     scratch = np.empty(len(positions), dtype=np.int64)
     static_capacity = (ceil((maximum_step + maximum_radius) * 2) + 2) ** 2
     planes = np.empty((len(positions) + static_capacity + 4, 3), dtype=np.float64)
     checks = 0
+    yielded = np.zeros(len(positions), dtype=np.bool_)
     has_stationary = bool(stationary.any())
-    has_opposing = False
     positive = negative = False
     for key in range(len(positions)):
-        if not active[key]:
-            continue
-        if headings[key, direction_axis] >= 0:
-            positive = True
-        else:
-            negative = True
-    has_opposing = positive and negative
+        if active[key]:
+            if headings[key, direction_axis] >= 0:
+                positive = True
+            else:
+                negative = True
     for key in order:
         x, y = positions[key]
         dx, dy = targets[key, 0] - x, targets[key, 1] - y
         distance = hypot(dx, dy)
-        step = min(speeds[key], distance)
-        vx, vy = dx / distance * step, dy / distance * step
-        planes[0] = (1.0, 0.0, min(0.0, radii[key] - x))
-        planes[1] = (-1.0, 0.0, min(0.0, x + radii[key] - width))
-        planes[2] = (0.0, 1.0, min(0.0, radii[key] - y))
-        planes[3] = (0.0, -1.0, min(0.0, y + radii[key] - height))
-        count = 4
-        extent = step + radii[key]
-        for oy in range(max(0, floor(y - extent)), min(height - 1, floor(y + extent)) + 1):
-            for ox in range(max(0, floor(x - extent)), min(width - 1, floor(x + extent)) + 1):
-                if not obstacles[oy, ox]:
-                    continue
-                px = x - max(ox, min(ox + 1, x))
-                py = y - max(oy, min(oy + 1, y))
-                length = hypot(px, py)
-                if length > 1e-9:
-                    planes[count] = (px / length, py / length, min(0.0, radii[key] - length))
-                    count += 1
-        neighbors = _neighbors(
-            x,
-            y,
-            maximum_step * 2 + maximum_radius + radii[key],
-            positions,
-            heads,
-            links,
-            columns,
-            rows,
-            bucket_size,
-            scratch,
-        )
-        for index in range(neighbors):
-            other = scratch[index]
-            if other == key:
-                continue
-            px, py = x - positions[other, 0], y - positions[other, 1]
-            length = hypot(px, py)
-            if length <= 1e-9:
-                continue
-            checks += 1
-            nx, ny = px / length, py / length
-            clearance = min(0.0, radii[key] + radii[other] + 1e-7 - length)
-            clearance += nx * (result[other, 0] - positions[other, 0]) + ny * (
-                result[other, 1] - positions[other, 1]
+        if distance <= 1e-9:
+            continue
+        if stationary[key]:
+            # Recovery may request finite local yielding only when its destination
+            # has capacity. An occupied/conflicting anchor waits; it cannot evict
+            # that occupant indefinitely. This is geometry, not a control claim.
+            neighbors = _neighbors(
+                goals[key, 0],
+                goals[key, 1],
+                radii[key] + maximum_radius,
+                goals,
+                goal_heads,
+                goal_links,
+                columns,
+                rows,
+                bucket_size,
+                scratch,
             )
-            planes[count] = (nx, ny, clearance)
-            count += 1
+            clear_goal = True
+            for index in range(neighbors):
+                other = scratch[index]
+                if other == key:
+                    continue
+                checks += 1
+                gx = goals[key, 0] - goals[other, 0]
+                gy = goals[key, 1] - goals[other, 1]
+                if gx * gx + gy * gy < (radii[key] + radii[other]) ** 2 - 1e-9:
+                    clear_goal = False
+            driven[key] = clear_goal
+        step = min(speeds[key], distance)
+        if stationary[key]:
+            step = min(step, speeds[key] * 0.5)
+        vx, vy = dx / distance * step, dy / distance * step
         opposing, idle = _steering_obstacles(
             key,
             x,
@@ -297,15 +348,198 @@ def advance_positions(
             rows,
             bucket_size,
             direction_axis,
-            has_opposing,
+            positive and negative,
             has_stationary,
         )
-        if opposing:
+        if active[key] and (opposing or idle):
             vx, vy = (vx - vy) * 0.707106781, (vx + vy) * 0.707106781
-        if idle:
-            vx, vy = (vx - vy) * 0.707106781, (vy + vx) * 0.707106781
-        mx, my, feasible = _solve_step(vx, vy, step, planes, count)
-        if feasible and mx * vx + my * vy < step * step * 0.9:
+        count = _static_planes(x, y, radii[key], speeds[key], obstacles, planes)
+        mx, my, feasible = _solve_step(vx, vy, speeds[key], planes, count)
+        if feasible:
+            preferred[key, 0], preferred[key, 1] = mx, my
+
+    has_motion = bool(active.any()) or bool(np.any(preferred != 0.0))
+    # Predict only local contact corrections. Two sweeps transmit pressure along
+    # short queues without recursive pushing; longer chains advance over ticks.
+    for _iteration in range(2):
+        changed = False
+        for key in order[::-1]:
+            x, y = positions[key]
+            search_radius = radii[key] + maximum_radius
+            if stationary[key] and has_motion:
+                search_radius += speeds[key] + maximum_step
+            neighbors = _neighbors(
+                x,
+                y,
+                search_radius,
+                positions,
+                heads,
+                links,
+                columns,
+                rows,
+                bucket_size,
+                scratch,
+            )
+            for index in range(neighbors):
+                other = scratch[index]
+                if other == key or (stationary[key] == stationary[other] and other <= key):
+                    continue
+                if active[key] and stationary[other]:
+                    continue  # The pathless endpoint owns this prediction edge.
+                checks += 1
+                nx, ny, length = _pair_normal(key, other, positions)
+                clearance = radii[key] + radii[other] - length
+                if not (driven[key] or driven[other]) and clearance <= 1e-9:
+                    continue
+                if clearance < -speeds[key] - speeds[other]:
+                    continue
+                if clearance < 0.0 and active[key] and active[other]:
+                    continue  # Certified directly; no passive intent to predict.
+                # Non-overlaps have a feasible zero displacement. Recover existing
+                # overlap gradually, never require an impossible full correction.
+                required = min(clearance + 1e-8, (speeds[key] + speeds[other]) * 0.25)
+                relative = nx * (preferred[key, 0] - preferred[other, 0]) + ny * (
+                    preferred[key, 1] - preferred[other, 1]
+                )
+                deficit = required - relative
+                if deficit <= 1e-9:
+                    continue
+                # Cancel recovery only under actual approaching contact pressure,
+                # not merely because a moving neighbor is inside the envelope.
+                for member, incoming in ((key, other), (other, key)):
+                    member_offset = hypot(
+                        goals[member, 0] - positions[member, 0],
+                        goals[member, 1] - positions[member, 1],
+                    )
+                    incoming_offset = hypot(
+                        goals[incoming, 0] - positions[incoming, 0],
+                        goals[incoming, 1] - positions[incoming, 1],
+                    )
+                    if (
+                        stationary[member]
+                        and not yielded[member]
+                        and (
+                            active[incoming]
+                            or (
+                                driven[incoming]
+                                and (
+                                    not driven[member]
+                                    or incoming_offset > member_offset + radii[member]
+                                )
+                            )
+                        )
+                    ):
+                        preferred[member, 0] = preferred[member, 1] = 0.0
+                        if driven[incoming]:
+                            # Bounded lateral yielding opens a passing lane instead
+                            # of dragging a resting body along the whole route.
+                            side = (positions[member, 1] - positions[incoming, 1]) * headings[
+                                incoming, 0
+                            ] - (positions[member, 0] - positions[incoming, 0]) * headings[
+                                incoming, 1
+                            ]
+                            side_sign = (
+                                1.0
+                                if side > 1e-9 or (abs(side) <= 1e-9 and member % 2 == 0)
+                                else -1.0
+                            )
+                            preferred[member, 0] = (
+                                -headings[incoming, 1] * speeds[member] * 0.4 * side_sign
+                            )
+                            preferred[member, 1] = (
+                                headings[incoming, 0] * speeds[member] * 0.4 * side_sign
+                            )
+                        count = _static_planes(
+                            positions[member, 0],
+                            positions[member, 1],
+                            radii[member],
+                            speeds[member],
+                            obstacles,
+                            planes,
+                        )
+                        mx, my, feasible = _solve_step(
+                            preferred[member, 0],
+                            preferred[member, 1],
+                            speeds[member] * 0.5,
+                            planes,
+                            count,
+                        )
+                        preferred[member, 0] = mx if feasible else 0.0
+                        preferred[member, 1] = my if feasible else 0.0
+                        driven[member] = True
+                        yielded[member] = True
+                relative = nx * (preferred[key, 0] - preferred[other, 0]) + ny * (
+                    preferred[key, 1] - preferred[other, 1]
+                )
+                deficit = required - relative
+                if deficit <= 1e-9:
+                    continue
+                for member in (key, other):
+                    if active[member] or yielded[member] or not driven[member]:
+                        pressure[member] = True
+                # Pathless bodies take most of incoming contact; two active intents
+                # share it. Recovery intents are weak and wait rather than push.
+                first_weight = 0.15 if driven[key] and not yielded[key] else 1.0
+                second_weight = 0.15 if driven[other] and not yielded[other] else 1.0
+                fraction = first_weight / (first_weight + second_weight)
+                for member, sign, amount in ((key, 1.0, fraction), (other, -1.0, 1.0 - fraction)):
+                    vx = preferred[member, 0] + nx * deficit * sign * amount
+                    vy = preferred[member, 1] + ny * deficit * sign * amount
+                    count = _static_planes(
+                        positions[member, 0],
+                        positions[member, 1],
+                        radii[member],
+                        speeds[member],
+                        obstacles,
+                        planes,
+                    )
+                    limit = speeds[member] if active[member] else speeds[member] * 0.5
+                    mx, my, feasible = _solve_step(vx, vy, limit, planes, count)
+                    if feasible:
+                        preferred[member, 0], preferred[member, 1] = mx, my
+                        changed = True
+        if not changed:
+            break
+
+    # Certify every moving body, including passive ones. Unprocessed bodies stay
+    # at zero until their turn. Later certificates include earlier displacements.
+    # Overlaps may remain when space is absent but never become deeper.
+    for key in order:
+        x, y = positions[key]
+        vx, vy = preferred[key]
+        if hypot(vx, vy) <= 1e-12:
+            if active[key]:
+                pressure[key] = True
+            continue  # Earlier certificates already kept clear of this resting body.
+        limit = speeds[key] if active[key] else speeds[key] * 0.5
+        count = _static_planes(x, y, radii[key], speeds[key], obstacles, planes)
+        neighbors = _neighbors(
+            x,
+            y,
+            radii[key] + maximum_radius + speeds[key] + maximum_step,
+            positions,
+            heads,
+            links,
+            columns,
+            rows,
+            bucket_size,
+            scratch,
+        )
+        for index in range(neighbors):
+            other = scratch[index]
+            if other == key:
+                continue
+            checks += 1
+            nx, ny, length = _pair_normal(key, other, positions)
+            clearance = min(0.0, radii[key] + radii[other] - length)
+            clearance += nx * (result[other, 0] - positions[other, 0]) + ny * (
+                result[other, 1] - positions[other, 1]
+            )
+            planes[count] = (nx, ny, clearance)
+            count += 1
+        mx, my, feasible = _solve_step(vx, vy, limit, planes, count)
+        if feasible and hypot(vx, vy) > 1e-9 and mx * vx + my * vy < 0.9 * (vx * vx + vy * vy):
+            step = hypot(vx, vy)
             best = (mx * vx + my * vy) / step + hypot(mx, my) * 0.25
             for sx, sy in (
                 ((vx - vy) * 0.707106781, (vx + vy) * 0.707106781),
@@ -313,15 +547,17 @@ def advance_positions(
                 (-vy, vx),
                 (vy, -vx),
             ):
-                ax, ay, possible = _solve_step(sx, sy, step, planes, count)
+                ax, ay, possible = _solve_step(sx, sy, limit, planes, count)
                 if possible:
                     score = (ax * vx + ay * vy) / step + hypot(ax, ay) * 0.25
                     if score > best + 1e-9:
                         mx, my, best = ax, ay, score
-        if not feasible or hypot(mx, my) < 1e-8:
-            pressure[key] = True
-        else:
+        if feasible:
             result[key, 0], result[key, 1] = x + mx, y + my
+        if (active[key] or yielded[key] or not driven[key]) and (
+            not feasible or hypot(mx, my) < 1e-8
+        ):
+            pressure[key] = True
     return result, pressure, checks
 
 

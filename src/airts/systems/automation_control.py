@@ -269,6 +269,12 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
     previous: dict[str, tuple[str | None, str | None]] = {}
     for entity_id in entity_ids:
         automation_id = simulation.assignments.pop(entity_id, None)
+        entity = simulation.entities[entity_id]
+        entity.hold_anchor = None
+        entity.defend_arrived = False
+        entity.recovery_path.clear()
+        entity.recovery_blocked_cells = None
+        entity.recovery_retry_tick = entity.contact_wait_ticks = 0
         suspended_id = simulation.suspended_assignments.pop(entity_id, None)
         previous[entity_id] = (automation_id, suspended_id)
         for affected_id in {item for item in (automation_id, suspended_id) if item is not None}:

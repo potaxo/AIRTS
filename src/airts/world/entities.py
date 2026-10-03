@@ -46,6 +46,12 @@ class Entity:
     congestion_stopped: bool = False
     collision_pressure: int = 0
     route_ticks: int = 0
+    hold_anchor: Point | None = None
+    recovery_path: list[Point] = field(default_factory=list)
+    recovery_retry_tick: int = 0
+    contact_wait_ticks: int = 0
+    defend_arrived: bool = False
+    recovery_blocked_cells: frozenset[Cell] | None = None
 
     @property
     def category(self) -> EntityCategory:
@@ -103,6 +109,18 @@ class Entity:
             "congestion_stopped": self.congestion_stopped,
             "collision_pressure": self.collision_pressure,
             "route_ticks": self.route_ticks,
+            "hold_anchor": (
+                None if self.hold_anchor is None else [self.hold_anchor.x, self.hold_anchor.y]
+            ),
+            "recovery_path": [[p.x, p.y] for p in self.recovery_path],
+            "recovery_retry_tick": self.recovery_retry_tick,
+            "contact_wait_ticks": self.contact_wait_ticks,
+            "defend_arrived": self.defend_arrived,
+            "recovery_blocked_cells": (
+                None
+                if self.recovery_blocked_cells is None
+                else [list(cell) for cell in sorted(self.recovery_blocked_cells)]
+            ),
         }
 
 

@@ -35,6 +35,7 @@ from airts.contracts.spatial import (
 )
 from airts.navigation.collision import collision_radius
 from airts.simulation import Simulation
+from airts.systems.movement import CONTACT_WAIT_TICKS
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
 from airts.world.map import (
     EntityCategory,
@@ -47,7 +48,7 @@ from airts.world.map import (
 )
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v9"
+SAVE_SCHEMA = "airts-save-v10"
 
 
 class PersistenceError(ValueError):
@@ -76,7 +77,8 @@ def load_simulation(path: str | Path) -> Simulation:
 def load_simulation_data(raw_data: object) -> Simulation:
     document = _mapping(raw_data, "save document")
     legacy_movement = document.get("schema") in {"airts-save-v7", "airts-save-v8"}
-    if document.get("schema") != SAVE_SCHEMA and not legacy_movement:
+    legacy_contact = document.get("schema") in {"airts-save-v7", "airts-save-v8", "airts-save-v9"}
+    if document.get("schema") != SAVE_SCHEMA and not legacy_contact:
         raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
     try:
         game_map = load_map_data(document.get("map"))
@@ -110,7 +112,11 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     simulation.tick = tick
     simulation.entities = _load_entities(
-        state.get("entities"), game_map, tick, legacy_movement=legacy_movement
+        state.get("entities"),
+        game_map,
+        tick,
+        legacy_movement=legacy_movement,
+        legacy_contact=legacy_contact,
     )
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
@@ -291,7 +297,12 @@ def _load_selection(raw_data: object, simulation: Simulation) -> GroundingSelect
 
 
 def _load_entities(
-    raw_data: object, game_map: GameMap, current_tick: int, *, legacy_movement: bool = False
+    raw_data: object,
+    game_map: GameMap,
+    current_tick: int,
+    *,
+    legacy_movement: bool = False,
+    legacy_contact: bool = False,
 ) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
@@ -305,6 +316,57 @@ def _load_entities(
         except ValueError as error:
             raise PersistenceError(f"invalid entity {entity_id}: {error}") from error
         position = _point(entity.get("position"), "entity.position")
+        if legacy_contact:
+            hold_anchor = position if state is UnitState.HOLDING else None
+            recovery_path: list[Point] = []
+            recovery_retry_tick = contact_wait_ticks = 0
+            defend_arrived = False
+            recovery_blocked_cells = None
+        else:
+            if "hold_anchor" not in entity:
+                raise PersistenceError("entity.hold_anchor is required in v10")
+            anchor_raw = entity.get("hold_anchor")
+            hold_anchor = None if anchor_raw is None else _point(anchor_raw, "entity.hold_anchor")
+            recovery_path = [
+                _point(p, "entity.recovery_path item")
+                for p in _list(entity.get("recovery_path"), "entity.recovery_path")
+            ]
+            recovery_retry_tick = _integer(
+                entity.get("recovery_retry_tick"), "entity.recovery_retry_tick", minimum=0
+            )
+            contact_wait_ticks = _integer(
+                entity.get("contact_wait_ticks"), "entity.contact_wait_ticks", minimum=0
+            )
+            defend_arrived = _boolean(entity.get("defend_arrived"), "entity.defend_arrived")
+            if "recovery_blocked_cells" not in entity:
+                raise PersistenceError("entity.recovery_blocked_cells is required in v10")
+            blocked_raw = entity.get("recovery_blocked_cells")
+            recovery_blocked_cells = (
+                None
+                if blocked_raw is None
+                else frozenset(
+                    _cell(cell, "entity.recovery_blocked_cells", game_map)
+                    for cell in _list(blocked_raw, "entity.recovery_blocked_cells")
+                )
+            )
+            if contact_wait_ticks > CONTACT_WAIT_TICKS:
+                raise PersistenceError(
+                    "entity.contact_wait_ticks exceeds the contact wait interval"
+                )
+        if (state is UnitState.HOLDING) != (hold_anchor is not None):
+            raise PersistenceError("entity Hold state and hold_anchor must agree")
+        if hold_anchor is not None and (
+            not kind.profile.movable or not game_map.is_passable(hold_anchor)
+        ):
+            raise PersistenceError("entity.hold_anchor must be passable for a mobile holder")
+        if recovery_path and (
+            hold_anchor is None or any(not game_map.is_passable(p) for p in recovery_path)
+        ):
+            raise PersistenceError("entity.recovery_path requires a holder and passable waypoints")
+        if recovery_retry_tick and hold_anchor is None:
+            raise PersistenceError("entity.recovery_retry_tick requires a holder")
+        if recovery_blocked_cells is not None and (hold_anchor is None or recovery_path):
+            raise PersistenceError("blocked Hold recovery requires an anchor and no recovery path")
         health = _integer(entity.get("health"), "entity.health", minimum=0)
         if health > kind.profile.max_health:
             raise PersistenceError(f"entity {entity_id} health exceeds its maximum")
@@ -386,6 +448,10 @@ def _load_entities(
         )
         if pursue_target and attack_target_id is None:
             raise PersistenceError(f"entity {entity_id} cannot pursue without an attack target")
+        if hold_anchor is not None and (path or move_target is not None or pursue_target):
+            raise PersistenceError(
+                "Hold recovery cannot carry an ordinary movement or pursuit order"
+            )
         if kind.profile.category is EntityCategory.BUILDING and (
             path
             or move_target is not None
@@ -427,6 +493,12 @@ def _load_entities(
             congestion_stopped=congestion_stopped,
             collision_pressure=collision_pressure,
             route_ticks=route_ticks,
+            hold_anchor=hold_anchor,
+            recovery_path=recovery_path,
+            recovery_retry_tick=recovery_retry_tick,
+            contact_wait_ticks=contact_wait_ticks,
+            defend_arrived=defend_arrived,
+            recovery_blocked_cells=recovery_blocked_cells,
         )
     for loaded_entity in entities.values():
         if (
@@ -1122,19 +1194,17 @@ def _load_command_history(raw_data: object, current_tick: int) -> list[dict[str,
 
 
 def _cell_set(raw_data: object, simulation: Simulation, field: str) -> set[tuple[int, int]]:
-    result: set[tuple[int, int]] = set()
-    for raw_cell in _list(raw_data, field):
-        cell_data = _list(raw_cell, field)
-        if len(cell_data) != 2:
-            raise PersistenceError(f"{field} cells must contain x and y")
-        cell = (
-            _integer(cell_data[0], f"{field}.x", minimum=0),
-            _integer(cell_data[1], f"{field}.y", minimum=0),
-        )
-        if not simulation.game_map.contains_cell(cell):
-            raise PersistenceError(f"{field} contains an out-of-bounds cell")
-        result.add(cell)
-    return result
+    return {_cell(cell, field, simulation.game_map) for cell in _list(raw_data, field)}
+
+
+def _cell(value: object, field: str, game_map: GameMap) -> tuple[int, int]:
+    data = _list(value, field)
+    if len(data) != 2:
+        raise PersistenceError(f"{field} cells must contain x and y")
+    cell = (_integer(data[0], f"{field}.x", minimum=0), _integer(data[1], f"{field}.y", minimum=0))
+    if not game_map.contains_cell(cell):
+        raise PersistenceError(f"{field} contains an out-of-bounds cell")
+    return cell
 
 
 def _mapping(value: object, field: str) -> dict[str, object]:
