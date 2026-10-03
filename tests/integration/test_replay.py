@@ -16,15 +16,15 @@ from airts.adapters.replay import (
     run_replay,
     save_replay,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateProductionCommand,
     MoveCommand,
 )
-from airts.geometry import Point, PointTarget
+from airts.contracts.spatial import Point, PointTarget
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, GameMap, load_example_map
+from airts.world.map import EntityKind, GameMap, load_example_map
 
 
 def test_recorded_commands_reproduce_state_and_events(

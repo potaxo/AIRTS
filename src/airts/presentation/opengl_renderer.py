@@ -9,13 +9,13 @@ from typing import Any, Protocol, cast
 
 import pygame
 
-from airts.automations import AutomationKind, DefendParameters, target_center
-from airts.geometry import Point
+from airts.contracts.automations import AutomationKind, DefendParameters, target_center
+from airts.contracts.spatial import Point
+from airts.presentation.palette import ENTITY_COLORS, PROJECTILE_COLORS, TERRAIN_COLORS, Color
+from airts.presentation.rendering import SceneView
 from airts.simulation import Simulation
-from airts.world.entities import Entity
-from airts.world.map_model import EntityCategory, EntityKind, Terrain
+from airts.world.map import EntityCategory, EntityKind
 
-type Color = tuple[int, int, int]
 type FloatColor = tuple[float, float, float, float]
 
 SHAPE_FLOATS = 16
@@ -41,29 +41,10 @@ _GPU_RESOURCE_ATTRIBUTES = (
     "_shape_program",
 )
 
-_TERRAIN_COLORS: dict[Terrain, Color] = {
-    Terrain.GRASS: (64, 102, 60),
-    Terrain.ROAD: (119, 106, 77),
-    Terrain.FOREST: (43, 78, 48),
-    Terrain.WATER: (42, 91, 132),
-    Terrain.ROCK: (66, 69, 72),
-    Terrain.BRIDGE: (148, 126, 82),
-}
-
-_ENTITY_COLORS: dict[EntityKind, Color] = {
-    EntityKind.SCOUT: (82, 211, 237),
-    EntityKind.LIGHT_TANK: (235, 221, 93),
-    EntityKind.HEAVY_TANK: (230, 139, 75),
-    EntityKind.BUILDER: (99, 220, 176),
-    EntityKind.FACTORY: (112, 142, 181),
-    EntityKind.REPAIR_HUB: (110, 178, 151),
-    EntityKind.COMMAND_CENTER: (155, 129, 190),
-    EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
-}
 
 _ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
     kind: (color[0] / 255, color[1] / 255, color[2] / 255, 1.0)
-    for kind, color in _ENTITY_COLORS.items()
+    for kind, color in ENTITY_COLORS.items()
 }
 _LARGE_SELECTED_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
     kind: (
@@ -72,40 +53,19 @@ _LARGE_SELECTED_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
         min(255, color[2] + 45) / 255,
         1.0,
     )
-    for kind, color in _ENTITY_COLORS.items()
+    for kind, color in ENTITY_COLORS.items()
 }
 _ENEMY_FLOAT_COLOR: FloatColor = (218 / 255, 78 / 255, 78 / 255, 1.0)
 
-_PROJECTILE_COLORS: dict[EntityKind, Color] = {
-    EntityKind.SCOUT: (120, 225, 255),
-    EntityKind.LIGHT_TANK: (255, 232, 105),
-    EntityKind.HEAVY_TANK: (255, 135, 70),
-}
 
+class OpenGLRenderState(SceneView, Protocol):
+    """The UI-owned state needed to build a GPU frame without importing the application."""
 
-class OpenGLRenderState(Protocol):
-    """The UI-owned state needed to build a GPU frame without importing Pygame."""
-
-    MAX_SELECTED_PATHS: int
-    simulation: Simulation
-    selected_entities: set[str]
-    inspected_entity_id: str | None
     render_alpha: float
-
-    @property
-    def tile_size(self) -> float: ...
-
-    @property
-    def map_origin(self) -> tuple[int, int]: ...
-
-    def _representative_path_entity_ids(self) -> tuple[str, ...]: ...
 
     def previous_entity_position(self, entity_id: str) -> Point: ...
 
     def previous_projectile_position(self, projectile_id: str) -> Point: ...
-
-    @staticmethod
-    def _simplified_path(entity: Entity) -> tuple[Point, ...]: ...
 
     def _prune_removed_entities(self) -> None: ...
 
@@ -285,7 +245,7 @@ class OpenGLFrameBuilder:
                     values,
                     center=(origin_x + (x + 0.5) * tile_size, origin_y + (y + 0.5) * tile_size),
                     half_size=(half_size, half_size),
-                    color=_float_color(_TERRAIN_COLORS[terrain]),
+                    color=_float_color(TERRAIN_COLORS[terrain]),
                     circle=False,
                 )
                 count += 1
@@ -516,9 +476,9 @@ class OpenGLFrameBuilder:
         origin_x, origin_y = origin
         path_count = 0
         color = _float_color((225, 225, 225))
-        for entity_id in app._representative_path_entity_ids():
+        for entity_id in app.representative_path_entity_ids():
             entity = app.simulation.entities[entity_id]
-            points = app._simplified_path(entity)
+            points = app.simplified_path(entity)
             if len(points) < 2:
                 continue
             for first, second in zip(points, points[1:], strict=False):
@@ -566,9 +526,9 @@ class OpenGLFrameBuilder:
                 )
 
         for trace in simulation.projectile_traces:
-            append_trajectory(trace.points, _float_color(_PROJECTILE_COLORS[trace.weapon_kind]))
+            append_trajectory(trace.points, _float_color(PROJECTILE_COLORS[trace.weapon_kind]))
         for projectile in simulation.projectiles.values():
-            raw_color = _PROJECTILE_COLORS[projectile.weapon_kind]
+            raw_color = PROJECTILE_COLORS[projectile.weapon_kind]
             color = _float_color(raw_color)
             append_trajectory(projectile.trajectory, color)
             destination_color = _float_color(

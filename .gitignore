@@ -24,6 +24,7 @@ runs/
 outputs/
 replays/
 checkpoints/
+airts-quicksave.json
 
 # Temporary files
 *.tmp

@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import pytest
 
-from airts.geometry import (
+from airts.contracts.spatial import (
     Point,
     PolygonRegion,
     PolylineTarget,
+    distance_to_segment,
     rectangle_region,
     simplify_freehand,
     target_to_dict,
 )
+
+
+@pytest.mark.parametrize(
+    ("point", "end", "expected"),
+    [
+        pytest.param(Point(-1, 0), Point(2, 0), 1.0, id="before-start"),
+        pytest.param(Point(1, 1), Point(2, 0), 1.0, id="perpendicular"),
+        pytest.param(Point(3, 0), Point(2, 0), 1.0, id="after-end"),
+        pytest.param(Point(3, 4), Point(0, 0), 5.0, id="coincident-endpoints"),
+    ],
+)
+def test_segment_distance_clamps_projection(point: Point, end: Point, expected: float) -> None:
+    assert distance_to_segment(point, Point(0, 0), end) == expected
 
 
 def test_rectangle_normalizes_drag_direction_and_contains_boundary() -> None:

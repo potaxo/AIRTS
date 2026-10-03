@@ -9,23 +9,21 @@ import pygame
 import pytest
 from tests.integration.scenarios import builder_factory_simulation, interaction_simulation
 
-from airts.automations import (
+from airts.contracts.automations import (
     DefendParameters,
     EconomyParameters,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     CancelAutomationCommand,
     CreateDefendCommand,
     CreateProductionCommand,
 )
-from airts.geometry import Point, rectangle_region
-from airts.presentation.app import (
-    AirtsApp,
-    RendererBackend,
-)
+from airts.contracts.spatial import Point, rectangle_region
+from airts.presentation.app import AirtsApp
+from airts.presentation.rendering import RendererBackend
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
-from airts.world.projectiles import Projectile
+from airts.world.entities import Projectile
+from airts.world.map import EntityKind, load_map_data
 
 
 def test_economy_button_applies_to_every_selected_resource_generator() -> None:
@@ -134,12 +132,12 @@ def test_resizing_reflows_panels_and_scales_canvas_coordinates() -> None:
     assert app.command_bar_rect.top == app.canvas_rect.bottom
     assert app.tile_size < original_tile_size
     point = Point(12.0, 7.5)
-    screen_point = app._screen_point(point)
+    screen_point = app.screen_point(point)
     restored = app._map_point(screen_point)
     assert restored.distance_to(point) <= 1 / app.tile_size
 
     app.pan_camera(120, -80)
-    panned_point = app._screen_point(point)
+    panned_point = app.screen_point(point)
     assert panned_point == (screen_point[0] + 120, screen_point[1] - 80)
     assert app._map_point(panned_point).distance_to(point) <= 1 / app.tile_size
 
@@ -212,12 +210,14 @@ def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
     buttons = {action: rectangle for rectangle, action in app._settings_buttons}
     app._handle_mouse_down(1, buttons["load"].center)
     assert app.simulation.resources["player"] == 10_000
+    assert app._software_renderer._map_surface is None
     app.simulation.resources["player"] = 123
     app.settings_open = True
     app._draw(surface)
     buttons = {action: rectangle for rectangle, action in app._settings_buttons}
     app._handle_mouse_down(1, buttons["new"].center)
     assert app.simulation.resources["player"] == 500
+    assert app._software_renderer._map_surface is None
     pygame.font.quit()
 
 
@@ -270,14 +270,16 @@ def test_projectile_visual_size_is_small_and_stable_across_ui_scales() -> None:
         speed=10.0,
     )
     app.simulation.projectiles[projectile.projectile_id] = projectile
+    before = app.simulation.export_state()
     observed: list[tuple[int, int]] = []
 
     for size in ((1000, 700), (3840, 2160)):
         app.resize_layout(size)
         surface = pygame.Surface(size)
-        with patch("airts.presentation.app.pygame.draw.circle") as circle:
-            app._draw_projectiles(surface)
+        with patch("airts.presentation.rendering.pygame.draw.circle") as circle:
+            app._software_renderer.draw_projectiles(app, surface)
         observed.append(tuple(call.args[3] for call in circle.call_args_list[-2:]))
+        assert app.simulation.export_state() == before
 
     assert observed == [(3, 2), (3, 2)]
 
@@ -344,7 +346,7 @@ def test_window_close_exits_before_another_tick_or_render_and_releases_resources
     assert simulation.tick == 0
     assert app._font is None
     assert app._small_font is None
-    assert app._map_surface is None
+    assert app._software_renderer._map_surface is None
     assert lifecycle.mock_calls == [
         call.display_init(),
         call.font_init(),

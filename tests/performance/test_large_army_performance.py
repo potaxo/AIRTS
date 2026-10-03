@@ -5,20 +5,20 @@ from __future__ import annotations
 from itertools import pairwise
 from time import perf_counter
 
-from airts.automations import AutomationStatus, DefendParameters
-from airts.commands import (
+from airts.contracts.automations import AutomationStatus, DefendParameters
+from airts.contracts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
 )
-from airts.events import EventType
-from airts.geometry import Point, PolygonRegion, PolylineTarget, rectangle_region
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, rectangle_region
 from airts.navigation.collision import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
 
 
 def _large_simulation(unit_count: int, *, with_repair_hub: bool = False) -> Simulation:

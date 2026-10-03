@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from airts.geometry import Point
-from airts.world.map_model import (
+from airts.contracts.spatial import Point
+from airts.world.map import (
     EntityCategory,
     MapValidationError,
     Terrain,

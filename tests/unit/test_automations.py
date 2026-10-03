@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationStatus,
@@ -14,8 +14,8 @@ from airts.automations import (
     PatrolParameters,
     build_patrol_waypoints,
 )
-from airts.geometry import Point, PointTarget, PolygonRegion
-from airts.world.map_model import GameMap
+from airts.contracts.spatial import Point, PointTarget, PolygonRegion
+from airts.world.map import GameMap
 
 
 def _automation() -> Automation:

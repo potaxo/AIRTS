@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from airts.commands import (
+from airts.contracts.commands import (
     AttackCommand,
     CancelAutomationCommand,
     Command,
@@ -32,8 +32,8 @@ from airts.commands import (
     command_from_dict,
     command_to_dict,
 )
-from airts.geometry import Point, PointTarget, PolylineTarget
-from airts.world.map_model import EntityKind
+from airts.contracts.spatial import Point, PointTarget, PolylineTarget
+from airts.world.map import EntityKind
 
 
 @pytest.mark.parametrize(

@@ -10,17 +10,17 @@ Close a window to finish that scenario.
 
 from __future__ import annotations
 
-from airts.commands import (
+from airts.contracts.commands import (
     AttackCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
 )
-from airts.geometry import Point, PolygonRegion, PolylineTarget, rectangle_region
+from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
+from airts.world.map import load_map_data
 
 
 def _show(

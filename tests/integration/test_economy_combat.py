@@ -11,11 +11,11 @@ from tests.integration.scenarios import (
 )
 
 from airts.adapters.persistence import load_simulation, save_simulation
-from airts.automations import (
+from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     AttackCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
@@ -24,11 +24,11 @@ from airts.commands import (
     MoveCommand,
     RemoveEntityCommand,
 )
-from airts.events import EventType
-from airts.geometry import Point, PointTarget
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PointTarget
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
-from airts.world.projectiles import Projectile
+from airts.world.entities import Projectile
+from airts.world.map import EntityKind, load_map_data
 
 
 def test_economy_automation_collects_generator_income_to_target() -> None:

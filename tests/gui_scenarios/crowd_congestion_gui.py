@@ -11,11 +11,12 @@ Use ``-k`` with part of a function name to open only one scenario.
 
 from __future__ import annotations
 
-from airts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand
-from airts.geometry import Point, rectangle_region
+from airts.contracts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand
+from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
+from airts.systems.movement import skip_crowded_waypoints
+from airts.world.map import load_map_data
 
 
 def _crowd_simulation(
@@ -128,7 +129,7 @@ def test_crowded_waypoint_bridge_turn_in_gui() -> None:
         *(Point(57.5, y + 0.5) for y in range(29, 36)),
         *(Point(x + 0.5, 35.5) for x in range(58, 66)),
     ]
-    simulation._skip_crowded_waypoints(mover)
+    skip_crowded_waypoints(simulation, mover)
 
     _show(simulation, entity_ids, "Eight scouts preserve the crowded bridge turn.")
 

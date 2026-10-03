@@ -9,12 +9,17 @@ import pygame
 import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.automations import AutomationKind, AutomationStatus
-from airts.commands import CommandResult, CreateDefendCommand, CreatePatrolCommand, MoveCommand
-from airts.geometry import Point, rectangle_region
+from airts.contracts.automations import AutomationKind, AutomationStatus
+from airts.contracts.commands import (
+    CommandResult,
+    CreateDefendCommand,
+    CreatePatrolCommand,
+    MoveCommand,
+)
+from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
+from airts.world.map import load_map_data
 
 UNIT_COUNT = 1_000
 TARGET_FPS = 100

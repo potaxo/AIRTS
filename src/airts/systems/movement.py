@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from airts.automations import DefendParameters
-from airts.events import EventType
-from airts.geometry import Point
+from airts.contracts.automations import DefendParameters
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point
 from airts.navigation.collision import advance_positions, collision_radius
-from airts.navigation.pathfinding import PathfindingError, PathResult
+from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.world.entities import Entity, UnitState
-from airts.world.map_model import Cell
+from airts.world.map import Cell, footprint_cells
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -227,7 +227,7 @@ def move_entities(simulation: Simulation) -> None:
                 _finish_path(simulation, entity)
             continue
         candidate = Point(xs[index], ys[index])
-        simulation.occupancy.move(key, simulation._cells_at(entity, candidate), movable)
+        simulation.occupancy.move(key, footprint_cells(entity.kind, candidate), movable)
         entity.position = candidate
         simulation._movement_blocked.discard(key)
         if candidate.distance_to(target) <= 1e-9:
@@ -276,3 +276,66 @@ def _recover_path(simulation: Simulation, entity: Entity, obstacles: frozenset[C
     entity.progress_target = entity.path[0] if entity.path else None
     entity.progress_distance = entity.position.distance_to(entity.path[0]) if entity.path else None
     entity.no_progress_ticks = 0
+
+
+def plan_group_paths(
+    simulation: Simulation,
+    entity_ids: tuple[str, ...],
+    destinations: dict[str, Point],
+    *,
+    shared_goal: Point | None = None,
+    held_cells: frozenset[Cell] | None = None,
+) -> dict[str, PathResult]:
+    if held_cells is None:
+        held_cells = frozenset(
+            simulation.game_map.cell_for(e.position)
+            for e in simulation.entities.values()
+            if e.state is UnitState.HOLDING and e.is_movable and e.entity_id not in destinations
+        )
+    blocked = simulation._building_cells() | held_cells
+    center = Point(
+        sum(p.x for p in destinations.values()) / len(destinations),
+        sum(p.y for p in destinations.values()) / len(destinations),
+    )
+    anchor = shared_goal or min(
+        destinations.values(), key=lambda p: (p.distance_to(center), p.y, p.x)
+    )
+    result: dict[str, PathResult] = {}
+    for key in entity_ids:
+        start, target = simulation.entities[key].position, destinations[key]
+        direct = passable_segment_cells(simulation.game_map, start, target, blocked)
+        if direct is not None and all(
+            simulation.game_map.terrain_at_cell(c).movement_cost <= 1 for c in direct
+        ):
+            result[key] = PathResult(
+                direct,
+                () if start == target else (target,),
+                sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
+            )
+            continue
+        shared = simulation._routes.shared_path(start, anchor, blocked)
+        for index, point in enumerate(shared.waypoints):
+            branch = passable_segment_cells(simulation.game_map, point, target, blocked)
+            if branch is not None:
+                last = shared.cells.index(simulation.game_map.cell_for(point))
+                cells = shared.cells[: last + 1] + branch[1:]
+                result[key] = PathResult(
+                    cells,
+                    shared.waypoints[: index + 1] + (target,),
+                    sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in cells[1:]),
+                )
+                break
+        else:
+            result[key] = simulation._routes.shared_path(start, target, blocked)
+    return result
+
+
+def validate_paths(
+    simulation: Simulation, entity_ids: tuple[str, ...], targets: tuple[Point, ...]
+) -> None:
+    blocked = simulation._building_cells()
+    # All members must reach the route; all route vertices must be connected.
+    for key in entity_ids:
+        simulation._routes.shared_path(simulation.entities[key].position, targets[0], blocked)
+    for point in targets[1:]:
+        simulation._routes.shared_path(point, targets[0], blocked)

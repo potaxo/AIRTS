@@ -1,7 +1,7 @@
 """Shared 1,000-scout workload; return fresh state for each caller."""
 
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
+from airts.world.map import load_map_data
 
 UNIT_COUNT = 1_000
 GROUP_SIZE = UNIT_COUNT // 2

@@ -11,28 +11,66 @@ from tests.integration.scenarios import (
     runtime_map,
 )
 
-from airts.automations import (
+from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     DefendParameters,
     ProductionParameters,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     CancelAutomationCommand,
     CreateProductionBatchCommand,
     CreateProductionCommand,
     CreateSpatialReferenceCommand,
+    ModifyAutomationCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
     StopCommand,
 )
-from airts.events import EventType
-from airts.geometry import Point, PolylineTarget, rectangle_region
-from airts.presentation.app import (
-    AirtsApp,
-)
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PolylineTarget, rectangle_region
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        pytest.param({"minimum_units": 2}, "MINIMUM_UNITS_NOT_EDITABLE", id="wrong-template"),
+        pytest.param({"target_count": 0}, "TARGET_COUNT_BELOW_PRODUCED", id="invalid-count"),
+    ],
+)
+def test_rejected_production_retarget_preserves_linked_work(
+    changes: dict[str, int], reason: str
+) -> None:
+    simulation = Simulation(runtime_map())
+    created = simulation.execute(
+        CreateProductionCommand(
+            "factory",
+            EntityKind.SCOUT,
+            1,
+            continuous=True,
+            defend_target=rectangle_region(Point(14, 2), Point(18, 6)),
+        )
+    )
+    simulation.advance(5)
+    before = simulation.snapshot()
+
+    result = simulation.execute(
+        ModifyAutomationCommand(
+            created.automation_id or "",
+            title="Rejected",
+            priority=10,
+            target=rectangle_region(Point(18, 2), Point(22, 6)),
+            **changes,
+        )
+    )
+
+    assert not result.accepted
+    assert result.reason == reason
+    assert simulation.snapshot() == before
+    assert not simulation.events.query(event_types=frozenset({EventType.AUTOMATION_MODIFIED}))
 
 
 def _production_ids(simulation: Simulation, automation_id: str) -> list[str]:

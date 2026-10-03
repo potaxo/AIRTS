@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from time import perf_counter
 
-from airts.presentation.app import real_fps_from_frame_times
+from airts.presentation.metrics import real_fps_from_frame_times
 
 
 class RealFpsProbe:

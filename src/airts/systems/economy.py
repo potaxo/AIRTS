@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airts.automations import Automation, AutomationStatus, EconomyParameters
-from airts.events import EventType
-from airts.geometry import Point
+from airts.contracts.automations import Automation, AutomationStatus, economy_parameters
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point
 from airts.world.entities import Entity, UnitState
-from airts.world.map_model import EntityKind
+from airts.world.map import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -126,11 +126,3 @@ def spawn_ambient_enemy(simulation: Simulation) -> None:
         position=[position.x, position.y],
         target_id=entity.attack_target_id,
     )
-
-
-def economy_parameters(automation: Automation) -> EconomyParameters:
-    """Narrow a generic automation to its economy parameters."""
-
-    if not isinstance(automation.parameters, EconomyParameters):
-        raise TypeError("automation does not have economy parameters")
-    return automation.parameters

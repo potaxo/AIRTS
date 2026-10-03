@@ -6,7 +6,7 @@ from random import Random
 
 import pytest
 
-from airts.geometry import Point
+from airts.contracts.spatial import Point
 from airts.navigation.spatial_index import SpatialIndex
 
 

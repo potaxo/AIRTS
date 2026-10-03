@@ -10,10 +10,18 @@ import pytest
 
 import airts
 from airts.simulation import Simulation
+from airts.world.map import load_example_map
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "airts"
 PACKAGE_RULES = {
+    "contracts": {
+        "airts.adapters",
+        "airts.navigation",
+        "airts.presentation",
+        "airts.simulation",
+        "airts.systems",
+    },
     "world": {
         "airts.adapters",
         "airts.navigation",
@@ -37,13 +45,23 @@ PACKAGE_RULES = {
 
 def test_simulation_remains_the_public_package_facade() -> None:
     assert airts.Simulation is Simulation
+    assert airts.load_example_map is load_example_map
 
 
 def test_package_dependencies_point_toward_domain_code() -> None:
     violations: list[str] = []
-    paths = list(SOURCE.glob("*.py"))
-    paths.extend(path for package in PACKAGE_RULES for path in (SOURCE / package).rglob("*.py"))
-    for path in paths:
+    for path in SOURCE.rglob("*.py"):
+        relative = path.relative_to(SOURCE)
+        if len(relative.parts) == 1:
+            assert path.name in {"__init__.py", "__main__.py", "simulation.py"}, (
+                f"unclassified root module: {relative}"
+            )
+        else:
+            assert relative.parts[0] in {*PACKAGE_RULES, "adapters", "presentation"}, (
+                f"unclassified source package: {relative}"
+            )
+            if relative.parts[0] in {"adapters", "presentation"}:
+                continue
         if path.name == "__main__.py":
             continue
         package = path.relative_to(SOURCE).parts[0]
@@ -58,6 +76,41 @@ def test_package_dependencies_point_toward_domain_code() -> None:
             if _matches_any(module_name, forbidden):
                 violations.append(f"{path.relative_to(SOURCE)}:{line} imports {module_name}")
     assert not violations, "\n".join(violations)
+
+
+def test_runtime_module_imports_have_no_cycles() -> None:
+    paths = {
+        ".".join(("airts", *path.relative_to(SOURCE).with_suffix("").parts)).removesuffix(
+            ".__init__"
+        ): path
+        for path in SOURCE.rglob("*.py")
+    }
+    graph: dict[str, set[str]] = {}
+    for module, path in paths.items():
+        graph[module] = set()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for imported, _ in _runtime_imports(tree, _package_name(path)):
+            # Imported attributes belong to their nearest source module. Implicit package
+            # initialization and type-only references are not runtime dependency edges.
+            while imported and imported not in paths:
+                imported = imported.rpartition(".")[0]
+            if imported in paths:
+                graph[module].add(imported)
+    visited: set[str] = set()
+    active: list[str] = []
+
+    def visit(module: str) -> None:
+        assert module not in active, "runtime import cycle: " + " -> ".join((*active, module))
+        if module in visited:
+            return
+        active.append(module)
+        for imported in sorted(graph[module]):
+            visit(imported)
+        active.pop()
+        visited.add(module)
+
+    for module in sorted(graph):
+        visit(module)
 
 
 def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:

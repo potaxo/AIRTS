@@ -4,9 +4,9 @@ from math import ceil, floor, hypot, sqrt
 
 import numpy as np
 
-from airts._numeric import BoolArray, FloatArray, IntArray, compile_numeric
-from airts.geometry import Point
-from airts.world.map_model import EntityKind
+from airts.contracts.spatial import Point
+from airts.world._numeric import BoolArray, FloatArray, IntArray, compile_numeric
+from airts.world.map import EntityKind
 
 _RADII = {
     EntityKind.SCOUT: 0.30,

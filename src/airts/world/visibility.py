@@ -9,10 +9,10 @@ from math import ceil, floor, sqrt
 
 import numpy as np
 
-from airts._numeric import FloatArray, WordArray, compile_numeric
-from airts.geometry import Point
+from airts.contracts.spatial import Point
+from airts.world._numeric import FloatArray, WordArray, compile_numeric
 from airts.world.entities import Entity
-from airts.world.map_model import Cell, GameMap
+from airts.world.map import Cell, GameMap
 
 
 class VisibilityState(StrEnum):

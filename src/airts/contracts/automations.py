@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from math import ceil, floor
 
-from airts.geometry import (
+from airts.contracts.spatial import (
     Point,
     PointTarget,
     PolygonRegion,
@@ -15,7 +15,7 @@ from airts.geometry import (
     SpatialTarget,
     target_to_dict,
 )
-from airts.world.map_model import EntityKind, GameMap
+from airts.world.map import EntityKind, GameMap
 
 
 class AutomationStatus(StrEnum):
@@ -581,3 +581,41 @@ def _area_waypoints(region: PolygonRegion, maximum: int = 24) -> tuple[Point, ..
         return tuple(rows)
     step = (len(rows) - 1) / (maximum - 1)
     return tuple(rows[round(index * step)] for index in range(maximum))
+
+
+def patrol_parameters(automation: Automation) -> PatrolParameters:
+    if not isinstance(automation.parameters, PatrolParameters):
+        raise TypeError("automation does not have patrol parameters")
+    return automation.parameters
+
+
+def defend_parameters(automation: Automation) -> DefendParameters:
+    if not isinstance(automation.parameters, DefendParameters):
+        raise TypeError("automation does not have defend parameters")
+    return automation.parameters
+
+
+def production_parameters(automation: Automation) -> ProductionParameters:
+    if not isinstance(automation.parameters, ProductionParameters):
+        raise TypeError("automation does not have production parameters")
+    return automation.parameters
+
+
+def reinforcement_parameters(automation: Automation) -> ReinforcementParameters:
+    if not isinstance(automation.parameters, ReinforcementParameters):
+        raise TypeError("automation does not have reinforcement parameters")
+    return automation.parameters
+
+
+def repair_parameters(automation: Automation) -> RepairParameters:
+    if not isinstance(automation.parameters, RepairParameters):
+        raise TypeError("automation does not have repair parameters")
+    return automation.parameters
+
+
+def economy_parameters(automation: Automation) -> EconomyParameters:
+    """Narrow a generic automation to its economy parameters."""
+
+    if not isinstance(automation.parameters, EconomyParameters):
+        raise TypeError("automation does not have economy parameters")
+    return automation.parameters

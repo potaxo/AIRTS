@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationStatus,
@@ -13,22 +13,32 @@ from airts.automations import (
     ProductionParameters,
     build_defend_stations,
     build_patrol_waypoints,
+    production_parameters,
     target_center,
 )
-from airts.commands import CommandResult, CreateProductionBatchCommand, CreateProductionCommand
-from airts.events import EventType
-from airts.geometry import Point, PolygonRegion, PolylineTarget
-from airts.navigation.collision import collision_radius
-from airts.navigation.pathfinding import PathfindingError
-from airts.systems.automation_runtime import coordinate_shared_defend_stations
-from airts.validation import (
+from airts.contracts.automations import (
+    defend_parameters as _defend_parameters,
+)
+from airts.contracts.automations import (
+    patrol_parameters as _patrol_parameters,
+)
+from airts.contracts.commands import (
+    CommandResult,
+    CreateProductionBatchCommand,
+    CreateProductionCommand,
     ValidationFailure,
     ValidationPhase,
+    error_reason,
     validate_positive,
     validate_priority,
 )
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget
+from airts.navigation.collision import collision_radius
+from airts.navigation.pathfinding import PathfindingError
+from airts.systems.automation_execution import coordinate_shared_defend_stations
 from airts.world.entities import Entity, UnitState
-from airts.world.map_model import Cell, EntityCategory, EntityKind
+from airts.world.map import Cell, EntityCategory, EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -116,7 +126,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 "create_production",
                 ValidationFailure(
                     ValidationPhase.SPATIAL,
-                    reason(error),
+                    error_reason(error),
                     "defend_target",
                 ),
             )
@@ -131,7 +141,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 "create_production",
                 ValidationFailure(
                     ValidationPhase.SPATIAL,
-                    reason(error),
+                    error_reason(error),
                     "patrol_target",
                 ),
             )
@@ -167,7 +177,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
         return simulation._reject_validation("create_production", failure)
     simulation._activate(automation, (command.factory_id,))
     factory.state = UnitState.PRODUCING
-    simulation._record_production_started(automation)
+    record_production_started(simulation, automation)
     return simulation._accept("create_production", automation.automation_id)
 
 
@@ -205,7 +215,7 @@ def create_production_batch(
                     ValidationPhase.SCHEMA, "INVALID_PRODUCTION_SEQUENCE", "sequence"
                 ),
             )
-    first_kind, first_quantity = command.sequence[0]
+    first_kind = command.sequence[0][0]
     result = create_production(
         simulation,
         CreateProductionCommand(
@@ -221,9 +231,7 @@ def create_production_batch(
     if result.accepted:
         parameters = production_parameters(simulation.automations[result.automation_id or ""])
         parameters.sequence = command.sequence
-        parameters.target_count = sum(quantity for _, quantity in command.sequence)
-        parameters.unit_kind = first_kind
-    return CommandResult(result.accepted, result.reason, result.automation_id)
+    return result
 
 
 def supersede_continuous_production(simulation: Simulation, factory_id: str) -> None:
@@ -360,7 +368,7 @@ def start_next_production(simulation: Simulation, factory_id: str) -> None:
     simulation._assign(factory_id, queued)
     simulation._transition(queued, AutomationStatus.ACTIVE, "FACTORY_QUEUE_STARTED")
     simulation.entities[factory_id].state = UnitState.PRODUCING
-    simulation._record_production_started(queued)
+    record_production_started(simulation, queued)
 
 
 def record_production_started(simulation: Simulation, automation: Automation) -> None:
@@ -597,25 +605,3 @@ def find_spawn_point(simulation: Simulation, factory: Entity) -> Point | None:
         ):
             return Point(cell[0] + 0.5, cell[1] + 0.5)
     return None
-
-
-def production_parameters(automation: Automation) -> ProductionParameters:
-    if not isinstance(automation.parameters, ProductionParameters):
-        raise TypeError("automation does not have production parameters")
-    return automation.parameters
-
-
-def _defend_parameters(automation: Automation) -> DefendParameters:
-    if not isinstance(automation.parameters, DefendParameters):
-        raise TypeError("automation does not have defend parameters")
-    return automation.parameters
-
-
-def _patrol_parameters(automation: Automation) -> PatrolParameters:
-    if not isinstance(automation.parameters, PatrolParameters):
-        raise TypeError("automation does not have patrol parameters")
-    return automation.parameters
-
-
-def reason(error: Exception) -> str:
-    return str(error).upper().replace(" ", "_")

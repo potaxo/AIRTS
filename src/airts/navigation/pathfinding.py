@@ -9,9 +9,9 @@ from math import floor, inf
 
 import numpy as np
 
-from airts._numeric import BoolArray, FloatArray, compile_numeric
-from airts.geometry import Point
-from airts.world.map_model import Cell, GameMap
+from airts.contracts.spatial import Point
+from airts.world._numeric import BoolArray, FloatArray, compile_numeric
+from airts.world.map import Cell, GameMap
 
 
 class PathfindingError(ValueError):

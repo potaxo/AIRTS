@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from airts.world.occupancy import OccupancyError, OccupancyGrid
+from airts.world.map import OccupancyError, OccupancyGrid
 
 
 def test_occupancy_move_is_atomic_on_conflict() -> None:

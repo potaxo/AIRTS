@@ -5,14 +5,13 @@ from __future__ import annotations
 from math import ceil, floor, isclose
 from typing import TYPE_CHECKING
 
-from airts.automations import AutomationKind
-from airts.commands import RemoveEntityCommand
-from airts.events import EventType
-from airts.geometry import Point
+from airts.contracts.automations import AutomationKind
+from airts.contracts.commands import RemoveEntityCommand
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.navigation.spatial_index import SpatialIndex
-from airts.world.entities import Entity, UnitState
-from airts.world.projectiles import Projectile, ProjectileTrace, projectile_speed
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

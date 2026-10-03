@@ -8,8 +8,8 @@ from math import floor
 
 import numpy as np
 
-from airts._numeric import FloatArray, IntArray, compile_numeric
-from airts.geometry import Point
+from airts.contracts.spatial import Point
+from airts.world._numeric import FloatArray, IntArray, compile_numeric
 
 
 class SpatialIndex:

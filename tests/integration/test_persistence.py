@@ -20,25 +20,127 @@ from airts.adapters.persistence import (
     load_simulation_data,
     save_simulation,
 )
-from airts.adapters.replay import load_replay, run_replay, save_replay
-from airts.automations import (
+from airts.adapters.replay import capture_replay, load_replay, run_replay, save_replay
+from airts.contracts.automations import (
     AutomationStatus,
+    DefendParameters,
     ProductionParameters,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     AttackCommand,
     CreateConstructionCommand,
+    CreateDefendCommand,
     CreateEconomyCommand,
     CreatePatrolCommand,
     CreateProductionBatchCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     CreateSpatialReferenceCommand,
+    ModifyAutomationCommand,
+    PauseAutomationCommand,
     SetSelectionCommand,
 )
-from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
+from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, GameMap, load_example_map
+from airts.world.map import EntityKind, GameMap, load_example_map
+
+
+def test_modified_automation_round_trips_without_a_new_lifecycle_transition(
+    make_map: Callable[[int], GameMap], tmp_path: Path
+) -> None:
+    simulation = Simulation(make_map())
+    created = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(5, 5))))
+    simulation.advance(3)
+    assert simulation.execute(
+        ModifyAutomationCommand(
+            created.automation_id or "",
+            title="Edited",
+            priority=4,
+            target=PointTarget(Point(6, 6)),
+        )
+    ).accepted
+    automation = simulation.automations[created.automation_id or ""]
+    assert automation.modified_tick > automation.transition_history[-1].tick
+    destination = tmp_path / "modified.json"
+    save_simulation(simulation, destination)
+
+    restored = load_simulation(destination)
+    replayed = run_replay(capture_replay(simulation))
+    assert restored.export_state() == simulation.export_state()
+    assert replayed.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 10)
+    replayed.advance(10)
+    assert replayed.export_state() == simulation.export_state()
+
+
+def test_load_rejects_modified_tick_before_the_last_transition(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    simulation = Simulation(make_map())
+    created = simulation.execute(CreatePatrolCommand(("unit_01",), PointTarget(Point(5, 5))))
+    simulation.advance(3)
+    simulation.execute(PauseAutomationCommand(created.automation_id or ""))
+    state = simulation.export_state()
+    state["automations"][created.automation_id]["modified_tick"] = 2
+    with pytest.raises(PersistenceError, match="modified tick"):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+def test_expanded_ordinary_defense_round_trips_and_continues(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    simulation = Simulation(make_map(2))
+    created = simulation.execute(
+        CreateDefendCommand(("unit_01", "unit_02"), rectangle_region(Point(5, 5), Point(5.1, 5.1)))
+    )
+    assert created.accepted
+    parameters = simulation.automations[created.automation_id or ""].parameters
+    assert isinstance(parameters, DefendParameters)
+    assert not parameters.gathering_point
+    assert len(parameters.deployment_slots) == 2
+    simulation.advance(3)
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 10)
+
+
+@pytest.mark.parametrize(
+    ("corruption", "reason"),
+    [
+        pytest.param("duplicate", "deployment slots are invalid", id="duplicate-slots"),
+        pytest.param("outside", "impassable deployment slot", id="outside-map"),
+        pytest.param("radius", "radius excludes a station", id="insufficient-radius"),
+    ],
+)
+def test_load_rejects_malformed_expanded_defense(
+    make_map: Callable[[int], GameMap], corruption: str, reason: str
+) -> None:
+    simulation = Simulation(make_map(2))
+    created = simulation.execute(
+        CreateDefendCommand(("unit_01", "unit_02"), rectangle_region(Point(5, 5), Point(5.1, 5.1)))
+    )
+    assert created.accepted
+    state = simulation.export_state()
+    parameters = state["automations"][created.automation_id]["parameters"]
+    if corruption == "duplicate":
+        parameters["deployment_slots"][1] = parameters["deployment_slots"][0]
+    elif corruption == "outside":
+        parameters["deployment_slots"][0] = [-1, -1]
+    else:
+        parameters["assembly_radius"] = 0.0
+    with pytest.raises(PersistenceError, match=reason):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
 
 
 def test_save_restores_spatial_state(make_map: Callable[[int], GameMap], tmp_path: Path) -> None:

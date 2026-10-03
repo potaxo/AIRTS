@@ -7,13 +7,13 @@ from tests.integration.scenarios import (
     runtime_map,
 )
 
-from airts.automations import (
+from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     DefendParameters,
     RepairParameters,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     AttackCommand,
     CancelAutomationCommand,
     CreateDefendCommand,
@@ -22,11 +22,11 @@ from airts.commands import (
     CreateRepairAndReturnCommand,
     MoveCommand,
 )
-from airts.events import EventType
-from airts.geometry import Point, PointTarget, rectangle_region
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PointTarget, rectangle_region
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
 
 
 def test_ownership_validation_is_atomic_and_structured() -> None:

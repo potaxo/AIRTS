@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationStatus,
@@ -22,28 +22,29 @@ from airts.automations import (
     target_center,
     transition_is_allowed,
 )
-from airts.commands import command_from_dict, command_to_dict
-from airts.events import Event, EventLog, EventType
-from airts.geometry import Point, target_from_dict
-from airts.navigation.collision import collision_radius
-from airts.simulation import Simulation
-from airts.spatial import (
+from airts.contracts.commands import command_from_dict, command_to_dict
+from airts.contracts.events import Event, EventLog, EventType
+from airts.contracts.spatial import (
     GroundingSelection,
+    Point,
     SpatialKind,
     SpatialReference,
     SpatialStore,
     spatial_kind,
+    target_from_dict,
 )
-from airts.world.entities import Entity, UnitState
-from airts.world.map_model import (
+from airts.navigation.collision import collision_radius
+from airts.simulation import Simulation
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
+from airts.world.map import (
     EntityCategory,
     EntityKind,
     GameMap,
     MapValidationError,
+    OccupancyError,
+    OccupancyGrid,
     load_map_data,
 )
-from airts.world.occupancy import OccupancyError, OccupancyGrid
-from airts.world.projectiles import Projectile, ProjectileTrace, projectile_speed
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
 SAVE_SCHEMA = "airts-save-v9"
@@ -585,8 +586,8 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
     for automation in automations.values():
         if automation.transition_history[-1].reason_code != automation.reason_code:
             raise PersistenceError("automation reason does not match transition history")
-        if automation.transition_history[-1].tick != automation.modified_tick:
-            raise PersistenceError("automation modified tick does not match transition history")
+        if automation.transition_history[-1].tick > automation.modified_tick:
+            raise PersistenceError("automation modified tick precedes its last transition")
         if automation.transition_history[0].tick != automation.created_tick:
             raise PersistenceError("automation created tick does not match transition history")
         if any(
@@ -695,8 +696,10 @@ def _load_automation_parameters(
             "defend.assembly_radius",
             minimum=0.0,
         )
-        if gathering_point:
-            if not deployment_slots or len(set(deployment_slots)) != len(deployment_slots):
+        if gathering_point and not deployment_slots:
+            raise PersistenceError("gathering defense deployment slots are invalid")
+        if deployment_slots:
+            if len(set(deployment_slots)) != len(deployment_slots):
                 raise PersistenceError("gathering defense deployment slots are invalid")
             if any(
                 not simulation.game_map.is_passable(point)
@@ -706,8 +709,6 @@ def _load_automation_parameters(
                 raise PersistenceError("gathering defense uses an impassable deployment slot")
             if assembly_radius + 1e-9 < default_radius:
                 raise PersistenceError("gathering defense radius excludes a station")
-        elif deployment_slots:
-            raise PersistenceError("normal defend automation cannot have deployment slots")
         return DefendParameters(
             target,
             stations,

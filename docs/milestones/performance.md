@@ -8,7 +8,8 @@ for the current checkout.
 ## FPS and rendering
 
 **Real FPS = 1000 / p99 completed-frame milliseconds.** Every 100 Real FPS gate requires p99 <=
-10 ms, using `real_fps_from_frame_times` and [the shared probe](../../tests/performance/frame_pacing.py).
+10 ms, using `real_fps_from_frame_times` in [metrics.py](../../src/airts/presentation/metrics.py)
+and [the shared probe](../../tests/performance/frame_pacing.py).
 Average Submit FPS/elapsed throughput is diagnostic only. Record consecutive completed frames;
 GPU tests synchronize every frame before sampling. Commands, scheduled ticks, rendering, and
 required synchronization stay inside the measured frame stream. Do not tune the percentile or
@@ -79,7 +80,7 @@ defenses must yield 160 unique stations; one casualty leaves 159 with at most on
 Four factories must produce 132 unique, spaced stations. Reinforcements retain valid established
 stations; contraction may replace obsolete outer slots. Stable identities take precedence over
 fresh global minimum-distance matching. Dense continuous packing must preserve orders and physical
-clearance without requiring a free traffic-lattice slot. The replacement movement contract is
+clearance without requiring a free traffic-lattice slot. The current movement contract is
 described in [runtime](runtime.md#movement-and-combat).
 
 ## Visual inspection

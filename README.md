@@ -59,7 +59,7 @@ These measurements do not count physical monitor scan-out;
 
 | Input | Action |
 | --- | --- |
-| `1` | Selection mode; click entities or regions, or drag friendly units; `Shift` toggles additions |
+| `1` | Selection mode; click entities, points, routes, or regions, or drag friendly units; `Shift` toggles additions |
 | `2` | Add line vertices; right-click to finish the route |
 | `3` | Drag a rectangular patrol area |
 | `4` | Draw a freehand patrol area |
@@ -74,7 +74,7 @@ These measurements do not count physical monitor scan-out;
 | `Delete` | Delete one selected route or region and explicitly cancel automations using it |
 | `F5` / `F9` | Save or load `airts-quicksave.json` |
 | `F2` | Reset the bundled/current starting scenario |
-| `U` | Replace the inspected patrol/defend target with the active spatial target |
+| `U` | Replace the inspected patrol/defend target or production loop's defense target with the active spatial target |
 | `Shift` + build click | Keep placement mode active and append the site to the selected builders' FIFO construction queue |
 | Right-click while placing | Close building placement without moving builders or changing queued construction |
 | `[` / `]` | Decrease or increase the inspected automation priority |

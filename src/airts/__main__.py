@@ -7,9 +7,10 @@ from pathlib import Path
 
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import load_replay, run_replay, save_replay
-from airts.presentation.app import AirtsApp, RendererBackend
+from airts.presentation.app import AirtsApp
+from airts.presentation.rendering import RendererBackend
 from airts.simulation import Simulation
-from airts.world.map_model import load_example_map, load_map
+from airts.world.map import load_example_map, load_map
 
 
 def main() -> int:

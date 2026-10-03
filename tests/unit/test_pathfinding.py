@@ -6,10 +6,10 @@ from random import Random
 
 import pytest
 
-from airts.geometry import Point
+from airts.contracts.spatial import Point
 from airts.navigation.collision import constrained_step
 from airts.navigation.pathfinding import PathfindingError, RoutingService, passable_segment_cells
-from airts.world.map_model import GameMap, load_map_data
+from airts.world.map import GameMap, load_map_data
 
 
 def test_weighted_routes_match_independent_forward_search() -> None:

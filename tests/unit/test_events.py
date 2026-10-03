@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from airts.events import EventLog, EventType
+from airts.contracts.events import EventLog, EventType
 
 
 def test_event_log_has_stable_sequence_and_writes_json_lines(tmp_path: Path) -> None:

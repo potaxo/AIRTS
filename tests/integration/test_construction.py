@@ -10,19 +10,18 @@ from tests.integration.scenarios import (
     builder_factory_simulation,
 )
 
-from airts.automations import (
+from airts.contracts.automations import (
     AutomationStatus,
     ConstructionParameters,
 )
-from airts.commands import (
+from airts.contracts.commands import (
     CreateConstructionCommand,
+    CreateRepairAndReturnCommand,
 )
-from airts.geometry import Point
-from airts.presentation.app import (
-    AirtsApp,
-)
+from airts.contracts.spatial import Point
+from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind
+from airts.world.map import EntityKind
 
 
 def test_builder_construction_is_paid_timed_and_places_building_on_completion() -> None:
@@ -82,6 +81,33 @@ def test_builder_rejects_invalid_construction_without_mutating_world(
     assert simulation.snapshot() == before
 
 
+def test_rejected_construction_preserves_queue_while_builder_is_under_repair() -> None:
+    simulation = builder_factory_simulation()
+    active = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.RESOURCE_GENERATOR, Point(6, 10))
+    )
+    queued = simulation.execute(
+        CreateConstructionCommand(
+            "builder", EntityKind.RESOURCE_GENERATOR, Point(16, 16), queued=True
+        )
+    )
+    assert active.accepted and queued.accepted
+    simulation.entities["builder"].health = 1
+    repair = simulation.execute(CreateRepairAndReturnCommand(("builder",)))
+    assert repair.accepted
+    before = simulation.snapshot()
+
+    rejected = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.RESOURCE_GENERATOR, Point(12, 12))
+    )
+
+    assert not rejected.accepted
+    assert rejected.reason == "CONTROL_CONFLICT"
+    assert simulation.snapshot() == before
+    assert simulation.automations[queued.automation_id or ""].status is AutomationStatus.WAITING
+    assert simulation.assignments["builder"] == repair.automation_id
+
+
 def test_multiple_builders_share_one_job_and_reduce_construction_time() -> None:
     single = builder_factory_simulation()
     single_result = single.execute(
@@ -122,7 +148,7 @@ def test_builder_group_placement_submits_every_selected_builder() -> None:
     app._selection_changed()
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
 
-    app._handle_mouse_down(1, app._screen_point(Point(14, 14)))
+    app._handle_mouse_down(1, app.screen_point(Point(14, 14)))
 
     construction = next(
         automation
@@ -175,8 +201,8 @@ def test_shift_construction_appends_fifo_jobs_and_keeps_placement_active() -> No
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
 
     with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
-        app._handle_mouse_down(1, app._screen_point(Point(12, 12)))
-        app._handle_mouse_down(1, app._screen_point(Point(16, 16)))
+        app._handle_mouse_down(1, app.screen_point(Point(12, 12)))
+        app._handle_mouse_down(1, app.screen_point(Point(16, 16)))
 
     constructions = [
         automation
@@ -235,12 +261,12 @@ def test_right_click_exits_shift_construction_without_moving_builders() -> None:
     app._selection_changed()
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
     with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
-        app._handle_mouse_down(1, app._screen_point(Point(6, 10)))
-        app._handle_mouse_down(1, app._screen_point(Point(16, 16)))
+        app._handle_mouse_down(1, app.screen_point(Point(6, 10)))
+        app._handle_mouse_down(1, app.screen_point(Point(16, 16)))
     assignments = dict(app.simulation.assignments)
     command_count = len(app.simulation.command_history)
 
-    app._handle_mouse_down(3, app._screen_point(Point(20, 20)))
+    app._handle_mouse_down(3, app.screen_point(Point(20, 20)))
 
     assert app.placement_kind is None
     assert app.simulation.assignments == assignments

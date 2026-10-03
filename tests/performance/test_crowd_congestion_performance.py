@@ -8,19 +8,20 @@ from time import perf_counter
 import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.automations import DefendParameters
-from airts.commands import (
+from airts.contracts.automations import DefendParameters
+from airts.contracts.commands import (
     AttackCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateProductionCommand,
     MoveCommand,
 )
-from airts.geometry import Point, rectangle_region
+from airts.contracts.spatial import Point, rectangle_region
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
+from airts.systems.movement import skip_crowded_waypoints
+from airts.world.map import EntityKind, load_map_data
 
 LARGE_FORMATION_UNIT_COUNT = 400
 BRIDGE_UNIT_COUNT = 400
@@ -197,7 +198,7 @@ def test_four_continuous_factories_defend_without_stutter_or_deep_overlap() -> N
     assert minimum_separation >= SCOUT_CONTACT_DISTANCE * (1.0 - MAXIMUM_MOVING_OVERLAP_FRACTION)
     building_cells = simulation._building_cells()
     assert all(
-        simulation._cells_at(entity, entity.position).isdisjoint(building_cells)
+        entity.occupied_cells.isdisjoint(building_cells)
         for entity in simulation.entities.values()
         if entity.is_movable
     )
@@ -302,7 +303,7 @@ def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
         *(Point(x + 0.5, 35.5) for x in range(58, 66)),
     ]
 
-    simulation._skip_crowded_waypoints(mover)
+    skip_crowded_waypoints(simulation, mover)
 
     assert mover.path[0] == Point(57.5, 35.5)
 

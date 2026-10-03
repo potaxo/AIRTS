@@ -7,7 +7,7 @@ Exact schemas/profiles live in their code owners.
 ## World and spatial input
 
 - Static weighted grid; grass, road, forest, water, rock, and bridge terrain. Entity profiles and
-  footprints: [map_model.py](../../src/airts/world/map_model.py). Buildings are hard obstacles;
+  footprints: [map.py](../../src/airts/world/map.py). Buildings are hard obstacles;
   mobile-unit exclusion belongs to physical colliders, not an impassable cell wall.
 - Point, polyline, rectangle, and freehand inputs normalize to `PointTarget`, `PolylineTarget`,
   and `PolygonRegion`. Rectangles/freehand become validated polygons.
@@ -19,8 +19,8 @@ Exact schemas/profiles live in their code owners.
 
 ## Commands and automations
 
-[commands.py](../../src/airts/commands.py) owns tagged, serializable commands;
-[automations.py](../../src/airts/automations.py) owns parameters and legal lifecycle transitions.
+[commands.py](../../src/airts/contracts/commands.py) owns tagged commands, validation and control claims;
+[automations.py](../../src/airts/contracts/automations.py) owns parameters and legal lifecycle transitions.
 Move, stop, hold, attack, spatial edits, and automation actions share deterministic validation.
 Failures identify their operation, subject, and reason; no invalid proposal silently changes state.
 
@@ -30,6 +30,10 @@ working. Creating a new patrol/defend on explicitly selected units replaces thei
 assignment even at lower priority. Background claims use emergency status, priority, and recency.
 Empty ordinary work is canceled; valid future-unit sources may wait. Terminal work leaves live UI.
 Manual factory override pauses its controller; resume must reclaim the factory.
+
+Automation edits validate all requested fields before committing changes, including linked production
+defense. `modified_tick` records parameter/title/priority edits as well as lifecycle transitions;
+an edit does not add a lifecycle transition.
 
 Creation follows proposed -> validating -> active. The schema also permits `awaiting_confirmation`,
 but the current command/UI flow does not enter it or provide a confirmation action.
@@ -41,10 +45,8 @@ and economy. Reinforcement transfers eligible units and fails when its target is
 
 ## Movement and combat
 
-The movement replacement covers routing, local collision, destination allocation, and patrol/defend
-dispatch. The public `Simulation` facade and shared command schemas remain unchanged. There is one
-movement controller for all army sizes; the previous traffic lattice and reservation controller are
-removed.
+One movement controller handles all army sizes, with shared group-path planning for direct commands
+and patrol/defend dispatch.
 
 Static routing uses reverse Dijkstra fields over four-neighbor weighted terrain. A bounded LRU cache
 shares each destination field across units; changing building obstacles changes the cache key.
@@ -66,6 +68,8 @@ reservations or pushing. Same-owner defenses with the same target share unique s
 valid slots on membership changes. Patrol and defense route dispatch have per-controller and global
 budgets. Crowd throughput, separation, and frame-time requirements remain owned by
 [performance](performance.md#crowd-and-routing); they must be measured, not inferred from the design.
+Ordinary defenses can also acquire deployment slots when their initial stations lack clearance;
+save/load preserves those expanded stations without changing the gathering flag.
 
 Opportunistic fire does not cancel locomotion, including defenders traveling past enemies outside
 their assigned defense area. Only an actual pursuit can interrupt that travel; explicit attack
@@ -100,7 +104,8 @@ Multiple builders accelerate one job without duplicating cost or the building.
 
 Shift-placement appends FIFO jobs and keeps placement active. Waiting jobs reserve footprints,
 not resources or builders; activation claims available builders and charges once. Ordinary placement
-replaces pending jobs for those builders. Right-click closes placement without issuing movement or
+replaces pending jobs for those builders only after validation, including control claims, succeeds.
+Rejected placement preserves accepted queues. Right-click closes placement without issuing movement or
 altering accepted work. A completed occupied site waits with `SITE_OCCUPIED`; commit occupancy before
 publishing a building. Queue, progress, resource, and assignment state survive save/replay.
 
@@ -121,7 +126,7 @@ Future trajectories follow the new algorithm; old-run continuation is not promis
 writes v9. Other old save versions remain unsupported. Replays use v8 and reject earlier schemas
 explicitly because their recorded trajectories/events belong to the previous movement algorithm;
 there is no automatic replay migration.
-[events.py](../../src/airts/events.py) provides ordered, filterable events and JSON Lines export.
+[events.py](../../src/airts/contracts/events.py) provides ordered, filterable events and JSON Lines export.
 
 The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays
 valid controls for the selected kind and selected count. Double-click selects visible friendlies

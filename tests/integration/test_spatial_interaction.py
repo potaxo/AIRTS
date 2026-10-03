@@ -8,8 +8,8 @@ from pathlib import Path
 from tests.integration.scenarios import interaction_simulation
 
 from airts.adapters.replay import capture_replay, load_replay, run_replay, save_replay
-from airts.automations import AutomationStatus
-from airts.commands import (
+from airts.contracts.automations import AutomationStatus
+from airts.contracts.commands import (
     CreatePatrolCommand,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
@@ -19,11 +19,11 @@ from airts.commands import (
     SetSelectionCommand,
     command_to_dict,
 )
-from airts.events import EventType
-from airts.geometry import Point, PointTarget, PolylineTarget, rectangle_region
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp, InputMode
 from airts.simulation import Simulation
-from airts.world.map_model import GameMap
+from airts.world.map import GameMap
 
 
 def test_spatial_references_have_stable_ids_unique_names_and_edit_in_place(

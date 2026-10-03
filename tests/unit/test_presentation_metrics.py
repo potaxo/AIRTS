@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.presentation.app import (
+from airts.presentation.metrics import (
     REAL_FPS_FRAME_TIME_PERCENTILE,
     PresentationProfiler,
     real_fps_from_frame_times,

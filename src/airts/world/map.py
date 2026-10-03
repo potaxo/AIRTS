@@ -1,4 +1,4 @@
-"""Authoritative map model, entity profiles, loading, and validation."""
+"""Map cells, terrain and entity profiles, loading, and dynamic occupancy."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from importlib import resources
 from pathlib import Path
 from typing import IO
 
-from airts.geometry import Point
+from airts.contracts.spatial import Point
 
 Cell = tuple[int, int]
 
@@ -129,14 +129,21 @@ class EntitySpec:
 
     @property
     def occupied_cells(self) -> frozenset[Cell]:
-        width, height = self.kind.profile.footprint
-        origin_x = int(self.position.x)
-        origin_y = int(self.position.y)
-        return frozenset(
-            (x, y)
-            for y in range(origin_y, origin_y + height)
-            for x in range(origin_x, origin_x + width)
-        )
+        return footprint_cells(self.kind, self.position)
+
+
+def footprint_cells(kind: EntityKind, position: Point) -> frozenset[Cell]:
+    """Return the profile's occupied grid cells at a continuous position."""
+
+    width, height = kind.profile.footprint
+    origin_x, origin_y = int(position.x), int(position.y)
+    if width == height == 1:
+        return frozenset(((origin_x, origin_y),))
+    return frozenset(
+        (x, y)
+        for y in range(origin_y, origin_y + height)
+        for x in range(origin_x, origin_x + width)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,3 +357,90 @@ def _number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise MapValidationError(f"{field} must be a number")
     return float(value)
+
+
+class OccupancyError(ValueError):
+    """Raised when an entity cannot atomically occupy requested cells."""
+
+
+class OccupancyGrid:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        self._cells: dict[Cell, set[str]] = {}
+        self._entity_cells: dict[str, frozenset[Cell]] = {}
+
+    def place(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
+        if entity_id in self._entity_cells:
+            raise OccupancyError(f"entity already placed: {entity_id}")
+        self._validate_available(entity_id, cells, allowed_conflicts)
+        self._set_cells(entity_id, cells)
+
+    def move(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
+        if entity_id not in self._entity_cells:
+            raise OccupancyError(f"entity is not placed: {entity_id}")
+        if self._entity_cells[entity_id] == cells:
+            return
+        self._validate_available(entity_id, cells, allowed_conflicts)
+        self.remove(entity_id)
+        self._set_cells(entity_id, cells)
+
+    def remove(self, entity_id: str) -> None:
+        cells = self._entity_cells.pop(entity_id, frozenset())
+        for cell in cells:
+            occupants = self._cells[cell]
+            occupants.remove(entity_id)
+            if not occupants:
+                del self._cells[cell]
+
+    def occupants(self, cell: Cell) -> frozenset[str]:
+        return frozenset(self._cells.get(cell, set()))
+
+    def cells_for(self, entity_id: str) -> frozenset[Cell]:
+        return self._entity_cells.get(entity_id, frozenset())
+
+    def blocked_cells(self, excluding: frozenset[str] = frozenset()) -> frozenset[Cell]:
+        return frozenset(
+            cell for cell, occupants in self._cells.items() if occupants.difference(excluding)
+        )
+
+    def snapshot(self) -> dict[str, list[list[int]]]:
+        return {
+            entity_id: [[x, y] for x, y in sorted(cells, key=lambda cell: (cell[1], cell[0]))]
+            for entity_id, cells in sorted(self._entity_cells.items())
+        }
+
+    def _validate_available(
+        self,
+        entity_id: str,
+        cells: frozenset[Cell],
+        allowed_conflicts: frozenset[str] = frozenset(),
+    ) -> None:
+        if not cells:
+            raise OccupancyError("an entity must occupy at least one cell")
+        for cell in cells:
+            if not (0 <= cell[0] < self.width and 0 <= cell[1] < self.height):
+                raise OccupancyError(f"cell outside occupancy grid: {cell}")
+            conflicts = tuple(
+                occupant_id
+                for occupant_id in self._cells.get(cell, ())
+                if occupant_id != entity_id and occupant_id not in allowed_conflicts
+            )
+            if conflicts:
+                conflict = min(conflicts)
+                raise OccupancyError(f"cell {cell} is occupied by {conflict}")
+
+    def _set_cells(self, entity_id: str, cells: frozenset[Cell]) -> None:
+        self._entity_cells[entity_id] = cells
+        for cell in cells:
+            self._cells.setdefault(cell, set()).add(entity_id)

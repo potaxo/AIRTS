@@ -34,10 +34,10 @@ failures, and outcomes. Measure success/time, action and correction counts, inva
 clarification, latency/token cost, losses/resource efficiency, report factuality, workload, trust,
 and perceived control. Seeded scenarios and visible failure evidence support comparison.
 
-Movement replacement is a separate task: reproduce failures, define clearance/arrival/queue and
-save/replay contracts, then compare candidates on unchanged crowd/FPS workloads. Historical
-proposals for clearance-aware routes, stable formation slots, and reciprocal avoidance are not
-implemented requirements or current benchmark evidence. Retain relevant research entry points:
+The current [movement and save/replay contracts](milestones/runtime.md#movement-and-combat) belong
+to runtime. Further movement research requires explicit scope and comparison on the unchanged
+[crowd/FPS workloads](milestones/performance.md). These research references do not prescribe the
+current implementation or establish benchmark evidence:
 [Continuum Crowds](https://grail.cs.washington.edu/projects/crowd-flows/78-treuille.pdf),
 [ORCA](https://gamma-web.iacs.umd.edu/ORCA/), and
 [ClearPath](https://gamma-web.iacs.umd.edu/CA/).

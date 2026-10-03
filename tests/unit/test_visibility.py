@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from airts.commands import MoveCommand
-from airts.geometry import Point
+from airts.contracts.commands import MoveCommand
+from airts.contracts.spatial import Point
 from airts.simulation import Simulation
-from airts.world.map_model import load_map_data
+from airts.world.map import load_map_data
 from airts.world.visibility import VisibilityState
 
 

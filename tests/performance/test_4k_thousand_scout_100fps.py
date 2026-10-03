@@ -8,8 +8,8 @@ import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 from tests.scout_scenario import head_on_scout_simulation
 
-from airts.commands import CommandResult, MoveCommand
-from airts.geometry import Point
+from airts.contracts.commands import CommandResult, MoveCommand
+from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 

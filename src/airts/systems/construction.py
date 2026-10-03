@@ -5,13 +5,22 @@ from __future__ import annotations
 from math import ceil, floor
 from typing import TYPE_CHECKING
 
-from airts.automations import Automation, AutomationKind, AutomationStatus, ConstructionParameters
-from airts.commands import CommandResult, CreateConstructionCommand
-from airts.geometry import Point
+from airts.contracts.automations import (
+    Automation,
+    AutomationKind,
+    AutomationStatus,
+    ConstructionParameters,
+)
+from airts.contracts.commands import (
+    CommandResult,
+    CreateConstructionCommand,
+    ValidationFailure,
+    ValidationPhase,
+)
+from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
-from airts.validation import ValidationFailure, ValidationPhase
 from airts.world.entities import Entity, UnitState
-from airts.world.map_model import Cell, EntityKind
+from airts.world.map import Cell, EntityKind, footprint_cells
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -43,8 +52,8 @@ def create_construction(
                 "building_kind",
             ),
         )
-    placement_failure = simulation._validate_building_placement(
-        command.building_kind, command.position
+    placement_failure = validate_building_placement(
+        simulation, command.building_kind, command.position
     )
     if placement_failure is not None:
         return simulation._reject_validation("create_construction", placement_failure)
@@ -73,11 +82,11 @@ def create_construction(
         simulation._activate(automation, builder_ids, assign_entities=False)
         simulation._transition(automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
         return simulation._accept("create_construction", automation.automation_id)
-    if not command.queued:
-        cancel_queued_construction(simulation, builder_ids)
     claim_failure = simulation._validate_claims(automation, builder_ids, replace_existing=True)
     if claim_failure is not None:
         return simulation._reject_validation("create_construction", claim_failure)
+    if not command.queued:
+        cancel_queued_construction(simulation, builder_ids)
     simulation._activate(automation, builder_ids)
     return simulation._accept("create_construction", automation.automation_id)
 
@@ -91,10 +100,7 @@ def validate_building_placement(
 ) -> ValidationFailure | None:
     if not position.x.is_integer() or not position.y.is_integer():
         return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_NOT_GRID_ALIGNED", "position")
-    width, height = kind.profile.footprint
-    cells = frozenset(
-        (int(position.x) + x, int(position.y) + y) for y in range(height) for x in range(width)
-    )
+    cells = footprint_cells(kind, position)
     if any(not simulation.game_map.contains_cell(cell) for cell in cells):
         return ValidationFailure(ValidationPhase.SPATIAL, "FOOTPRINT_OUTSIDE_MAP", "position")
     if any(not simulation.game_map.is_cell_passable(cell) for cell in cells):
@@ -147,7 +153,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
     if not active_builders:
         simulation._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
         simulation._release_automation(automation)
-        simulation._start_next_construction()
+        start_next_construction(simulation)
         return
     if not parameters.cost_paid:
         cost = parameters.building_kind.profile.construction_cost
@@ -162,7 +168,8 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         parameters.cost_paid = True
         if automation.status is AutomationStatus.WAITING:
             simulation._transition(automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE")
-    placement_failure = simulation._validate_building_placement(
+    placement_failure = validate_building_placement(
+        simulation,
         parameters.building_kind,
         parameters.position,
         ignore_construction_id=automation.automation_id,
@@ -170,7 +177,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
     if placement_failure is not None:
         simulation._transition(automation, AutomationStatus.FAILED, placement_failure.code)
         simulation._release_automation(automation)
-        simulation._start_next_construction()
+        start_next_construction(simulation)
         return
     site_cells = construction_cells(parameters)
     site_occupants = frozenset(
@@ -227,7 +234,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         if not route_available:
             simulation._transition(automation, AutomationStatus.FAILED, "BUILD_SITE_UNREACHABLE")
             simulation._release_automation(automation)
-            simulation._start_next_construction()
+            start_next_construction(simulation)
         return
     work = sum(
         simulation.entities[builder_id].kind.profile.build_speed for builder_id in builders_in_range
@@ -263,14 +270,11 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
     parameters.constructed_entity_id = entity_id
     simulation._transition(automation, AutomationStatus.COMPLETED, "CONSTRUCTION_COMPLETED")
     simulation._release_automation(automation)
-    simulation._start_next_construction()
+    start_next_construction(simulation)
 
 
 def construction_cells(parameters: ConstructionParameters) -> frozenset[Cell]:
-    width, height = parameters.building_kind.profile.footprint
-    origin_x = int(parameters.position.x)
-    origin_y = int(parameters.position.y)
-    return frozenset((origin_x + x, origin_y + y) for y in range(height) for x in range(width))
+    return footprint_cells(parameters.building_kind, parameters.position)
 
 
 def construction_distance(point: Point, parameters: ConstructionParameters) -> float:
@@ -328,7 +332,8 @@ def start_next_construction(simulation: Simulation) -> None:
             continue
         if any(builder_id in simulation.assignments for builder_id in builder_ids):
             continue
-        failure = simulation._validate_building_placement(
+        failure = validate_building_placement(
+            simulation,
             parameters.building_kind,
             parameters.position,
             ignore_construction_id=automation.automation_id,

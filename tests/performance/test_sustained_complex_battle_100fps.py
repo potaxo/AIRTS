@@ -5,12 +5,12 @@ from __future__ import annotations
 import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.commands import CreateDefendCommand, MoveCommand
-from airts.geometry import Point, PolylineTarget
+from airts.contracts.commands import CreateDefendCommand, MoveCommand
+from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLRenderer
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 TARGET_FPS = 100

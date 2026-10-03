@@ -12,8 +12,8 @@ import pygame
 import pytest
 from tests.scout_scenario import head_on_scout_simulation
 
-from airts.commands import MoveCommand
-from airts.geometry import Point
+from airts.contracts.commands import MoveCommand
+from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import (
     SHAPE_FLOATS,
@@ -22,7 +22,7 @@ from airts.presentation.opengl_renderer import (
     OpenGLRendererError,
 )
 from airts.simulation import Simulation
-from airts.world.map_model import GameMap, load_map_data
+from airts.world.map import GameMap, load_map_data
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000

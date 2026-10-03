@@ -7,16 +7,16 @@ from collections.abc import Callable
 import pytest
 from tests.integration.scenarios import interaction_simulation
 
-from airts.automations import AutomationStatus
-from airts.commands import (
+from airts.contracts.automations import AutomationStatus
+from airts.contracts.commands import (
     CancelAutomationCommand,
     CreatePatrolCommand,
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
 )
-from airts.events import EventType
-from airts.geometry import (
+from airts.contracts.events import EventType
+from airts.contracts.spatial import (
     Point,
     PointTarget,
     PolygonRegion,
@@ -24,7 +24,7 @@ from airts.geometry import (
     SpatialTarget,
 )
 from airts.simulation import Simulation
-from airts.world.map_model import GameMap, load_map_data
+from airts.world.map import GameMap, load_map_data
 
 
 def test_crossing_units_recover_and_are_deterministic() -> None:

@@ -10,16 +10,16 @@ Close the AIRTS window to finish a scenario.
 
 from __future__ import annotations
 
-from airts.commands import (
+from airts.contracts.commands import (
     CreateDefendCommand,
     CreateProductionCommand,
     HoldPositionCommand,
     MoveCommand,
 )
-from airts.geometry import Point, rectangle_region
+from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
 
 
 def _river_terrain() -> dict[str, object]:

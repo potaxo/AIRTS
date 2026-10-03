@@ -4,17 +4,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationParameters,
     AutomationStatus,
-    ProductionParameters,
+    production_parameters,
 )
-from airts.commands import CommandResult
-from airts.control import ControlAuthority, ControlClaim, claim_precedes
-from airts.events import EventType
-from airts.validation import ValidationFailure, ValidationPhase
+from airts.contracts.commands import (
+    CommandResult,
+    ControlAuthority,
+    ControlClaim,
+    ValidationFailure,
+    ValidationPhase,
+    claim_precedes,
+)
+from airts.contracts.events import EventType
+from airts.systems import production
 from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
@@ -22,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandResult:
-    automation, failure = simulation._owned_automation(automation_id, owner_id)
+    automation, failure = owned_automation(simulation, automation_id, owner_id)
     if failure is not None:
         return simulation._reject_validation("pause_automation", failure)
     assert automation is not None
@@ -39,7 +45,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
                 evidence={"status": automation.status.value},
             ),
         )
-    simulation._transition(automation, AutomationStatus.PAUSED, "PLAYER_PAUSED")
+    transition(simulation, automation, AutomationStatus.PAUSED, "PLAYER_PAUSED")
     for entity_id in automation.entity_ids:
         if simulation.assignments.get(entity_id) != automation_id:
             continue
@@ -52,7 +58,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
 
 
 def resume(simulation: Simulation, automation_id: str, owner_id: str) -> CommandResult:
-    automation, failure = simulation._owned_automation(automation_id, owner_id)
+    automation, failure = owned_automation(simulation, automation_id, owner_id)
     if failure is not None:
         return simulation._reject_validation("resume_automation", failure)
     assert automation is not None
@@ -71,33 +77,33 @@ def resume(simulation: Simulation, automation_id: str, owner_id: str) -> Command
         if incumbent_id is not None and incumbent_id != automation.automation_id:
             incumbent = simulation.automations.get(incumbent_id)
             if incumbent is not None and incumbent.kind is AutomationKind.PRODUCTION:
-                simulation._transition(automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
+                transition(simulation, automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
                 return simulation._accept("resume_automation", automation_id)
-        failure = simulation._validate_claims(automation, (parameters.factory_id,))
+        failure = validate_claims(simulation, automation, (parameters.factory_id,))
         if failure is not None:
             return simulation._reject_validation("resume_automation", failure)
         if parameters.factory_id not in automation.entity_ids:
             automation.entity_ids.append(parameters.factory_id)
-        simulation._assign(parameters.factory_id, automation)
+        assign(simulation, parameters.factory_id, automation)
         simulation.entities[parameters.factory_id].state = UnitState.PRODUCING
-        simulation._record_production_started(automation)
+        production.record_production_started(simulation, automation)
     elif automation.kind is AutomationKind.CONSTRUCTION and not any(
         simulation.assignments.get(entity_id) == automation.automation_id
         for entity_id in automation.entity_ids
     ):
-        simulation._transition(automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
+        transition(simulation, automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
         simulation._start_next_construction()
         return simulation._accept("resume_automation", automation_id)
     else:
         for entity_id in automation.entity_ids:
             if simulation.assignments.get(entity_id) == automation_id:
                 simulation._reset_movement_liveness(simulation.entities[entity_id], clear_stop=True)
-    simulation._transition(automation, AutomationStatus.ACTIVE, "PLAYER_RESUMED")
+    transition(simulation, automation, AutomationStatus.ACTIVE, "PLAYER_RESUMED")
     return simulation._accept("resume_automation", automation_id)
 
 
 def cancel(simulation: Simulation, automation_id: str, owner_id: str) -> CommandResult:
-    automation, failure = simulation._owned_automation(automation_id, owner_id)
+    automation, failure = owned_automation(simulation, automation_id, owner_id)
     if failure is not None:
         return simulation._reject_validation("cancel_automation", failure)
     assert automation is not None
@@ -110,13 +116,13 @@ def cancel(simulation: Simulation, automation_id: str, owner_id: str) -> Command
                 evidence={"status": automation.status.value},
             ),
         )
-    simulation._transition(automation, AutomationStatus.CANCELED, "PLAYER_CANCELED")
+    transition(simulation, automation, AutomationStatus.CANCELED, "PLAYER_CANCELED")
     if automation.kind is AutomationKind.REPAIR_AND_RETURN:
         for entity_id in automation.entity_ids:
             if simulation.assignments.get(entity_id) == automation.automation_id:
-                simulation._resume_suspended_assignment(automation, entity_id)
+                resume_suspended_assignment(simulation, automation, entity_id)
     else:
-        simulation._release_automation(automation, clear_suspended=True)
+        release_automation(simulation, automation, clear_suspended=True)
     if automation.kind is AutomationKind.PRODUCTION:
         simulation._start_next_production(production_parameters(automation).factory_id)
     elif automation.kind is AutomationKind.CONSTRUCTION:
@@ -144,12 +150,12 @@ def activate(
         priority=automation.priority,
         entity_ids=list(entity_ids),
     )
-    simulation._transition(automation, AutomationStatus.VALIDATING, "VALIDATION_STARTED")
+    transition(simulation, automation, AutomationStatus.VALIDATING, "VALIDATION_STARTED")
     if not assign_entities:
         pass
     elif suspend:
         for entity_id in entity_ids:
-            simulation._assign(entity_id, automation, authority=authority, suspend=True)
+            assign(simulation, entity_id, automation, authority=authority, suspend=True)
     else:
         previous_groups: dict[str, set[str]] = {}
         previous_ids: dict[str, str | None] = {}
@@ -175,7 +181,7 @@ def activate(
                 automation_id=automation.automation_id,
                 authority=authority.name.lower(),
             )
-    simulation._transition(automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
+    transition(simulation, automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
     if assign_entities:
         for entity_id in entity_ids:
             simulation._initialize_runtime_entity(automation, entity_id)
@@ -271,8 +277,8 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
         automation = simulation.automations[affected_id]
         if automation.kind is AutomationKind.PRODUCTION:
             if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
-                simulation._transition(
-                    automation, AutomationStatus.PAUSED, "FACTORY_MANUAL_OVERRIDE"
+                transition(
+                    simulation, automation, AutomationStatus.PAUSED, "FACTORY_MANUAL_OVERRIDE"
                 )
         else:
             automation.remove_entities(frozenset(removed_ids))
@@ -295,17 +301,14 @@ def handle_automation_without_entities(simulation: Simulation, automation: Autom
         return
     if automation.has_future_source:
         if automation.status is AutomationStatus.ACTIVE:
-            simulation._transition(automation, AutomationStatus.WAITING, "NO_ASSIGNED_ENTITIES")
+            transition(simulation, automation, AutomationStatus.WAITING, "NO_ASSIGNED_ENTITIES")
     elif automation.status in {
         AutomationStatus.ACTIVE,
         AutomationStatus.WAITING,
         AutomationStatus.BLOCKED,
         AutomationStatus.PAUSED,
     }:
-        if automation.status is AutomationStatus.PAUSED:
-            simulation._transition(automation, AutomationStatus.CANCELED, "NO_ASSIGNED_ENTITIES")
-        else:
-            simulation._transition(automation, AutomationStatus.CANCELED, "NO_ASSIGNED_ENTITIES")
+        transition(simulation, automation, AutomationStatus.CANCELED, "NO_ASSIGNED_ENTITIES")
 
 
 def release_automation(
@@ -340,9 +343,9 @@ def resume_suspended_assignment(
         if resume is not None and not resume.status.terminal and entity_id in resume.entity_ids:
             simulation.assignments[entity_id] = resume_id
             if resume.status in {AutomationStatus.WAITING, AutomationStatus.BLOCKED}:
-                simulation._transition(resume, AutomationStatus.ACTIVE, "REPAIRED_UNIT_RETURNED")
+                transition(simulation, resume, AutomationStatus.ACTIVE, "REPAIRED_UNIT_RETURNED")
             simulation._reset_movement_liveness(entity, clear_stop=True)
-            entity.state = simulation._state_for_assignment(entity_id)
+            entity.state = state_for_assignment(simulation, entity_id)
             return
     simulation._reset_movement_liveness(entity, clear_stop=True)
     entity.state = UnitState.IDLE
@@ -362,7 +365,7 @@ def validate_claims(
             incumbent = simulation.automations[incumbent_id]
             if incumbent.kind is not AutomationKind.REPAIR_AND_RETURN:
                 continue
-        if not simulation._claim_wins(automation, entity_id, authority):
+        if not claim_wins(simulation, automation, entity_id, authority):
             return ValidationFailure(
                 ValidationPhase.CONFLICT,
                 "CONTROL_CONFLICT",
@@ -438,9 +441,3 @@ def state_for_assignment(simulation: Simulation, entity_id: str) -> UnitState:
         AutomationKind.REPAIR_AND_RETURN: UnitState.REPAIRING,
         AutomationKind.ECONOMY: UnitState.IDLE,
     }[automation.kind]
-
-
-def production_parameters(automation: Automation) -> ProductionParameters:
-    if not isinstance(automation.parameters, ProductionParameters):
-        raise TypeError("automation does not have production parameters")
-    return automation.parameters

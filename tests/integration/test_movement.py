@@ -4,10 +4,10 @@ from collections.abc import Callable
 
 import pytest
 
-from airts.commands import HoldPositionCommand, MoveCommand
-from airts.geometry import Point
+from airts.contracts.commands import HoldPositionCommand, MoveCommand
+from airts.contracts.spatial import Point
 from airts.simulation import Simulation
-from airts.world.map_model import GameMap, load_map_data
+from airts.world.map import GameMap, load_map_data
 
 
 @pytest.mark.parametrize("vertical", [False, True], ids=["horizontal", "vertical"])

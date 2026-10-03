@@ -1,59 +1,37 @@
-"""Persistent automation scheduling and deterministic behavior execution."""
+"""Deterministic patrol, defense, reinforcement, and repair execution."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationStatus,
     DefendParameters,
-    PatrolParameters,
-    ReinforcementParameters,
-    RepairParameters,
     RepairPhase,
     assign_formation_slots,
     build_defend_stations,
+    reinforcement_parameters,
+    repair_parameters,
     target_center,
 )
-from airts.events import EventType
-from airts.geometry import Point, PointTarget, SpatialTarget
+from airts.contracts.automations import (
+    defend_parameters as _defend_parameters,
+)
+from airts.contracts.automations import (
+    patrol_parameters as _patrol_parameters,
+)
+from airts.contracts.events import EventType
+from airts.contracts.spatial import Point, PointTarget, SpatialTarget
 from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import command_handlers
+from airts.systems import movement
 from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
-
-
-def drive_automations(simulation: Simulation) -> None:
-    automation_ids = sorted(
-        automation_id
-        for automation_id, automation in simulation.automations.items()
-        if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
-    )
-    if automation_ids:
-        offset = simulation.tick % len(automation_ids)
-        automation_ids = automation_ids[offset:] + automation_ids[:offset]
-    for automation_id in automation_ids:
-        automation = simulation.automations[automation_id]
-        if automation.kind is AutomationKind.PATROL:
-            drive_patrol(simulation, automation)
-        elif automation.kind is AutomationKind.DEFEND:
-            drive_defend(simulation, automation)
-        elif automation.kind is AutomationKind.PRODUCTION:
-            simulation._drive_production(automation)
-        elif automation.kind is AutomationKind.REINFORCEMENT:
-            drive_reinforcement(simulation, automation)
-        elif automation.kind is AutomationKind.ECONOMY:
-            simulation._drive_economy(automation)
-        elif automation.kind is AutomationKind.CONSTRUCTION:
-            simulation._drive_construction(automation)
-        else:
-            drive_repair(simulation, automation)
 
 
 def scheduled_entity_ids(simulation: Simulation, automation: Automation) -> tuple[str, ...]:
@@ -232,30 +210,6 @@ def initialize_runtime_entity(
         entity.state = UnitState.IDLE
 
 
-def _patrol_parameters(automation: Automation) -> PatrolParameters:
-    if not isinstance(automation.parameters, PatrolParameters):
-        raise TypeError("automation does not have patrol parameters")
-    return automation.parameters
-
-
-def _defend_parameters(automation: Automation) -> DefendParameters:
-    if not isinstance(automation.parameters, DefendParameters):
-        raise TypeError("automation does not have defend parameters")
-    return automation.parameters
-
-
-def reinforcement_parameters(automation: Automation) -> ReinforcementParameters:
-    if not isinstance(automation.parameters, ReinforcementParameters):
-        raise TypeError("automation does not have reinforcement parameters")
-    return automation.parameters
-
-
-def repair_parameters(automation: Automation) -> RepairParameters:
-    if not isinstance(automation.parameters, RepairParameters):
-        raise TypeError("automation does not have repair parameters")
-    return automation.parameters
-
-
 def drive_patrol(simulation: Simulation, automation: Automation) -> None:
     parameters = _patrol_parameters(automation)
     ordered = sorted(automation.entity_ids)
@@ -282,7 +236,7 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
             else anchor
         )
         try:
-            paths = command_handlers.plan_group_paths(
+            paths = movement.plan_group_paths(
                 simulation, (key,), {key: target}, shared_goal=anchor, held_cells=held_cells
             )
         except PathfindingError as error:
@@ -435,7 +389,7 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
         if not allowance.claim():
             continue
         try:
-            paths = command_handlers.plan_group_paths(
+            paths = movement.plan_group_paths(
                 simulation, (key,), {key: station}, shared_goal=anchor, held_cells=held_cells
             )
         except PathfindingError as error:

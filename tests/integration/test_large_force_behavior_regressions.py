@@ -7,18 +7,18 @@ from statistics import median
 import pytest
 from tests.integration.scenarios import growing_factory_simulation
 
-from airts.automations import DefendParameters, ProductionParameters
-from airts.commands import (
+from airts.contracts.automations import DefendParameters, ProductionParameters
+from airts.contracts.commands import (
     CreateDefendCommand,
     CreateProductionCommand,
     HoldPositionCommand,
     MoveCommand,
     PauseAutomationCommand,
 )
-from airts.geometry import Point, rectangle_region
+from airts.contracts.spatial import Point, rectangle_region
 from airts.simulation import Simulation
 from airts.world.entities import Entity, UnitState
-from airts.world.map_model import EntityKind, load_map_data
+from airts.world.map import EntityKind, load_map_data
 
 
 def _river_terrain() -> dict[str, object]:
@@ -524,7 +524,7 @@ def test_large_force_never_moves_an_idle_friendly_through_a_factory() -> None:
     assert simulation.occupancy.cells_for("idle_victim") == idle_cells
     building_cells = simulation._building_cells()
     assert all(
-        simulation._cells_at(entity, entity.position).isdisjoint(building_cells)
+        entity.occupied_cells.isdisjoint(building_cells)
         for entity in simulation.entities.values()
         if entity.is_movable
     )

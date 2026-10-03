@@ -6,23 +6,22 @@ from collections import deque
 from gc import collect as collect_garbage
 from math import ceil, floor, sqrt
 
-from airts.automations import (
+from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationParameters,
     AutomationStatus,
-    DefendParameters,
-    PatrolParameters,
-    ProductionParameters,
-    ReinforcementParameters,
-    RepairParameters,
     assign_formation_slots,
     target_center,
 )
-from airts.commands import (
+from airts.contracts.automations import (
+    production_parameters as _production_parameters,
+)
+from airts.contracts.commands import (
     AttackCommand,
     Command,
     CommandResult,
+    ControlAuthority,
     CreateConstructionCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
@@ -44,18 +43,24 @@ from airts.commands import (
     ResumeAutomationCommand,
     SetSelectionCommand,
     StopCommand,
+    ValidationFailure,
+    ValidationPhase,
     command_to_dict,
 )
-from airts.control import ControlAuthority
-from airts.events import EventLog, EventType
-from airts.geometry import Point, PointTarget, PolygonRegion, PolylineTarget, SpatialTarget
+from airts.contracts.events import EventLog, EventType
+from airts.contracts.spatial import (
+    GroundingSelection,
+    Point,
+    PointTarget,
+    SpatialStore,
+    SpatialTarget,
+)
 from airts.navigation.collision import collision_radius, warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.navigation.spatial_index import warm_spatial_index
-from airts.spatial import GroundingSelection, SpatialStore
 from airts.systems import (
-    automation_lifecycle,
-    automation_runtime,
+    automation_control,
+    automation_execution,
     command_handlers,
     spatial_commands,
 )
@@ -64,14 +69,8 @@ from airts.systems import construction as construction_system
 from airts.systems import economy as economy_system
 from airts.systems import movement as movement_system
 from airts.systems import production as production_system
-from airts.validation import (
-    ValidationFailure,
-    ValidationPhase,
-)
-from airts.world.entities import Entity, UnitState
-from airts.world.map_model import Cell, EntityCategory, EntityKind, GameMap
-from airts.world.occupancy import OccupancyGrid
-from airts.world.projectiles import Projectile, ProjectileTrace
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
+from airts.world.map import Cell, EntityCategory, EntityKind, GameMap, OccupancyGrid
 from airts.world.visibility import VisibilitySystem
 
 
@@ -281,9 +280,9 @@ class Simulation:
         if isinstance(command, CreateEconomyCommand):
             return command_handlers.create_economy(self, command)
         if isinstance(command, PauseAutomationCommand):
-            return automation_lifecycle.pause(self, command.automation_id, command.owner_id)
+            return automation_control.pause(self, command.automation_id, command.owner_id)
         if isinstance(command, ResumeAutomationCommand):
-            return automation_lifecycle.resume(self, command.automation_id, command.owner_id)
+            return automation_control.resume(self, command.automation_id, command.owner_id)
         return self._cancel(command.automation_id, command.owner_id)
 
     def advance(self, ticks: int = 1) -> None:
@@ -296,11 +295,37 @@ class Simulation:
             self._collision_pair_check_count = 0
             economy_system.generate_income(self)
             economy_system.spawn_ambient_enemy(self)
-            automation_runtime.drive_automations(self)
+            self._drive_automations()
             movement_system.move_entities(self)
             combat_system.drive_projectiles(self)
             combat_system.drive_combat(self)
             self._update_visibility()
+
+    def _drive_automations(self) -> None:
+        automation_ids = sorted(
+            automation_id
+            for automation_id, automation in self.automations.items()
+            if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
+        )
+        if automation_ids:
+            offset = self.tick % len(automation_ids)
+            automation_ids = automation_ids[offset:] + automation_ids[:offset]
+        for automation_id in automation_ids:
+            automation = self.automations[automation_id]
+            if automation.kind is AutomationKind.PATROL:
+                automation_execution.drive_patrol(self, automation)
+            elif automation.kind is AutomationKind.DEFEND:
+                automation_execution.drive_defend(self, automation)
+            elif automation.kind is AutomationKind.PRODUCTION:
+                production_system.drive_production(self, automation)
+            elif automation.kind is AutomationKind.REINFORCEMENT:
+                automation_execution.drive_reinforcement(self, automation)
+            elif automation.kind is AutomationKind.ECONOMY:
+                economy_system.drive_economy(self, automation)
+            elif automation.kind is AutomationKind.CONSTRUCTION:
+                construction_system.drive_construction(self, automation)
+            else:
+                automation_execution.drive_repair(self, automation)
 
     def remove_entity(self, entity_id: str, reason: str = "ENTITY_REMOVED") -> CommandResult:
         """Submit an authoritative, replayable entity-removal system command."""
@@ -328,12 +353,12 @@ class Simulation:
             if current.kind is AutomationKind.PRODUCTION and not current.status.terminal:
                 self._transition(current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
             else:
-                automation_lifecycle.handle_automation_without_entities(self, current)
+                automation_control.handle_automation_without_entities(self, current)
         if suspended_id is not None:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
             self._refresh_gathering_formation(suspended)
-            automation_lifecycle.handle_automation_without_entities(self, suspended)
+            automation_control.handle_automation_without_entities(self, suspended)
         for automation in tuple(self.automations.values()):
             if (
                 automation.kind is AutomationKind.PRODUCTION
@@ -381,17 +406,23 @@ class Simulation:
         return self._accept("remove_entity")
 
     def snapshot(self) -> dict[str, object]:
+        return self._domain_state() | {
+            "map": {"id": self.game_map.map_id, "version": self.game_map.map_version},
+            "occupancy": self.occupancy.snapshot(),
+        }
+
+    def _domain_state(self) -> dict[str, object]:
+        """Serialize the authoritative fields shared by snapshots and complete saves."""
+
         return {
             "tick": self.tick,
             "random_seed": self.random_seed,
             "ambient_enemy_spawns": self.ambient_enemy_spawns,
             "enemy_spawn_interval_ticks": self.enemy_spawn_interval_ticks,
             "enemy_spawn_cap": self.enemy_spawn_cap,
-            "map": {"id": self.game_map.map_id, "version": self.game_map.map_version},
             "entities": {
                 entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
             },
-            "occupancy": self.occupancy.snapshot(),
             "assignments": dict(sorted(self.assignments.items())),
             "suspended_assignments": dict(sorted(self.suspended_assignments.items())),
             "automations": {
@@ -410,35 +441,12 @@ class Simulation:
         }
 
     def export_state(self) -> dict[str, object]:
-        return {
-            "tick": self.tick,
-            "random_seed": self.random_seed,
-            "ambient_enemy_spawns": self.ambient_enemy_spawns,
-            "enemy_spawn_interval_ticks": self.enemy_spawn_interval_ticks,
-            "enemy_spawn_cap": self.enemy_spawn_cap,
-            "entities": {
-                entity_id: entity.to_dict() for entity_id, entity in sorted(self.entities.items())
-            },
-            "assignments": dict(sorted(self.assignments.items())),
-            "suspended_assignments": dict(sorted(self.suspended_assignments.items())),
-            "automations": {
-                automation_id: automation.to_dict()
-                for automation_id, automation in sorted(self.automations.items())
-            },
-            "visibility": self.visibility.to_dict(),
-            "resources": dict(sorted(self.resources.items())),
-            "spatial": self.spatial.to_dict(),
-            "selection": self.selection.to_dict(),
+        return self._domain_state() | {
             "events": [event.to_dict() for event in self.events.events],
             "command_history": list(self._command_history),
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
             "next_projectile_number": self._next_projectile_number,
-            "projectiles": {
-                projectile_id: projectile.to_dict()
-                for projectile_id, projectile in sorted(self.projectiles.items())
-            },
-            "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
             "movement_blocked": sorted(self._movement_blocked),
             "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
         }
@@ -447,16 +455,13 @@ class Simulation:
     def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
         movement_system.reset_movement_liveness(entity, clear_stop=clear_stop)
 
-    def _skip_crowded_waypoints(self, entity: Entity) -> None:
-        movement_system.skip_crowded_waypoints(self, entity)
-
     def _start_path(
         self, entity: Entity, target: Point, path: PathResult, source: str, state: UnitState
     ) -> None:
         movement_system.start_path(self, entity, target, path, source, state)
 
     def _refresh_gathering_formation(self, automation: Automation) -> None:
-        automation_runtime.refresh_gathering_formation(self, automation)
+        automation_execution.refresh_gathering_formation(self, automation)
 
     def _invalidate_navigation_cache(self) -> None:
         self._building_cells_cache = None
@@ -612,25 +617,13 @@ class Simulation:
         )
 
     def _cancel(self, automation_id: str, owner_id: str) -> CommandResult:
-        return automation_lifecycle.cancel(self, automation_id, owner_id)
-
-    def _drive_construction(self, automation: Automation) -> None:
-        construction_system.drive_construction(self, automation)
+        return automation_control.cancel(self, automation_id, owner_id)
 
     def _start_next_construction(self) -> None:
         construction_system.start_next_construction(self)
 
-    def _drive_production(self, automation: Automation) -> None:
-        production_system.drive_production(self, automation)
-
     def _start_next_production(self, factory_id: str) -> None:
         production_system.start_next_production(self, factory_id)
-
-    def _record_production_started(self, automation: Automation) -> None:
-        production_system.record_production_started(self, automation)
-
-    def _drive_economy(self, automation: Automation) -> None:
-        economy_system.drive_economy(self, automation)
 
     def _activate(
         self,
@@ -641,7 +634,7 @@ class Simulation:
         suspend: bool = False,
         assign_entities: bool = True,
     ) -> None:
-        automation_lifecycle.activate(
+        automation_control.activate(
             self,
             automation,
             entity_ids,
@@ -660,12 +653,12 @@ class Simulation:
         entity_ids: list[str],
         parameters: AutomationParameters,
     ) -> Automation:
-        return automation_lifecycle.new_automation(
+        return automation_control.new_automation(
             self, kind, title, owner_id, priority, original_instruction, entity_ids, parameters
         )
 
     def _transition(self, automation: Automation, status: AutomationStatus, reason: str) -> None:
-        automation_lifecycle.transition(self, automation, status, reason)
+        automation_control.transition(self, automation, status, reason)
 
     def _assign(
         self,
@@ -675,28 +668,19 @@ class Simulation:
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
         suspend: bool = False,
     ) -> None:
-        automation_lifecycle.assign(
-            self, entity_id, automation, authority=authority, suspend=suspend
-        )
+        automation_control.assign(self, entity_id, automation, authority=authority, suspend=suspend)
 
     def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
-        automation_lifecycle.manual_override_many(self, entity_ids)
+        automation_control.manual_override_many(self, entity_ids)
 
     def _release_automation(self, automation: Automation, *, clear_suspended: bool = False) -> None:
-        automation_lifecycle.release_automation(self, automation, clear_suspended=clear_suspended)
+        automation_control.release_automation(self, automation, clear_suspended=clear_suspended)
 
     def _resume_suspended_assignment(self, repair_automation: Automation, entity_id: str) -> None:
-        automation_lifecycle.resume_suspended_assignment(self, repair_automation, entity_id)
+        automation_control.resume_suspended_assignment(self, repair_automation, entity_id)
 
     def _initialize_runtime_entity(self, automation: Automation, entity_id: str) -> None:
-        automation_runtime.initialize_runtime_entity(self, automation, entity_id)
-
-    def _attach_production_defense(
-        self,
-        production: Automation,
-        target: PolygonRegion | PolylineTarget,
-    ) -> None:
-        production_system.attach_production_defense(self, production, target)
+        automation_execution.initialize_runtime_entity(self, automation, entity_id)
 
     def _nearest_repair_destination(
         self, entity: Entity, required_id: str | None = None
@@ -760,7 +744,7 @@ class Simulation:
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
         replace_existing: bool = False,
     ) -> ValidationFailure | None:
-        return automation_lifecycle.validate_claims(
+        return automation_control.validate_claims(
             self, automation, entity_ids, authority=authority, replace_existing=replace_existing
         )
 
@@ -770,15 +754,15 @@ class Simulation:
         entity_id: str,
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
     ) -> bool:
-        return automation_lifecycle.claim_wins(self, automation, entity_id, authority)
+        return automation_control.claim_wins(self, automation, entity_id, authority)
 
     def _owned_automation(
         self, automation_id: str, owner_id: str
     ) -> tuple[Automation | None, ValidationFailure | None]:
-        return automation_lifecycle.owned_automation(self, automation_id, owner_id)
+        return automation_control.owned_automation(self, automation_id, owner_id)
 
     def _state_for_assignment(self, entity_id: str) -> UnitState:
-        return automation_lifecycle.state_for_assignment(self, entity_id)
+        return automation_control.state_for_assignment(self, entity_id)
 
     def _building_cells(self) -> frozenset[Cell]:
         if self._building_cells_cache is None:
@@ -789,18 +773,6 @@ class Simulation:
                 for cell in entity.occupied_cells
             )
         return self._building_cells_cache
-
-    def _cells_at(self, entity: Entity, position: Point) -> frozenset[Cell]:
-        width, height = entity.kind.profile.footprint
-        origin_x = int(position.x)
-        origin_y = int(position.y)
-        if width == height == 1:
-            return frozenset(((origin_x, origin_y),))
-        return frozenset(
-            (x, y)
-            for y in range(origin_y, origin_y + height)
-            for x in range(origin_x, origin_x + width)
-        )
 
     def _update_visibility(self) -> None:
         for player_id, (newly_visible, newly_explored, no_longer_visible) in self.visibility.update(
@@ -853,37 +825,3 @@ class Simulation:
             validation_phase=failure.phase.value,
         )
         return CommandResult(False, failure.code)
-
-
-def _reason(error: Exception) -> str:
-    return str(error).upper().replace(" ", "_")
-
-
-def _patrol_parameters(automation: Automation) -> PatrolParameters:
-    if not isinstance(automation.parameters, PatrolParameters):
-        raise TypeError("automation does not have patrol parameters")
-    return automation.parameters
-
-
-def _defend_parameters(automation: Automation) -> DefendParameters:
-    if not isinstance(automation.parameters, DefendParameters):
-        raise TypeError("automation does not have defend parameters")
-    return automation.parameters
-
-
-def _production_parameters(automation: Automation) -> ProductionParameters:
-    if not isinstance(automation.parameters, ProductionParameters):
-        raise TypeError("automation does not have production parameters")
-    return automation.parameters
-
-
-def _reinforcement_parameters(automation: Automation) -> ReinforcementParameters:
-    if not isinstance(automation.parameters, ReinforcementParameters):
-        raise TypeError("automation does not have reinforcement parameters")
-    return automation.parameters
-
-
-def _repair_parameters(automation: Automation) -> RepairParameters:
-    if not isinstance(automation.parameters, RepairParameters):
-        raise TypeError("automation does not have repair parameters")
-    return automation.parameters

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from airts.commands import CreateProductionCommand
-from airts.geometry import Point, rectangle_region
+from airts.contracts.commands import CreateProductionCommand
+from airts.contracts.spatial import Point, rectangle_region
 from airts.simulation import Simulation
-from airts.world.map_model import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
+from airts.world.map import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
 
 
 def runtime_map() -> GameMap:

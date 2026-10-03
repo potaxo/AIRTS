@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airts.automations import DefendParameters, PatrolParameters, ProductionParameters
-from airts.commands import (
+from airts.contracts.automations import DefendParameters, PatrolParameters, ProductionParameters
+from airts.contracts.commands import (
     CommandResult,
     CreateSpatialReferenceCommand,
     DeleteRegionCommand,
@@ -13,11 +13,11 @@ from airts.commands import (
     EditSpatialReferenceCommand,
     RenameRegionCommand,
     SetSelectionCommand,
+    ValidationFailure,
+    ValidationPhase,
 )
-from airts.events import EventType
-from airts.geometry import PointTarget, SpatialTarget
-from airts.spatial import GroundingSelection, SpatialKind
-from airts.validation import ValidationFailure, ValidationPhase
+from airts.contracts.events import EventType
+from airts.contracts.spatial import GroundingSelection, PointTarget, SpatialKind, SpatialTarget
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -33,7 +33,7 @@ def validate_geometry(simulation: Simulation, target: SpatialTarget) -> Validati
 def create_spatial_reference(
     simulation: Simulation, command: CreateSpatialReferenceCommand
 ) -> CommandResult:
-    failure = simulation._validate_geometry(command.target)
+    failure = validate_geometry(simulation, command.target)
     if failure is not None:
         return simulation._reject_validation("create_spatial_reference", failure)
     try:
@@ -56,7 +56,7 @@ def create_spatial_reference(
 def edit_spatial_reference(
     simulation: Simulation, command: EditSpatialReferenceCommand
 ) -> CommandResult:
-    failure = simulation._validate_geometry(command.target)
+    failure = validate_geometry(simulation, command.target)
     if failure is not None:
         return simulation._reject_validation("edit_spatial_reference", failure)
     try:
