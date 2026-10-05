@@ -5,6 +5,7 @@ from __future__ import annotations
 from time import perf_counter
 
 import pygame
+import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 from tests.scout_scenario import head_on_scout_simulation
 
@@ -56,6 +57,7 @@ def _assert_orders_active(
     assert all(simulation.entities[entity_id].move_target is not None for entity_id in entity_ids)
 
 
+@pytest.mark.performance
 def test_4k_static_thousand_scout_rendering_sustains_100_real_fps() -> None:
     """A static large army must not become slow merely because the window is 4K."""
 
@@ -70,7 +72,9 @@ def test_4k_static_thousand_scout_rendering_sustains_100_real_fps() -> None:
     assert_real_fps(probe, TARGET_FPS, "static 4K rendering")
 
 
-def test_thousand_scout_head_on_collision_cpu_work_fits_one_realtime_second() -> None:
+def test_thousand_scout_head_on_collision_cpu_work_fits_one_realtime_second(
+    check_timing: bool,
+) -> None:
     """Command planning and ten authoritative dense-collision ticks fit their real-time budget."""
 
     simulation, eastbound, westbound = head_on_scout_simulation()
@@ -98,10 +102,13 @@ def test_thousand_scout_head_on_collision_cpu_work_fits_one_realtime_second() ->
     assert simulation.tick == MEASURED_TICKS
     assert progressing >= MINIMUM_PROGRESSING_UNITS
     assert maximum_collision_checks > 0
-    assert elapsed <= 1.0, f"1,000-scout command and collision ticks took {elapsed:.3f}s"
+    if check_timing:
+        assert elapsed <= 1.0, f"1,000-scout command and collision ticks took {elapsed:.3f}s"
 
 
-def test_4k_thousand_scout_head_on_collision_sustains_100_real_fps_end_to_end() -> None:
+def test_4k_thousand_scout_head_on_collision_sustains_100_real_fps_end_to_end(
+    check_timing: bool,
+) -> None:
     """The measured second includes commands, collisions, visibility, UI, and 4K drawing."""
 
     simulation, eastbound, westbound = head_on_scout_simulation()
@@ -133,7 +140,8 @@ def test_4k_thousand_scout_head_on_collision_sustains_100_real_fps_end_to_end() 
     assert app.selected_entities == set(entity_ids)
     assert progressing >= MINIMUM_PROGRESSING_UNITS
     assert maximum_collision_checks > 0
-    assert_real_fps(probe, TARGET_FPS, "head-on 4K collision")
+    if check_timing:
+        assert_real_fps(probe, TARGET_FPS, "head-on 4K collision")
 
 
 def test_explicit_software_runtime_scales_a_bounded_framebuffer_for_4k_windows() -> None:

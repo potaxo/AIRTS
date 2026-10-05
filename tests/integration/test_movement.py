@@ -21,6 +21,63 @@ from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_map_data
 
 
+def test_move_from_injected_overlapping_selection_allocates_compatible_destinations() -> None:
+    """An artificial compressed source must not become impossible final goals."""
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "compressed_selection_goals",
+                "name": "Compressed selection goals",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": "scout", "kind": "scout", "position": [2.5, 6.5]},
+                    {"id": "light", "kind": "light_tank", "position": [4.5, 6.5]},
+                    {"id": "heavy", "kind": "heavy_tank", "position": [6.5, 6.5]},
+                ],
+            }
+        )
+    )
+    for entity in simulation.entities.values():
+        entity.position = Point(4.5, 6.5)
+        simulation.occupancy.move(
+            entity.entity_id, entity.occupied_cells, frozenset(simulation.entities)
+        )
+    ids = tuple(simulation.entities)
+    assert simulation.execute(MoveCommand(ids, Point(18.5, 8.5))).accepted
+    for index, key in enumerate(ids):
+        first = simulation.entities[key]
+        assert first.move_target is not None
+        for other_key in ids[index + 1 :]:
+            second = simulation.entities[other_key]
+            assert second.move_target is not None
+            assert first.move_target.distance_to(second.move_target) >= (
+                collision_radius(first.kind) + collision_radius(second.kind) - 1e-8
+            )
+
+
+def test_move_preserves_existing_physically_legal_translated_layout() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "legal_selection_goals",
+                "name": "Legal selection goals",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": "scout", "kind": "scout", "position": [2.5, 6.5]},
+                    {"id": "heavy", "kind": "heavy_tank", "position": [4.5, 6.5]},
+                ],
+            }
+        )
+    )
+    assert simulation.execute(MoveCommand(("scout", "heavy"), Point(16.5, 8.5))).accepted
+    assert simulation.entities["scout"].move_target == Point(15.5, 8.5)
+    assert simulation.entities["heavy"].move_target == Point(17.5, 8.5)
+
+
 def _advance_with_clearance(simulation: Simulation, ticks: int = 1) -> None:
     """Check actual trajectories, total speed, static clearance and submitted occupancy."""
     units = [entity for entity in simulation.entities.values() if entity.is_movable]

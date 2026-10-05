@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import floor
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
@@ -294,7 +295,7 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         parameters.progress_ticks += 1
         if parameters.progress_ticks < parameters.build_ticks:
             return
-    spawn = find_spawn_point(simulation, simulation.entities[parameters.factory_id])
+    spawn = find_spawn_point(simulation, simulation.entities[parameters.factory_id], unit_kind)
     if spawn is None:
         if automation.status is AutomationStatus.ACTIVE:
             simulation._transition(automation, AutomationStatus.WAITING, "SPAWN_BLOCKED")
@@ -403,7 +404,13 @@ def spawn_unit(
         health=unit_kind.profile.max_health,
     )
     simulation.entities[entity_id] = entity
-    simulation.occupancy.place(entity_id, entity.occupied_cells)
+    allowed_conflicts = frozenset(
+        key
+        for cell in entity.occupied_cells
+        for key in simulation.occupancy.occupants(cell)
+        if simulation.entities[key].is_movable
+    )
+    simulation.occupancy.place(entity_id, entity.occupied_cells, allowed_conflicts)
     if parameters.rally_point is not None:
         try:
             path = simulation._routes.shared_path(
@@ -473,8 +480,9 @@ def assign_produced_defender(
     if entity_id not in defend.entity_ids:
         defend.entity_ids.append(entity_id)
     defend_parameters = _defend_parameters(defend)
+    previous_station = defend_parameters.stations.get(entity_id)
     if defend_parameters.gathering_point:
-        slot_index = len(defend.entity_ids) - 1
+        slot_index = defend.entity_ids.index(entity_id)
         slots = simulation._gathering_slots(
             target,
             slot_index + 1,
@@ -488,18 +496,25 @@ def assign_produced_defender(
             station.distance_to(target_center(target)),
         )
     else:
+        previous_stations = defend_parameters.stations
         defend_parameters.stations = build_defend_stations(
             target,
             tuple(defend.entity_ids),
             simulation.game_map,
         )
         for defender_id in defend.entity_ids:
+            changed_owner = simulation.assignments.get(defender_id) != defend.automation_id
             simulation._assign(defender_id, defend)
-            simulation._initialize_runtime_entity(defend, defender_id)
+            if changed_owner or previous_stations.get(
+                defender_id
+            ) != defend_parameters.stations.get(defender_id):
+                simulation._initialize_runtime_entity(defend, defender_id)
         coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
+    changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
     simulation._assign(entity_id, defend)
-    simulation._initialize_runtime_entity(defend, entity_id)
+    if changed_owner or previous_station != defend_parameters.stations.get(entity_id):
+        simulation._initialize_runtime_entity(defend, entity_id)
     coordinate_shared_defend_stations(simulation, target, production.owner_id)
 
 
@@ -522,6 +537,7 @@ def attach_production_defense(
         and simulation.entities[entity_id].is_movable
     ]
     if defend is not None and not defend.status.terminal:
+        previous_stations = _defend_parameters(defend).stations
         if isinstance(target, PolygonRegion):
             radius = max(
                 (collision_radius(simulation.entities[item].kind) for item in produced_ids),
@@ -548,8 +564,10 @@ def attach_production_defense(
         defend.entity_ids = list(produced_ids)
         defend.parameters = parameters_for_defend
         for entity_id in produced_ids:
+            changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
             simulation._assign(entity_id, defend)
-            simulation._initialize_runtime_entity(defend, entity_id)
+            if changed_owner or previous_stations.get(entity_id) != stations.get(entity_id):
+                simulation._initialize_runtime_entity(defend, entity_id)
         coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     parameters.defend_automation_id = None
@@ -592,16 +610,47 @@ def assign_produced_patroller(
     simulation._initialize_runtime_entity(patrol, entity_id)
 
 
-def find_spawn_point(simulation: Simulation, factory: Entity) -> Point | None:
+def spawn_cell_available(simulation: Simulation, cell: Cell, kind: EntityKind) -> bool:
+    """Certify a cell-centered spawn against authoritative nearby mobile discs.
+
+    Every declared mobile radius is smaller than half a cell, so a passable cell
+    without a building also certifies terrain, building and boundary clearance.
+    Occupancy is only the broadphase: an adjacent cell can contain an overlapping
+    disc, while an occupied cell can still have physically usable capacity.
+    """
+    if not simulation.game_map.is_cell_passable(cell):
+        return False
+    occupants = simulation.occupancy.occupants(cell)
+    if any(not simulation.entities[key].is_movable for key in occupants):
+        return False
+    point = Point(cell[0] + 0.5, cell[1] + 0.5)
+    radius = collision_radius(kind)
+    maximum_radius = max(collision_radius(item) for item in EntityKind if item.profile.movable)
+    reach = radius + maximum_radius
+    nearby_ids: set[str] = set()
+    for y in range(floor(point.y - reach), floor(point.y + reach) + 1):
+        for x in range(floor(point.x - reach), floor(point.x + reach) + 1):
+            if simulation.game_map.contains_cell((x, y)):
+                nearby_ids.update(simulation.occupancy.occupants((x, y)))
+    for entity_id in sorted(nearby_ids):
+        entity = simulation.entities[entity_id]
+        if not entity.is_movable:
+            continue
+        simulation._collision_pair_check_count += 1
+        contact = radius + collision_radius(entity.kind)
+        dx = point.x - entity.position.x
+        dy = point.y - entity.position.y
+        if dx * dx + dy * dy < contact * contact - 1e-12:
+            return False
+    return True
+
+
+def find_spawn_point(simulation: Simulation, factory: Entity, kind: EntityKind) -> Point | None:
     occupied = factory.occupied_cells
     candidates: set[Cell] = set()
     for x, y in occupied:
         candidates.update({(x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)})
     for cell in sorted(candidates, key=lambda item: (item[1], item[0])):
-        if (
-            cell not in occupied
-            and simulation.game_map.is_cell_passable(cell)
-            and not simulation.occupancy.occupants(cell)
-        ):
+        if cell not in occupied and spawn_cell_available(simulation, cell, kind):
             return Point(cell[0] + 0.5, cell[1] + 0.5)
     return None

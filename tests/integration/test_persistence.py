@@ -12,6 +12,8 @@ from tests.integration.scenarios import (
     economy_combat_simulation,
     growing_factory_simulation,
     hold_contact_simulation,
+    injected_overlap_simulation,
+    runtime_map,
 )
 
 from airts.adapters.persistence import (
@@ -51,6 +53,8 @@ from airts.contracts.commands import (
     SetSelectionCommand,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
+from airts.navigation.collision import collision_radius
+from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind, GameMap, load_example_map
@@ -91,6 +95,115 @@ def test_displaced_hold_round_trips_and_replays_before_anchor_recovery(tmp_path:
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
+@pytest.mark.parametrize("unit_count", [100, 400])
+def test_injected_coincident_recovery_save_continues_through_internal_squad_exit(
+    unit_count: int, tmp_path: Path
+) -> None:
+    """Injection is test setup; complete saves preserve a recovery already in progress."""
+    simulation, entity_ids, selected = injected_overlap_simulation(unit_count, 0.0)
+    initial_positions = {key: simulation.entities[key].position for key in entity_ids}
+    assert simulation.execute(MoveCommand(selected, Point(75, 48))).accepted
+    destinations = {key: simulation.entities[key].move_target for key in selected}
+    destination_envelope = max(
+        target.distance_to(Point(75, 48)) for target in destinations.values() if target is not None
+    )
+    simulation.advance(4)
+    assert any(simulation.entities[key].position != initial_positions[key] for key in entity_ids), (
+        "save must be taken during actual body recovery"
+    )
+    assert any(simulation.entities[key].path for key in selected)
+    destination = tmp_path / f"coincident-recovery-{unit_count}.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    assert restored.export_state() == simulation.export_state()
+
+    for _ in range(40):
+        _assert_continues_identically(simulation, restored, 10)
+    for key, target in destinations.items():
+        assert target is not None
+        completed = next(
+            event
+            for event in reversed(simulation.events.events)
+            if event.subject_id == key and event.event_type.value == "movement_completed"
+        )
+        assert Point(*completed.details["position"]).distance_to(target) <= 1e-8
+        # An early arrival becomes Idle and may yield to the remaining squad.
+        assert simulation.entities[key].position.distance_to(Point(75, 48)) <= (
+            destination_envelope + 0.6
+        )
+        assert not simulation.entities[key].path
+        assert simulation.entities[key].position.distance_to(initial_positions[key]) > 20
+    assert set(simulation.entities) == set(entity_ids)
+    index = SpatialIndex({key: entity.position for key, entity in simulation.entities.items()})
+    for first, second in index.candidate_pairs(0.6):
+        a, b = simulation.entities[first], simulation.entities[second]
+        assert a.position.distance_to(b.position) >= (
+            collision_radius(a.kind) + collision_radius(b.kind) - 1e-6
+        )
+    rested = {key: simulation.entities[key].position for key in entity_ids}
+    _assert_continues_identically(simulation, restored, 40)
+    assert all(
+        simulation.entities[key].position.distance_to(position) <= 1e-6
+        for key, position in rested.items()
+    ), "recovered bodies must settle after the squad has completed its exit"
+
+
+def test_thousand_unit_dense_recovery_save_preserves_bounded_continuation(tmp_path: Path) -> None:
+    """The largest recovery also rebuilds all disposable caches without trajectory drift."""
+    simulation, entity_ids, selected = injected_overlap_simulation(1_000, 0.3)
+    assert simulation.execute(HoldPositionCommand(entity_ids)).accepted
+    anchors = {
+        key: simulation.entities[key].hold_anchor for key in entity_ids if key not in selected
+    }
+    assert simulation.execute(MoveCommand(selected, Point(75, 48))).accepted
+    destinations = {key: simulation.entities[key].move_target for key in selected}
+    simulation.advance(4)
+    destination = tmp_path / "thousand-dense-recovery.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 40)
+    assert all(simulation.entities[key].hold_anchor == anchor for key, anchor in anchors.items())
+    assert all(simulation.entities[key].state is UnitState.HOLDING for key in anchors)
+    while simulation.tick < 600 and any(simulation.entities[key].path for key in selected):
+        _assert_continues_identically(simulation, restored, min(10, 600 - simulation.tick))
+    for key, target in destinations.items():
+        assert target is not None
+        assert not simulation.entities[key].path, f"{key} did not complete within 600 ticks"
+        completed = next(
+            event
+            for event in reversed(simulation.events.events)
+            if event.subject_id == key and event.event_type.value == "movement_completed"
+        )
+        assert Point(*completed.details["position"]).distance_to(target) <= 1e-8
+    passive_frontier = max(
+        simulation.entities[key].position.x + collision_radius(simulation.entities[key].kind)
+        for key in anchors
+    )
+    assert all(
+        simulation.entities[key].position.x - collision_radius(simulation.entities[key].kind)
+        > passive_frontier
+        for key in selected
+    )
+    index = SpatialIndex({key: entity.position for key, entity in simulation.entities.items()})
+    maximum_radius = max(collision_radius(entity.kind) for entity in simulation.entities.values())
+    for first, second in index.candidate_pairs(maximum_radius * 2):
+        assert (
+            simulation.entities[first].position.distance_to(simulation.entities[second].position)
+            >= collision_radius(simulation.entities[first].kind)
+            + collision_radius(simulation.entities[second].kind)
+            - 1e-6
+        )
+    assert all(simulation.entities[key].hold_anchor == anchor for key, anchor in anchors.items())
+    assert all(simulation.entities[key].state is UnitState.HOLDING for key in anchors)
+    rested = {key: simulation.entities[key].position for key in entity_ids}
+    _assert_continues_identically(simulation, restored, 40)
+    assert all(
+        simulation.entities[key].position.distance_to(position) <= 0.08
+        for key, position in rested.items()
+    ), "conflicting anchors must wait safely after the selected squad has left"
+
+
 @pytest.mark.parametrize("schema", ["airts-save-v7", "airts-save-v8", "airts-save-v9"])
 def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) -> None:
     simulation = hold_contact_simulation()
@@ -106,6 +219,8 @@ def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) 
             "recovery_retry_tick",
             "defend_arrived",
             "recovery_blocked_cells",
+            "recovery_request_tick",
+            "recovery_released",
         ):
             entity.pop(field)
     restored = load_simulation_data(
@@ -114,7 +229,162 @@ def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) 
     assert restored.entities["holder"].hold_anchor == Point(*saved_position)
     restored.advance(40)
     assert restored.entities["holder"].position == Point(*saved_position)
-    assert SAVE_SCHEMA == "airts-save-v10"
+    assert restored.entities["holder"].recovery_request_tick is None
+    assert not restored.entities["holder"].recovery_released
+    assert SAVE_SCHEMA == "airts-save-v11"
+
+
+def test_v10_preserves_recovery_intent_and_initializes_the_new_return_phase() -> None:
+    simulation = hold_contact_simulation()
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    # Prepare past request ages without depending on a particular movement trace.
+    simulation.tick = 3
+    holder = simulation.entities["holder"]
+    holder.contact_wait_ticks = 4
+    holder.recovery_request_tick = 1
+    holder.recovery_released = True
+    state = simulation.export_state()
+    for entity in state["entities"].values():
+        entity.pop("recovery_request_tick")
+        entity.pop("recovery_released")
+    restored = load_simulation_data(
+        {"schema": "airts-save-v10", "map": simulation.game_map.to_dict(), "state": state}
+    )
+    assert restored.entities["holder"].hold_anchor == holder.hold_anchor
+    assert restored.entities["holder"].contact_wait_ticks == 4
+    assert restored.entities["holder"].recovery_request_tick is None
+    assert not restored.entities["holder"].recovery_released
+    migrated = restored.export_state()
+    for entity in migrated["entities"].values():
+        assert entity.pop("recovery_request_tick") is None
+        assert entity.pop("recovery_released") is False
+    assert migrated == state
+
+
+@pytest.mark.parametrize(
+    ("request_tick", "released"), [(None, False), (0, False), (0, True), (3, True)]
+)
+def test_v11_round_trips_return_request_age_and_release_phase(
+    request_tick: int | None, released: bool
+) -> None:
+    simulation = hold_contact_simulation()
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    simulation.tick = 3
+    holder = simulation.entities["holder"]
+    holder.recovery_request_tick = request_tick
+    holder.recovery_released = released
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+
+
+def test_v11_preserves_pending_hold_progress_and_continues_without_a_player_route() -> None:
+    """The internal weak return tracker affects the saved deterministic trajectory."""
+    simulation = hold_contact_simulation()
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    holder = simulation.entities["holder"]
+    # Prepare a displaced, physically separated holder and an aged weak request.
+    holder.position = Point(6.5, 5.5)
+    simulation.occupancy.move("holder", holder.occupied_cells)
+    simulation.tick = 40
+    holder.recovery_request_tick = 0
+    holder.progress_target = holder.hold_anchor
+    holder.progress_distance = 1.0
+    holder.no_progress_ticks = 31
+    holder.route_ticks = 62
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+    assert not restored.entities["holder"].path
+    assert restored.entities["holder"].route_ticks == 62
+    _assert_continues_identically(simulation, restored, 10)
+    assert holder.position.distance_to(Point(5.5, 5.5)) <= 0.05
+
+
+@pytest.mark.parametrize("fault", ["wrong-anchor", "missing-request", "legacy-v10"])
+def test_hold_internal_progress_requires_the_current_saved_request_owner(fault: str) -> None:
+    simulation = hold_contact_simulation()
+    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
+    holder = simulation.entities["holder"]
+    holder.recovery_request_tick = 0
+    holder.progress_target = Point(6.5, 5.5) if fault == "wrong-anchor" else holder.hold_anchor
+    holder.progress_distance = 1.0
+    holder.no_progress_ticks = 31
+    holder.route_ticks = 62
+    if fault == "missing-request":
+        holder.clear_recovery_request()
+    with pytest.raises(PersistenceError, match="progress target must match its next waypoint"):
+        load_simulation_data(
+            {
+                "schema": "airts-save-v10" if fault == "legacy-v10" else SAVE_SCHEMA,
+                "map": simulation.game_map.to_dict(),
+                "state": simulation.export_state(),
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["recovery_request_tick", "recovery_released"])
+def test_v11_requires_explicit_return_phase_fields(field: str) -> None:
+    simulation = hold_contact_simulation()
+    state = simulation.export_state()
+    state["entities"]["holder"].pop(field)
+    with pytest.raises(PersistenceError, match="required in v11"):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+@pytest.mark.parametrize("owner", ["idle", "move", "building", "unarrived-defend", "paused"])
+def test_v11_rejects_return_requests_without_a_weak_business_owner(owner: str) -> None:
+    simulation = Simulation(runtime_map()) if owner == "building" else hold_contact_simulation()
+    key = "factory" if owner == "building" else "holder"
+    entity = simulation.entities[key]
+    if owner == "move":
+        assert simulation.execute(MoveCommand((key,), Point(12.5, 5.5))).accepted
+    elif owner in {"unarrived-defend", "paused"}:
+        created = simulation.execute(CreateDefendCommand((key,), PointTarget(Point(8.5, 5.5))))
+        assert created.accepted
+        if owner == "paused":
+            assert simulation.execute(PauseAutomationCommand(created.automation_id or "")).accepted
+            entity.state = UnitState.DEFENDING
+            entity.defend_arrived = True
+    entity.recovery_request_tick = 0
+    with pytest.raises(PersistenceError, match="no weak return owner"):
+        load_simulation_data(
+            {
+                "schema": SAVE_SCHEMA,
+                "map": simulation.game_map.to_dict(),
+                "state": simulation.export_state(),
+            }
+        )
+
+
+def test_v11_preserves_arrived_defense_release_phase_at_its_station() -> None:
+    simulation = hold_contact_simulation()
+    entity = simulation.entities["holder"]
+    created = simulation.execute(CreateDefendCommand(("holder",), PointTarget(entity.position)))
+    assert created.accepted
+    entity.defend_arrived = True
+    entity.recovery_request_tick = 0
+    entity.recovery_released = True
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
 
 
 @pytest.mark.parametrize(
@@ -128,6 +398,14 @@ def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) 
         ("recovery_path", [[-1.0, 5.5]]),
         ("defend_arrived", 1),
         ("recovery_blocked_cells", [[-1, 5]]),
+        ("recovery_request_tick", -1),
+        ("recovery_request_tick", True),
+        ("recovery_request_tick", 0.0),
+        ("recovery_request_tick", 1),
+        ("recovery_released", 1),
+        ("recovery_released", "true"),
+        ("recovery_released", None),
+        ("recovery_released", True),
     ],
 )
 def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) -> None:
@@ -141,9 +419,10 @@ def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) ->
         )
 
 
-def test_previous_replay_schema_is_explicitly_rejected() -> None:
+@pytest.mark.parametrize("schema", ["airts-replay-v8", "airts-replay-v9"])
+def test_previous_replay_schema_is_explicitly_rejected(schema: str) -> None:
     document = capture_replay(hold_contact_simulation()).to_dict()
-    document["schema"] = "airts-replay-v8"
+    document["schema"] = schema
     with pytest.raises(ReplayError, match="unsupported replay schema"):
         load_replay_data(document)
 

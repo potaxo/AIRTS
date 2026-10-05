@@ -95,7 +95,9 @@ def _crowd_simulation(
     return simulation, entity_ids
 
 
-def test_four_continuous_factories_defend_without_stutter_or_deep_overlap() -> None:
+def test_four_continuous_factories_defend_without_stutter_or_deep_overlap(
+    check_timing: bool,
+) -> None:
     """Repeated production must not globally rematch, stack, or stall a 300-unit defense."""
 
     defender_ids = tuple(f"defender_{index:03d}" for index in range(296))
@@ -203,11 +205,12 @@ def test_four_continuous_factories_defend_without_stutter_or_deep_overlap() -> N
         for entity in simulation.entities.values()
         if entity.is_movable
     )
-    assert_real_fps(
-        probe,
-        DYNAMIC_DEFENSE_TARGET_FPS,
-        "four-factory dynamic 300-scout defense",
-    )
+    if check_timing:
+        assert_real_fps(
+            probe,
+            DYNAMIC_DEFENSE_TARGET_FPS,
+            "four-factory dynamic 300-scout defense",
+        )
 
 
 def _minimum_unit_separation(
@@ -368,7 +371,9 @@ def test_large_scout_move_flows_past_a_yielding_enemy_heavy_without_jitter() -> 
     )
 
 
-def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks() -> None:
+def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks(
+    check_timing: bool,
+) -> None:
     simulation, entity_ids = _crowd_simulation(LARGE_FORMATION_UNIT_COUNT)
     target = rectangle_region(Point(65, 28), Point(67, 30))
     result = simulation.execute(CreateDefendCommand(entity_ids, target))
@@ -427,11 +432,12 @@ def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks()
     assert minimum_separation >= MINIMUM_SETTLED_SCOUT_SPACING, (
         f"settled defenders were only {minimum_separation:.3f} units apart"
     )
-    assert p95 < Simulation.TICK_SECONDS, (
-        f"tiny-defense ticks had median {median(tick_times) * 1_000:.1f} ms, "
-        f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
-        f"{simulation.collision_pair_check_count} final collision checks"
-    )
+    if check_timing:
+        assert p95 < Simulation.TICK_SECONDS, (
+            f"tiny-defense ticks had median {median(tick_times) * 1_000:.1f} ms, "
+            f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
+            f"{simulation.collision_pair_check_count} final collision checks"
+        )
 
 
 def test_large_bridge_queue_fully_crosses_without_deep_overlap() -> None:
@@ -470,7 +476,9 @@ def test_large_bridge_queue_fully_crosses_without_deep_overlap() -> None:
     )
 
 
-def test_thousand_entity_focus_attack_holds_range_and_fits_realtime_budget() -> None:
+def test_thousand_entity_focus_attack_holds_range_and_fits_realtime_budget(
+    check_timing: bool,
+) -> None:
     simulation, entity_ids = _crowd_simulation(999, enemy_position=Point(70.5, 30.5))
     assert simulation.execute(AttackCommand(entity_ids, "focus_target")).accepted
     simulation.advance(200)
@@ -493,8 +501,9 @@ def test_thousand_entity_focus_attack_holds_range_and_fits_realtime_budget() -> 
     )
     assert len(in_range) >= 24
     assert all(not entity.path and entity.move_target is None for entity in in_range)
-    assert p95 < Simulation.TICK_SECONDS, (
-        f"focus ticks had median {median(tick_times) * 1_000:.1f} ms, "
-        f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
-        f"{len(simulation.projectiles)} live projectiles"
-    )
+    if check_timing:
+        assert p95 < Simulation.TICK_SECONDS, (
+            f"focus ticks had median {median(tick_times) * 1_000:.1f} ms, "
+            f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
+            f"{len(simulation.projectiles)} live projectiles"
+        )

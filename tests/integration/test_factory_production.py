@@ -23,12 +23,14 @@ from airts.contracts.commands import (
     CreateProductionCommand,
     CreateSpatialReferenceCommand,
     ModifyAutomationCommand,
+    MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
     StopCommand,
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolylineTarget, rectangle_region
+from airts.navigation.collision import collision_radius
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 from airts.world.map import EntityKind, load_map_data
@@ -242,6 +244,98 @@ def test_production_waits_when_no_spawn_cell_is_available() -> None:
     automation = simulation.automations[created.automation_id or ""]
     assert automation.status is AutomationStatus.WAITING
     assert automation.reason_code == "SPAWN_BLOCKED"
+
+
+@pytest.mark.parametrize("kind", [EntityKind.SCOUT, EntityKind.HEAVY_TANK])
+def test_production_preserves_disc_clearance_across_empty_neighbor_cells(kind: EntityKind) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "adjacent_factory_disc",
+                "name": "Adjacent factory disc",
+                "width": 20,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": "factory", "kind": "factory", "position": [7, 8]},
+                    {"id": "blocker", "kind": "heavy_tank", "position": [7.5, 6.99]},
+                ],
+            }
+        )
+    )
+    result = simulation.execute(CreateProductionCommand("factory", kind, 1))
+    assert result.accepted
+    for _ in range(10):
+        simulation.advance()
+        units = [entity for entity in simulation.entities.values() if entity.is_movable]
+        for index, first in enumerate(units):
+            for second in units[index + 1 :]:
+                assert first.position.distance_to(second.position) >= (
+                    collision_radius(first.kind) + collision_radius(second.kind) - 1e-8
+                )
+    assert len(units) == 2
+    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
+
+
+def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_overlap() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "disc_blocked_factory",
+                "name": "Disc blocked factory",
+                "width": 12,
+                "height": 14,
+                "terrain": {
+                    "default": "water",
+                    "rectangles": [[7, 8, 4, 4, "grass"], [7, 6, 1, 2, "grass"]],
+                },
+                "entities": [
+                    {"id": "factory", "kind": "factory", "position": [7, 8]},
+                    {"id": "blocker", "kind": "heavy_tank", "position": [7.5, 6.99]},
+                ],
+            }
+        )
+    )
+    result = simulation.execute(CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1))
+    simulation.advance(10)
+    automation = simulation.automations[result.automation_id or ""]
+    assert automation.status is AutomationStatus.WAITING
+    assert automation.reason_code == "SPAWN_BLOCKED"
+    assert len(simulation.entities) == 2
+    assert simulation.execute(MoveCommand(("blocker",), Point(7.5, 6.5))).accepted
+    for _ in range(10):
+        simulation.advance()
+        units = [entity for entity in simulation.entities.values() if entity.is_movable]
+        if len(units) == 2:
+            assert units[0].position.distance_to(units[1].position) >= 0.9 - 1e-8
+    assert automation.status is AutomationStatus.COMPLETED
+    assert len(simulation.entities) == 3
+
+
+def test_production_uses_legal_space_within_an_occupied_mobile_cell() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "shared_factory_exit_cell",
+                "name": "Shared factory exit cell",
+                "width": 20,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": "factory", "kind": "factory", "position": [7, 8]},
+                    {"id": "blocker", "kind": "scout", "position": [7.01, 7.01]},
+                ],
+            }
+        )
+    )
+    result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    simulation.advance(10)
+    produced = simulation.entities["scout_001"]
+    blocker = simulation.entities["blocker"]
+    assert produced.position == Point(7.5, 7.5)
+    assert produced.position.distance_to(blocker.position) >= 0.6 - 1e-8
+    assert produced.occupied_cells == blocker.occupied_cells
+    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
 
 
 def test_manual_factory_override_pauses_and_resume_reclaims_factory() -> None:

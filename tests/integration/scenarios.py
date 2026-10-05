@@ -3,11 +3,69 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import ceil, sqrt
 
 from airts.contracts.commands import CreateProductionCommand
 from airts.contracts.spatial import Point, rectangle_region
 from airts.simulation import Simulation
 from airts.world.map import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
+
+
+def injected_overlap_simulation(
+    unit_count: int = 100,
+    spacing_ratio: float = 0.5,
+    *,
+    selected_count: int = 9,
+) -> tuple[Simulation, tuple[str, ...], tuple[str, ...]]:
+    """Inject a dense body lattice after legal map creation, only for recovery tests.
+
+    The map retained by save/replay starts with separated scouts. Injection updates
+    authoritative body positions and occupancy; it is deliberately not a replayable
+    player operation or evidence of a normally produced overlap.
+    """
+    columns = ceil(sqrt(unit_count))
+    rows = ceil(unit_count / columns)
+    entity_ids = tuple(f"scout_{index:04d}" for index in range(unit_count))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": f"injected_overlap_{unit_count}_{spacing_ratio}",
+                "name": "Injected overlap recovery",
+                "width": 96,
+                "height": 96,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "kind": "scout",
+                        "position": [3.5 + index % columns, 3.5 + index // columns],
+                    }
+                    for index, entity_id in enumerate(entity_ids)
+                ],
+            }
+        ),
+        random_seed=191,
+    )
+    center = Point(48, 48)
+    spacing = 0.6 * spacing_ratio
+    allowed_conflicts = frozenset(entity_ids)
+    for index, entity_id in enumerate(entity_ids):
+        entity = simulation.entities[entity_id]
+        entity.position = Point(
+            center.x + (index % columns - (columns - 1) / 2) * spacing,
+            center.y + (index // columns - (rows - 1) / 2) * spacing,
+        )
+        simulation.occupancy.move(entity_id, entity.occupied_cells, allowed_conflicts)
+    selected = tuple(
+        sorted(
+            entity_ids,
+            key=lambda entity_id: (
+                simulation.entities[entity_id].position.distance_to(center),
+                entity_id,
+            ),
+        )[:selected_count]
+    )
+    return simulation, entity_ids, selected
 
 
 def hold_contact_simulation() -> Simulation:

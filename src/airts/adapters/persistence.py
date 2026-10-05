@@ -48,7 +48,7 @@ from airts.world.map import (
 )
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v10"
+SAVE_SCHEMA = "airts-save-v11"
 
 
 class PersistenceError(ValueError):
@@ -78,7 +78,8 @@ def load_simulation_data(raw_data: object) -> Simulation:
     document = _mapping(raw_data, "save document")
     legacy_movement = document.get("schema") in {"airts-save-v7", "airts-save-v8"}
     legacy_contact = document.get("schema") in {"airts-save-v7", "airts-save-v8", "airts-save-v9"}
-    if document.get("schema") != SAVE_SCHEMA and not legacy_contact:
+    legacy_recovery = legacy_contact or document.get("schema") == "airts-save-v10"
+    if document.get("schema") != SAVE_SCHEMA and not legacy_recovery:
         raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
     try:
         game_map = load_map_data(document.get("map"))
@@ -117,6 +118,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         tick,
         legacy_movement=legacy_movement,
         legacy_contact=legacy_contact,
+        legacy_recovery=legacy_recovery,
     )
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
@@ -130,6 +132,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         state.get("suspended_assignments", {}), simulation
     )
     _validate_assignment_completeness(simulation)
+    _validate_recovery_request_owners(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
     simulation.resources = _load_resources(state.get("resources"), simulation)
     simulation.spatial = _load_spatial(state.get("spatial"), simulation, tick)
@@ -303,6 +306,7 @@ def _load_entities(
     *,
     legacy_movement: bool = False,
     legacy_contact: bool = False,
+    legacy_recovery: bool = False,
 ) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
@@ -316,6 +320,21 @@ def _load_entities(
         except ValueError as error:
             raise PersistenceError(f"invalid entity {entity_id}: {error}") from error
         position = _point(entity.get("position"), "entity.position")
+        if legacy_recovery:
+            recovery_request_tick = None
+            recovery_released = False
+        else:
+            if "recovery_request_tick" not in entity or "recovery_released" not in entity:
+                raise PersistenceError("entity recovery request fields are required in v11")
+            request_raw = entity["recovery_request_tick"]
+            recovery_request_tick = (
+                None
+                if request_raw is None
+                else _past_tick(request_raw, "entity.recovery_request_tick", current_tick)
+            )
+            recovery_released = _boolean(entity["recovery_released"], "entity.recovery_released")
+            if recovery_released and recovery_request_tick is None:
+                raise PersistenceError("entity.recovery_released requires a recovery request")
         if legacy_contact:
             hold_anchor = position if state is UnitState.HOLDING else None
             recovery_path: list[Point] = []
@@ -324,7 +343,7 @@ def _load_entities(
             recovery_blocked_cells = None
         else:
             if "hold_anchor" not in entity:
-                raise PersistenceError("entity.hold_anchor is required in v10")
+                raise PersistenceError("entity.hold_anchor is required in v10 and later saves")
             anchor_raw = entity.get("hold_anchor")
             hold_anchor = None if anchor_raw is None else _point(anchor_raw, "entity.hold_anchor")
             recovery_path = [
@@ -339,7 +358,9 @@ def _load_entities(
             )
             defend_arrived = _boolean(entity.get("defend_arrived"), "entity.defend_arrived")
             if "recovery_blocked_cells" not in entity:
-                raise PersistenceError("entity.recovery_blocked_cells is required in v10")
+                raise PersistenceError(
+                    "entity.recovery_blocked_cells is required in v10 and later saves"
+                )
             blocked_raw = entity.get("recovery_blocked_cells")
             recovery_blocked_cells = (
                 None
@@ -427,7 +448,17 @@ def _load_entities(
             progress_target = path[0] if path else None
             progress_distance = position.distance_to(path[0]) if path else None
             no_progress_ticks = 0
-        if progress_target is not None and (not path or progress_target != path[0]):
+        hold_return_progress = (
+            not legacy_recovery
+            and hold_anchor is not None
+            and recovery_request_tick is not None
+            and progress_target == hold_anchor
+        )
+        if (
+            progress_target is not None
+            and (not path or progress_target != path[0])
+            and not hold_return_progress
+        ):
             raise PersistenceError(
                 f"entity {entity_id} movement progress target must match its next waypoint"
             )
@@ -435,7 +466,7 @@ def _load_entities(
             raise PersistenceError(
                 f"entity {entity_id} cannot have stalled ticks without movement progress"
             )
-        if route_ticks and not path:
+        if route_ticks and not path and not hold_return_progress:
             route_ticks = 0
         if congestion_stopped and not path:
             # Normalize saves created by the short-lived implementation that
@@ -499,6 +530,8 @@ def _load_entities(
             contact_wait_ticks=contact_wait_ticks,
             defend_arrived=defend_arrived,
             recovery_blocked_cells=recovery_blocked_cells,
+            recovery_request_tick=recovery_request_tick,
+            recovery_released=recovery_released,
         )
     for loaded_entity in entities.values():
         if (
@@ -1100,6 +1133,29 @@ def _validate_assignment_completeness(simulation: Simulation) -> None:
             raise PersistenceError(
                 f"automation {automation.automation_id} assignments are incomplete"
             )
+
+
+def _validate_recovery_request_owners(simulation: Simulation) -> None:
+    """Return phases belong only to holders or established defense stations."""
+    for entity in simulation.entities.values():
+        if entity.recovery_request_tick is None:
+            continue
+        if entity.is_movable and entity.hold_anchor is not None:
+            continue
+        automation = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
+        if (
+            entity.is_movable
+            and entity.defend_arrived
+            and entity.state is UnitState.DEFENDING
+            and automation is not None
+            and automation.status is not AutomationStatus.PAUSED
+            and isinstance(automation.parameters, DefendParameters)
+            and entity.entity_id in automation.parameters.stations
+        ):
+            continue
+        raise PersistenceError(
+            f"entity {entity.entity_id} recovery request has no weak return owner"
+        )
 
 
 def _load_visibility(raw_data: object, simulation: Simulation) -> VisibilitySystem:

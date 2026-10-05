@@ -26,6 +26,7 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget
+from airts.navigation.collision import collision_radius
 from airts.simulation import Simulation
 from airts.world.entities import Projectile
 from airts.world.map import EntityKind, load_map_data
@@ -112,6 +113,39 @@ def test_enemy_reinforcement_interval_and_cap_limit_world_growth() -> None:
         )
         == 2
     )
+
+
+def test_seeded_ambient_spawn_checks_disc_capacity_in_adjacent_cells() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "ambient_adjacent_disc",
+                "name": "Ambient adjacent disc",
+                "width": 10,
+                "height": 1,
+                "terrain": {"default": "grass", "rectangles": []},
+                "entities": [
+                    {"id": "player", "kind": "scout", "position": [0.5, 0.5]},
+                    {
+                        "id": "blocker",
+                        "kind": "heavy_tank",
+                        "owner": "enemy",
+                        "position": [8.99, 0.5],
+                    },
+                ],
+            }
+        ),
+        random_seed=1,
+        ambient_enemy_spawns=True,
+        enemy_spawn_interval_ticks=1,
+    )
+    simulation.advance()
+    spawned = simulation.entities["enemy_tank_001"]
+    blocker = simulation.entities["blocker"]
+    assert spawned.position.distance_to(blocker.position) >= (
+        collision_radius(spawned.kind) + collision_radius(blocker.kind) - 1e-8
+    )
+    assert simulation.collision_pair_check_count > 0
 
 
 def test_attack_damage_destruction_and_repair_only_when_requested() -> None:

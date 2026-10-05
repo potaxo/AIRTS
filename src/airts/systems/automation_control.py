@@ -50,6 +50,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
         if simulation.assignments.get(entity_id) != automation_id:
             continue
         entity = simulation.entities[entity_id]
+        entity.clear_recovery_request()
         entity.path.clear()
         entity.move_target = None
         entity.state = UnitState.IDLE
@@ -97,6 +98,7 @@ def resume(simulation: Simulation, automation_id: str, owner_id: str) -> Command
     else:
         for entity_id in automation.entity_ids:
             if simulation.assignments.get(entity_id) == automation_id:
+                simulation.entities[entity_id].clear_recovery_request()
                 simulation._reset_movement_liveness(simulation.entities[entity_id], clear_stop=True)
     transition(simulation, automation, AutomationStatus.ACTIVE, "PLAYER_RESUMED")
     return simulation._accept("resume_automation", automation_id)
@@ -173,6 +175,7 @@ def activate(
             previous_id = previous_ids[entity_id]
             simulation.suspended_assignments.pop(entity_id, None)
             simulation.assignments[entity_id] = automation.automation_id
+            simulation.entities[entity_id].clear_recovery_request()
             simulation.events.record(
                 simulation.tick,
                 EventType.ASSIGNMENT_CHANGED,
@@ -239,6 +242,7 @@ def assign(
     previous_id = simulation.assignments.get(entity_id)
     if previous_id == automation.automation_id:
         return
+    simulation.entities[entity_id].clear_recovery_request()
     if previous_id is not None:
         if suspend:
             previous = simulation.automations[previous_id]
@@ -270,6 +274,7 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
     for entity_id in entity_ids:
         automation_id = simulation.assignments.pop(entity_id, None)
         entity = simulation.entities[entity_id]
+        entity.clear_recovery_request()
         entity.hold_anchor = None
         entity.defend_arrived = False
         entity.recovery_path.clear()
@@ -324,6 +329,7 @@ def release_automation(
         if simulation.assignments.get(entity_id) == automation.automation_id:
             simulation.assignments.pop(entity_id, None)
             entity = simulation.entities[entity_id]
+            entity.clear_recovery_request()
             entity.path.clear()
             entity.move_target = None
             entity.pursue_target = False
@@ -344,6 +350,7 @@ def resume_suspended_assignment(
     if simulation.assignments.get(entity_id) == repair_automation.automation_id:
         simulation.assignments.pop(entity_id, None)
     entity = simulation.entities[entity_id]
+    entity.clear_recovery_request()
     if resume_id is not None:
         resume = simulation.automations.get(resume_id)
         if resume is not None and not resume.status.terminal and entity_id in resume.entity_ids:

@@ -52,6 +52,13 @@ class Entity:
     contact_wait_ticks: int = 0
     defend_arrived: bool = False
     recovery_blocked_cells: frozenset[Cell] | None = None
+    recovery_request_tick: int | None = None
+    recovery_released: bool = False
+
+    def clear_recovery_request(self) -> None:
+        """End the return phase when its owning intent is replaced or settled."""
+        self.recovery_request_tick = None
+        self.recovery_released = False
 
     @property
     def category(self) -> EntityCategory:
@@ -116,6 +123,8 @@ class Entity:
             "recovery_retry_tick": self.recovery_retry_tick,
             "contact_wait_ticks": self.contact_wait_ticks,
             "defend_arrived": self.defend_arrived,
+            "recovery_request_tick": self.recovery_request_tick,
+            "recovery_released": self.recovery_released,
             "recovery_blocked_cells": (
                 None
                 if self.recovery_blocked_cells is None

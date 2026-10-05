@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from airts.contracts.automations import Automation, AutomationStatus, economy_parameters
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
+from airts.systems.production import spawn_cell_available
 from airts.world.entities import Entity, UnitState
 from airts.world.map import EntityKind
 
@@ -86,10 +87,22 @@ def spawn_ambient_enemy(simulation: Simulation) -> None:
         + simulation.tick * 12_345
         + simulation._next_entity_number * 2_654_435_761
     ) & 0x7FFFFFFF
-    cell = candidates[random_value % len(candidates)]
     kind = (EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK)[
         (random_value // max(1, len(candidates))) % 2
     ]
+    start = random_value % len(candidates)
+    cell = next(
+        (
+            candidates[(start + offset) % len(candidates)]
+            for offset in range(len(candidates))
+            if spawn_cell_available(
+                simulation, candidates[(start + offset) % len(candidates)], kind
+            )
+        ),
+        None,
+    )
+    if cell is None:
+        return
     while True:
         entity_id = f"enemy_tank_{simulation._next_entity_number:03d}"
         simulation._next_entity_number += 1

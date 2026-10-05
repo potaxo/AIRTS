@@ -186,6 +186,7 @@ def initialize_runtime_entity(
     simulation: Simulation, automation: Automation, entity_id: str
 ) -> None:
     entity = simulation.entities[entity_id]
+    entity.clear_recovery_request()
     entity.path.clear()
     entity.hold_anchor = None
     entity.defend_arrived = False
@@ -349,6 +350,7 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             enemy_id = None
         if enemy_id is not None:
             if not entity.pursue_target or entity.attack_target_id != enemy_id:
+                entity.clear_recovery_request()
                 entity.path.clear()
                 entity.move_target = None
                 entity.attack_target_id = enemy_id
@@ -377,9 +379,8 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             continue
         entity.state = UnitState.DEFENDING
         tolerance = simulation.DEFEND_STATION_TOLERANCE
-        if station_distance <= tolerance or (entity.defend_arrived and entity.contact_wait_ticks):
-            if station_distance <= tolerance:
-                entity.defend_arrived = True
+        if station_distance <= tolerance:
+            entity.defend_arrived = True
             continue
         if not allowance.claim():
             continue
@@ -458,6 +459,7 @@ def coordinate_shared_defend_stations(
         for key, station in parameters.stations.items():
             if previous.get(key) != station:
                 entity = simulation.entities[key]
+                entity.clear_recovery_request()
                 entity.defend_arrived = False
                 entity.path.clear()
                 entity.move_target = None

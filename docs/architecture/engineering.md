@@ -65,6 +65,11 @@ Geometry and spatial references share one representation and codec. Map footprin
 share cell semantics; runtime entities and projectiles share authoritative object serialization.
 Visibility and navigation retain independent computational boundaries. Automation data, control
 and execution remain separate because schema changes, ownership changes and tick behavior differ.
+World entities store recovery request ages and phases that affect later trajectories. Navigation
+derives contact graphs and release geometry; movement owns return intent, phase lifecycle and all
+position/occupancy submission. Automations retain business station identities and control claims;
+adapters serialize authoritative recovery state and validate its restored owner. Derived graphs,
+leaders and numeric scratch state remain reconstructible navigation data.
 
 SoftwareRenderer owns terrain, sprite, entity and path caches and reads SceneView instead of
 application internals. The app retains input drafts, UI overlays and whole-window composition;
@@ -103,7 +108,7 @@ Do not introduce generic managers, registries, parallel facades, or unrelated re
 | --- | --- |
 | `tests/unit/` | Isolated domain components and codecs |
 | `tests/integration/` | Facade, adapters, controls, and renderer behavior |
-| `tests/performance/` | Measured workload and timing contracts |
+| `tests/performance/` | Workload behavior plus opt-in `performance` hardware/wall-clock contracts |
 | `tests/architecture/` | Dependency direction, public facade, document links/discovery |
 | `tests/gui_scenarios/` | Explicit, blocking visual inspection; excluded from default discovery |
 
@@ -120,4 +125,8 @@ Integration modules are organized by behavior rather than historical phase or mi
 Renderer startup checks use small worlds; full-scene/timing tests retain their required scale.
 Backend stress tests share `tests/scout_scenario.py`. Persistence scenarios retain distinct patrol,
 repair, queues, spawns, and defense cases and compare complete exported state after continuation.
-FPS tests use the common completed-frame probe; no average-throughput substitution or lower gates.
+FPS tests use the common completed-frame probe; no average-throughput substitution. Gates belong to
+[performance](../milestones/performance.md); change them only for an explicit acceptance decision,
+not to make a failing cleanup pass. Mixed workload tests retain behavior assertions in default
+validation and add timing budgets in their marked variant. Hardware FPS acceptance is opt-in;
+the default Windows packaging validation is functional validation, not hardware performance evidence.

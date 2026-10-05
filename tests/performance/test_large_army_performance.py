@@ -226,7 +226,7 @@ def _large_line_simulation(
     )
 
 
-def test_thousand_unit_repair_selection_filters_before_shared_routing() -> None:
+def test_thousand_unit_repair_selection_filters_before_shared_routing(check_timing: bool) -> None:
     simulation = _large_simulation(1_000, with_repair_hub=True)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
     damaged = selected[::100]
@@ -240,10 +240,13 @@ def test_thousand_unit_repair_selection_filters_before_shared_routing() -> None:
     automation = simulation.automations[result.automation_id or ""]
     assert automation.entity_ids == list(damaged)
     assert simulation.navigation_field_build_count == 1
-    assert elapsed < 1.0
+    if check_timing:
+        assert elapsed < 1.0
 
 
-def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks() -> None:
+def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks(
+    check_timing: bool,
+) -> None:
     simulation = _large_simulation(1_000)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
     target = rectangle_region(Point(60, 5), Point(75, 25))
@@ -258,11 +261,14 @@ def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks() -> 
     assert result.accepted
     assert simulation.automations[result.automation_id or ""].status is AutomationStatus.ACTIVE
     assert simulation.navigation_field_build_count <= 24
-    assert command_elapsed < 2.0
-    assert tick_elapsed < 2.0
+    if check_timing:
+        assert command_elapsed < 2.0
+        assert tick_elapsed < 2.0
 
 
-def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop() -> None:
+def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
+    check_timing: bool,
+) -> None:
     simulation = _large_simulation(1_000)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
 
@@ -274,10 +280,13 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop() -
     assert result.accepted
     assert len(destinations) == 1_000
     assert simulation.navigation_field_build_count <= 64
-    assert elapsed < 2.0
+    if check_timing:
+        assert elapsed < 2.0
 
 
-def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime() -> None:
+def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime(
+    check_timing: bool,
+) -> None:
     simulation, entity_ids, target = _assembled_simulation(1_000)
 
     command_started = perf_counter()
@@ -313,8 +322,9 @@ def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime() 
         )
         >= unit_radius * 4 - 1e-9
     )
-    assert command_elapsed < 1.0
-    assert tick_elapsed < 2.0
+    if check_timing:
+        assert command_elapsed < 1.0
+        assert tick_elapsed < 2.0
 
 
 def test_thousand_unit_gathering_radius_contracts_after_half_are_reassigned() -> None:
@@ -448,7 +458,9 @@ def test_delayed_unit_in_five_hundred_unit_army_avoids_repath_storm_and_keeps_pr
     assert not simulation.entities["mover"].congestion_stopped
 
 
-def test_thousand_unit_enemy_focus_click_has_generous_hit_area_and_stays_responsive() -> None:
+def test_thousand_unit_enemy_focus_click_has_generous_hit_area_and_stays_responsive(
+    check_timing: bool,
+) -> None:
     simulation = _large_simulation(1_000)
     enemy = simulation.entities["unit_0999"]
     enemy.owner_id = "enemy"
@@ -470,11 +482,12 @@ def test_thousand_unit_enemy_focus_click_has_generous_hit_area_and_stays_respons
     assert all(
         simulation.entities[entity_id].attack_target_id == enemy.entity_id for entity_id in selected
     )
-    assert command_elapsed < 1.0
-    assert tick_elapsed < 2.0
+    if check_timing:
+        assert command_elapsed < 1.0
+        assert tick_elapsed < 2.0
 
 
-def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work() -> None:
+def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work(check_timing: bool) -> None:
     simulation, entity_ids = _choke_simulation()
     assert simulation.execute(MoveCommand(entity_ids, Point(70.5, 20.5))).accepted
     movement_attempts: list[int] = []
@@ -520,7 +533,8 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work() -> Non
         )
         >= contact_distance * 0.90
     )
-    assert elapsed < 7.0
+    if check_timing:
+        assert elapsed < 7.0
 
 
 def test_large_choke_is_deterministic_without_density_waiting() -> None:
@@ -540,7 +554,9 @@ def test_large_choke_is_deterministic_without_density_waiting() -> None:
     ]
 
 
-def test_thousand_unit_focus_click_targets_the_enemy_building_footprint_quickly() -> None:
+def test_thousand_unit_focus_click_targets_the_enemy_building_footprint_quickly(
+    check_timing: bool,
+) -> None:
     simulation, entity_ids = _large_enemy_building_simulation()
     app = AirtsApp(simulation)
     app.selected_entities = set(entity_ids)
@@ -560,11 +576,12 @@ def test_thousand_unit_focus_click_targets_the_enemy_building_footprint_quickly(
         for entity_id in entity_ids
     )
     assert simulation.navigation_field_build_count == 1
-    assert command_elapsed < 1.0
-    assert tick_elapsed < 2.0
+    if check_timing:
+        assert command_elapsed < 1.0
+        assert tick_elapsed < 2.0
 
 
-def test_two_large_head_on_armies_pass_without_a_global_freeze() -> None:
+def test_two_large_head_on_armies_pass_without_a_global_freeze(check_timing: bool) -> None:
     simulation, eastbound, westbound = _head_on_armies()
     assert simulation.execute(MoveCommand(eastbound, Point(70.5, 20.5))).accepted
     assert simulation.execute(MoveCommand(westbound, Point(9.5, 20.5))).accepted
@@ -580,4 +597,5 @@ def test_two_large_head_on_armies_pass_without_a_global_freeze() -> None:
     assert sum(simulation.entities[entity_id].position.x > 40 for entity_id in eastbound) >= 75
     assert sum(simulation.entities[entity_id].position.x < 40 for entity_id in westbound) >= 75
     assert sum(simulation.entities[entity_id].congestion_stopped for entity_id in all_ids) < 30
-    assert elapsed < 6.0
+    if check_timing:
+        assert elapsed < 6.0

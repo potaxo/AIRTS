@@ -90,3 +90,5 @@ These measurements do not count physical monitor scan-out;
 The manually triggered [Windows build workflow](.github/workflows/build-windows.yml) validates
 the project and builds a console-enabled PyInstaller directory. Its `AIRTS-windows-debug`
 artifact contains `AIRTS.exe` and supporting files; keep the whole extracted directory together.
+The workflow runs functional validation; designated-machine hardware/timing acceptance runs
+separately using the [contributor validation commands](AGENTS.md#validation).

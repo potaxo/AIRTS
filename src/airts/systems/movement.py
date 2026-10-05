@@ -107,8 +107,6 @@ def _hold_target(simulation: Simulation, entity: Entity) -> Point:
     if anchor is None or entity.position.distance_to(anchor) <= HOLD_TOLERANCE:
         entity.recovery_path.clear()
         return entity.position
-    if entity.contact_wait_ticks:
-        return entity.position
     buildings = simulation._building_cells()
     if (
         entity.recovery_path
@@ -126,6 +124,7 @@ def _hold_target(simulation: Simulation, entity: Entity) -> Point:
         return entity.position
     if not entity.recovery_path and simulation.tick >= entity.recovery_retry_tick:
         if simulation._routes.claim_combat_route():
+            simulation._movement_replan_count += 1
             entity.recovery_retry_tick = simulation.tick + RECOVERY_RETRY_TICKS
             try:
                 route = simulation._routes.shared_path(entity.position, anchor, buildings)
@@ -140,6 +139,39 @@ def _hold_target(simulation: Simulation, entity: Entity) -> Point:
     ):
         entity.recovery_path.pop(0)
     return entity.recovery_path[0] if entity.recovery_path else entity.position
+
+
+def _recovery_goal(simulation: Simulation, entity: Entity) -> tuple[Point | None, float]:
+    """Read the business-owned weak return intent without creating a player order."""
+    if entity.hold_anchor is not None:
+        return entity.hold_anchor, HOLD_TOLERANCE
+    automation = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
+    if (
+        entity.defend_arrived
+        and entity.state is UnitState.DEFENDING
+        and automation is not None
+        and isinstance(automation.parameters, DefendParameters)
+    ):
+        return (
+            automation.parameters.stations.get(entity.entity_id),
+            simulation.DEFEND_STATION_TOLERANCE,
+        )
+    return None, HOLD_TOLERANCE
+
+
+def _track_progress(entity: Entity, target: Point, minimum: float) -> float:
+    """Count monotonic advance to an unchanged intent, including internal Hold return."""
+    distance = entity.position.distance_to(target)
+    if entity.progress_target != target:
+        entity.progress_target = target
+        entity.progress_distance = distance
+        entity.no_progress_ticks = 0
+    if entity.progress_distance is None or distance < entity.progress_distance - minimum:
+        entity.progress_distance = distance
+        entity.no_progress_ticks = 0
+    else:
+        entity.no_progress_ticks += 1
+    return distance
 
 
 def move_entities(simulation: Simulation) -> None:
@@ -158,19 +190,7 @@ def move_entities(simulation: Simulation) -> None:
         entity.route_ticks += 1
         skip_crowded_waypoints(simulation, entity, obstacles)
         target = entity.path[0]
-        distance = entity.position.distance_to(target)
-        if entity.progress_target != target:
-            entity.progress_target = target
-            entity.progress_distance = distance
-            entity.no_progress_ticks = 0
-        if (
-            entity.progress_distance is None
-            or distance < entity.progress_distance - simulation.MIN_PROGRESS_DISTANCE
-        ):
-            entity.progress_distance = distance
-            entity.no_progress_ticks = 0
-        else:
-            entity.no_progress_ticks += 1
+        distance = _track_progress(entity, target, simulation.MIN_PROGRESS_DISTANCE)
         automation = simulation.automations.get(simulation.assignments.get(key, ""))
         tolerance = (
             simulation.DEFEND_STATION_TOLERANCE
@@ -190,16 +210,60 @@ def move_entities(simulation: Simulation) -> None:
                 continue
         planned.add(key)
     records = []
+    recovery_goals: list[Point | None] = []
+    recovery_targets: list[tuple[float, float]] = []
+    recovering: list[bool] = []
+    recovery_ticks: list[int] = []
+    recovery_released: list[bool] = []
+    recovery_tolerances: list[float] = []
     for key in keys:
         entity = entities[key]
         target = entity.path[0] if entity.path else _hold_target(simulation, entity)
         point = entity.position
-        goal = entity.move_target or (
-            entity.path[-1] if entity.path else entity.hold_anchor or point
-        )
+        recovery_goal, recovery_tolerance = _recovery_goal(simulation, entity)
+        goal = entity.move_target or (entity.path[-1] if entity.path else recovery_goal or point)
         strong_intent = bool(entity.path) and not (
             entity.defend_arrived and entity.state is UnitState.DEFENDING
         )
+        pending_recovery = (
+            recovery_goal is not None
+            and not strong_intent
+            and point.distance_to(recovery_goal) > recovery_tolerance
+        )
+        if recovery_goal is None or strong_intent:
+            entity.clear_recovery_request()
+        elif pending_recovery and entity.recovery_request_tick is None:
+            entity.recovery_request_tick = simulation.tick
+        elif not pending_recovery and entity.recovery_request_tick is not None:
+            entity.recovery_released = True
+        recovery_target = target
+        if (
+            pending_recovery
+            and entity.hold_anchor is None
+            and not entity.path
+            and recovery_goal is not None
+            and simulation._routes.clear_segment(point, recovery_goal, obstacles)
+        ):
+            # An arrived defender can await its business route allowance while
+            # its station remains directly reachable. Dispatch/quiet waiting
+            # must not turn that geometric return corridor into a wall.
+            recovery_target = recovery_goal
+        if entity.hold_anchor is not None and not entity.path:
+            if pending_recovery:
+                entity.route_ticks += 1
+                _track_progress(entity, entity.hold_anchor, simulation.MIN_PROGRESS_DISTANCE)
+            else:
+                reset_movement_liveness(entity)
+        recovery_goals.append(recovery_goal)
+        recovery_targets.append((recovery_target.x, recovery_target.y))
+        recovering.append(pending_recovery)
+        recovery_ticks.append(
+            entity.recovery_request_tick if entity.recovery_request_tick is not None else -1
+        )
+        recovery_released.append(entity.recovery_released)
+        recovery_tolerances.append(recovery_tolerance)
+        if not strong_intent and entity.contact_wait_ticks:
+            target = point
         profile = entity.kind.profile
         assert profile.movement_speed is not None
         records.append(
@@ -237,13 +301,25 @@ def move_entities(simulation: Simulation) -> None:
     sign = 1.0 if sum(headings[routed, axis].tolist()) >= 0 else -1.0
     priority = np.where(routed, headings[:, axis] >= 0, sign >= 0).astype(np.int64)
     priority ^= simulation.tick % 2
+    route_vectors = target_data - positions
+    route_lengths = np.asarray(
+        [
+            max(hypot(x, y), 1e-9)
+            for x, y in zip(route_vectors[:, 0].tolist(), route_vectors[:, 1].tolist(), strict=True)
+        ]
+    )
+    # At a turn or merge, the front is measured along the segment being submitted,
+    # not a remote goal behind a wall. Keep group/parity/ID tie breaks unchanged.
     fronts = np.where(
         routed,
-        -(positions[:, 0] * vectors[:, 0] + positions[:, 1] * vectors[:, 1]) / lengths,
+        -(positions[:, 0] * route_vectors[:, 0] + positions[:, 1] * route_vectors[:, 1])
+        / route_lengths,
         -sign * positions[:, axis],
     )
     order = np.asarray(np.lexsort((np.arange(len(keys)), fronts, priority)), dtype=np.int64)
     simulation._movement_step_attempt_count += len(planned)
+    work = np.zeros(4, dtype=np.int64)
+    recovery_status = np.zeros(len(keys), dtype=np.int64)
     updated, pressure, checks = advance_positions(
         positions,
         target_data,
@@ -255,8 +331,27 @@ def move_entities(simulation: Simulation) -> None:
         stationary,
         simulation._routes.obstacle_mask(obstacles),
         axis,
+        work,
+        np.asarray(
+            [
+                (bool(moving[index]) or recovering[index])
+                and entities[key].no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
+                for index, key in enumerate(keys)
+            ],
+            dtype=np.bool_,
+        ),
+        recovering=np.asarray(recovering, dtype=np.bool_),
+        recovery_ticks=np.asarray(recovery_ticks, dtype=np.int64),
+        recovery_released=np.asarray(recovery_released, dtype=np.bool_),
+        recovery_targets=np.asarray(recovery_targets, dtype=np.float64),
+        recovery_tolerances=np.asarray(recovery_tolerances, dtype=np.float64),
+        recovery_status=recovery_status,
     )
     simulation._collision_pair_check_count += checks
+    simulation._contact_candidate_count += int(work[0])
+    simulation._contact_component_count += int(work[1])
+    simulation._contact_coordination_work += int(work[2])
+    simulation._contact_blocked_component_count += int(work[3])
     movable = frozenset(entities)
     xs, ys, pressures = updated[:, 0].tolist(), updated[:, 1].tolist(), pressure.tolist()
     for index, key in enumerate(keys):
@@ -272,6 +367,21 @@ def move_entities(simulation: Simulation) -> None:
             entity.position = candidate
         if pressures[index]:
             entity.contact_wait_ticks = CONTACT_WAIT_TICKS
+        if recovery_status[index] == 1:
+            entity.clear_recovery_request()
+            if entity.hold_anchor is not None:
+                reset_movement_liveness(entity)
+        elif recovery_status[index] == 2:
+            entity.recovery_released = False
+        recovery_goal = recovery_goals[index]
+        if recovery_goal is not None:
+            if candidate.distance_to(recovery_goal) > recovery_tolerances[index]:
+                if entity.recovery_request_tick is None:
+                    entity.recovery_request_tick = simulation.tick
+            elif entity.recovery_request_tick is not None and recovery_status[index] != 2:
+                entity.recovery_released = True
+                if entity.hold_anchor is not None:
+                    reset_movement_liveness(entity)
         if key not in planned:
             continue
         target = entity.path[0]
@@ -323,6 +433,7 @@ def _recover_path(simulation: Simulation, entity: Entity, obstacles: frozenset[C
     ):
         return
     try:
+        simulation._movement_replan_count += 1
         route = simulation._routes.shared_path(
             entity.position,
             entity.move_target or entity.path[-1],
@@ -331,9 +442,11 @@ def _recover_path(simulation: Simulation, entity: Entity, obstacles: frozenset[C
     except PathfindingError:
         return
     entity.path = list(route.waypoints)
-    entity.progress_target = entity.path[0] if entity.path else None
-    entity.progress_distance = entity.position.distance_to(entity.path[0]) if entity.path else None
-    entity.no_progress_ticks = 0
+    target = entity.path[0] if entity.path else None
+    if target != entity.progress_target:
+        entity.progress_target = target
+        entity.progress_distance = entity.position.distance_to(target) if target else None
+        entity.no_progress_ticks = 0
 
 
 def plan_group_paths(

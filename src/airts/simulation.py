@@ -57,7 +57,7 @@ from airts.contracts.spatial import (
 )
 from airts.navigation.collision import collision_radius, warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
-from airts.navigation.spatial_index import warm_spatial_index
+from airts.navigation.spatial_index import SpatialIndex, warm_spatial_index
 from airts.systems import (
     automation_control,
     automation_execution,
@@ -159,6 +159,11 @@ class Simulation:
         self._blocked_ticks: dict[str, int] = {}
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
+        self._contact_candidate_count = 0
+        self._contact_component_count = 0
+        self._contact_coordination_work = 0
+        self._contact_blocked_component_count = 0
+        self._movement_replan_count = 0
         self._building_cells_cache: frozenset[Cell] | None = None
         self._routes = RoutingService(
             game_map,
@@ -239,6 +244,31 @@ class Simulation:
 
         return self._collision_pair_check_count
 
+    @property
+    def contact_candidate_count(self) -> int:
+        """Local broadphase candidates, including repeated visits this tick."""
+        return self._contact_candidate_count
+
+    @property
+    def contact_component_count(self) -> int:
+        """Compressed contact components admitted for coordinated release."""
+        return self._contact_component_count
+
+    @property
+    def contact_coordination_work(self) -> int:
+        """Prediction pairs, fringe queue visits and affine member evaluations."""
+        return self._contact_coordination_work
+
+    @property
+    def contact_blocked_component_count(self) -> int:
+        """Compressed components with no certified release seed this tick."""
+        return self._contact_blocked_component_count
+
+    @property
+    def movement_replan_count(self) -> int:
+        """Admitted stalled-path and internal anchor route attempts this tick."""
+        return self._movement_replan_count
+
     def execute(self, command: Command) -> CommandResult:
         self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
@@ -293,6 +323,11 @@ class Simulation:
             self._routes.begin_tick()
             self._movement_step_attempt_count = 0
             self._collision_pair_check_count = 0
+            self._contact_candidate_count = 0
+            self._contact_component_count = 0
+            self._contact_coordination_work = 0
+            self._contact_blocked_component_count = 0
+            self._movement_replan_count = 0
             economy_system.generate_income(self)
             economy_system.spawn_ambient_enemy(self)
             self._drive_automations()
@@ -496,7 +531,26 @@ class Simulation:
             ),
         )
         translated = {e.entity_id: Point(e.position.x + dx, e.position.y + dy) for e in members}
-        if all(
+        maximum_radius = max(collision_radius(entity.kind) for entity in members)
+        index = SpatialIndex(translated)
+        separated = True
+        for entity in members:
+            point = translated[entity.entity_id]
+            radius = collision_radius(entity.kind)
+            for neighbor_id in index.nearby(point, radius + maximum_radius):
+                if neighbor_id <= entity.entity_id:
+                    continue
+                self._collision_pair_check_count += 1
+                contact = radius + collision_radius(self.entities[neighbor_id].kind)
+                if point.distance_to(translated[neighbor_id]) < contact - 1e-8:
+                    separated = False
+                    break
+            if not separated:
+                break
+        # Translation preserves physical compression as well as shape. Reuse the
+        # existing reachable slot allocator when an imported/recovering selection
+        # cannot all settle at those translated centers.
+        if separated and all(
             self.game_map.is_passable(point)
             and self.game_map.cell_for(point) not in blocked
             and movement_system.position_clear(
@@ -512,7 +566,7 @@ class Simulation:
         slots = self._gathering_slots(
             PointTarget(target),
             self.game_map.width * self.game_map.height,
-            max(collision_radius(self.entities[key].kind) for key in entity_ids),
+            maximum_radius,
             require_count=False,
         )
         available = tuple(p for p in slots if self.game_map.cell_for(p) not in blocked)[

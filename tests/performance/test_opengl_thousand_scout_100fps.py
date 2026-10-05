@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pygame
+import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 from tests.scout_scenario import head_on_scout_simulation
 
@@ -33,7 +34,7 @@ def _native_four_k_app(simulation: Simulation, entity_ids: tuple[str, ...]) -> A
     return app
 
 
-def test_native_4k_opengl_submission_cpu_work_sustains_100_real_fps() -> None:
+def test_native_4k_opengl_submission_cpu_work_sustains_100_real_fps(check_timing: bool) -> None:
     """Commands, collisions, and GPU-frame preparation must sustain 100 Real FPS."""
 
     simulation, eastbound, westbound = head_on_scout_simulation()
@@ -68,9 +69,11 @@ def test_native_4k_opengl_submission_cpu_work_sustains_100_real_fps() -> None:
     assert frame.framebuffer_size == DISPLAY_SIZE
     assert maximum_collision_checks > 0
     assert progressing >= 750
-    assert_real_fps(probe, TARGET_FPS, "native-4K OpenGL submission work")
+    if check_timing:
+        assert_real_fps(probe, TARGET_FPS, "native-4K OpenGL submission work")
 
 
+@pytest.mark.performance
 def test_native_4k_hardware_opengl_sustains_100_real_fps_end_to_end() -> None:
     """A hardware context must rasterize the native-4K scenario at 100 Real FPS."""
 

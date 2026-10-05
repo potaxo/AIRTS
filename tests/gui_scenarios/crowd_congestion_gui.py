@@ -11,7 +11,15 @@ Use ``-k`` with part of a function name to open only one scenario.
 
 from __future__ import annotations
 
-from airts.contracts.commands import AttackCommand, CreateDefendCommand, CreatePatrolCommand
+from tests.integration.scenarios import injected_overlap_simulation
+
+from airts.contracts.commands import (
+    AttackCommand,
+    CreateDefendCommand,
+    CreatePatrolCommand,
+    HoldPositionCommand,
+    MoveCommand,
+)
 from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
@@ -155,3 +163,43 @@ def test_thousand_entity_focus_attack_in_gui() -> None:
     assert simulation.execute(AttackCommand(entity_ids, "focus_target")).accepted
 
     _show(simulation, entity_ids, "999 scouts focus one durable target.")
+
+
+def test_injected_thousand_unit_overlap_internal_squad_exit_in_gui() -> None:
+    """Artificial 50% disc spacing tests recovery, not a normal-command reproduction."""
+    simulation, _, selected = injected_overlap_simulation(1_000, 0.5)
+    assert simulation.execute(MoveCommand(selected, Point(75, 48))).accepted
+
+    _show(
+        simulation,
+        selected,
+        "Injected 1,000-scout overlap: the selected internal squad must exit east.",
+    )
+
+
+def test_injected_thousand_coincident_holders_internal_squad_exit_in_gui() -> None:
+    """Identical conflicting Hold anchors remain intent while bodies separate safely."""
+    simulation, entity_ids, selected = injected_overlap_simulation(1_000, 0.0)
+    assert simulation.execute(HoldPositionCommand(entity_ids)).accepted
+    assert simulation.execute(MoveCommand(selected, Point(48, 75))).accepted
+
+    _show(
+        simulation,
+        selected,
+        "Injected 1,000 coincident holders: internal squad exits south; anchors conflict.",
+    )
+
+
+def test_compatible_hold_anchor_return_in_gui() -> None:
+    """A legal displaced holder returns, then its tight neighbors settle at their anchors."""
+    simulation, entity_ids, selected = injected_overlap_simulation(100, 1.0, selected_count=1)
+    assert simulation.execute(HoldPositionCommand(entity_ids)).accepted
+    holder = simulation.entities[selected[0]]
+    holder.position = Point(56, holder.position.y)
+    simulation.occupancy.move(holder.entity_id, holder.occupied_cells, frozenset(entity_ids))
+
+    _show(
+        simulation,
+        selected,
+        "Legal displaced Hold body: return to the vacant anchor, then settle all neighbors.",
+    )

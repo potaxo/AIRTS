@@ -20,11 +20,116 @@ from airts.contracts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateProductionCommand,
+    HoldPositionCommand,
     MoveCommand,
 )
 from airts.contracts.spatial import Point, PointTarget
+from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, GameMap, load_example_map
+from airts.world.map import EntityKind, GameMap, load_example_map, load_map_data
+
+
+def test_internal_squad_exit_from_normal_hold_formation_replays(tmp_path: Path) -> None:
+    """Legal initial discs and ordinary commands reproduce actual passage and final events."""
+    entity_ids = tuple(f"scout_{index:03d}" for index in range(100))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "normal_hold_formation_replay",
+                "name": "Normal Hold formation replay",
+                "width": 64,
+                "height": 48,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "kind": "scout",
+                        "position": [16.5 + index % 10, 16.5 + index // 10],
+                    }
+                    for index, entity_id in enumerate(entity_ids)
+                ],
+            }
+        ),
+        random_seed=193,
+    )
+    selected = tuple(entity_ids[index] for index in (44, 45, 54, 55))
+    assert simulation.execute(HoldPositionCommand(entity_ids)).accepted
+    assert simulation.execute(MoveCommand(selected, Point(45, 21))).accepted
+    destinations = {key: simulation.entities[key].move_target for key in selected}
+    simulation.advance(350)
+    for key, target in destinations.items():
+        assert target is not None
+        completed = next(
+            event
+            for event in reversed(simulation.events.events)
+            if event.subject_id == key and event.event_type.value == "movement_completed"
+        )
+        assert Point(*completed.details["position"]).distance_to(target) <= 1e-8
+        assert simulation.entities[key].position.distance_to(target) <= 0.6
+        assert not simulation.entities[key].path
+    destination = tmp_path / "normal-internal-squad.json"
+    save_replay(simulation, destination)
+    replayed = run_replay(load_replay(destination))
+    assert replayed.export_state() == simulation.export_state()
+
+
+def test_map_defined_overlapping_mobile_discs_recover_and_replay(tmp_path: Path) -> None:
+    """Legacy map cell validity permits disc penetration across adjacent cell borders.
+
+    These 25 independent four-body clusters are artificial initial geometry, not a
+    normally produced army pile. Unlike runtime injection, their full setup is in
+    the replay's map and can therefore be reproduced through the public adapter.
+    """
+    entity_ids = tuple(f"scout_{index:03d}" for index in range(100))
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "initial_overlap_replay",
+                "name": "Map-defined overlap recovery replay",
+                "width": 64,
+                "height": 48,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "kind": "scout",
+                        "position": [
+                            16 + (index // 4) % 5 * 3 + (-0.05 if index % 2 == 0 else 0.05),
+                            16 + (index // 4) // 5 * 3 + (-0.05 if index % 4 < 2 else 0.05),
+                        ],
+                    }
+                    for index, entity_id in enumerate(entity_ids)
+                ],
+            }
+        ),
+        random_seed=197,
+    )
+    assert (
+        simulation.entities[entity_ids[0]].position.distance_to(
+            simulation.entities[entity_ids[1]].position
+        )
+        < 0.2 * 0.6
+    )
+    selected = entity_ids[48:52]
+    assert simulation.execute(MoveCommand(selected, Point(48, 22))).accepted
+    destinations = {key: simulation.entities[key].move_target for key in selected}
+    simulation.advance(4)
+    # Verify an in-progress recovery replay as well as the completed run.
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+    simulation.advance(300)
+    for key, target in destinations.items():
+        assert target is not None
+        assert simulation.entities[key].position.distance_to(target) <= 0.05
+    index = SpatialIndex({key: entity.position for key, entity in simulation.entities.items()})
+    for first, second in index.candidate_pairs(0.6):
+        assert (
+            simulation.entities[first].position.distance_to(simulation.entities[second].position)
+            >= 0.6 - 1e-6
+        )
+    destination = tmp_path / "map-overlap-recovery.json"
+    save_replay(simulation, destination)
+    replayed = run_replay(load_replay(destination))
+    assert replayed.export_state() == simulation.export_state()
 
 
 def test_recorded_commands_reproduce_state_and_events(

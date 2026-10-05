@@ -59,6 +59,19 @@ For coding or test/config changes, run from the repository root:
 - `.\.venv\Scripts\python -m pytest`
 - `.\.venv\Scripts\python -m pip check`
 
+Default pytest selection excludes the `performance` marker. Mixed workload tests still run their
+full behavior variant, including collision/route operation budgets; hardware and wall-clock gates
+run explicitly with `.\.venv\Scripts\python -m pytest -m performance` on the designated native-Windows
+acceptance machine. Run this selection when a change affects measured workloads, timing or their
+configuration; otherwise report hardware performance as unverified. To run every functional and
+performance variant together, use `-m "performance or not performance"`. Selecting a path alone
+does not override the default marker filter.
+
+For performance evidence, keep each complete run (including failures) in separate ignored outputs.
+For JUnit properties use `-o junit_family=xunit1 --junitxml=outputs/<run-name>.xml`; the parent directory
+must exist. Report repeated-run results rather than retrying until one passes or taking only the best.
+The performance owner defines gates; generic Windows packaging CI does not certify target hardware.
+
 Behavior changes need a relevant integration or manual test; an integration case in the full
 suite suffices. Use focused tests while iterating and the full suite at completion; avoid repeated
 full runs without a new change/failure to investigate. Never lower performance gates for cleanup.

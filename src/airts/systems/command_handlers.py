@@ -203,7 +203,26 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
     if command.priority is not None:
         automation.priority = command.priority
     if new_parameters is not None:
+        previous_parameters = automation.parameters
         automation.parameters = new_parameters
+        for entity_id in automation.entity_ids:
+            if simulation.assignments.get(entity_id) != automation.automation_id:
+                continue
+            if isinstance(new_parameters, DefendParameters) and isinstance(
+                previous_parameters, DefendParameters
+            ):
+                if previous_parameters.stations.get(entity_id) == new_parameters.stations.get(
+                    entity_id
+                ):
+                    continue
+                entity = simulation.entities[entity_id]
+                entity.clear_recovery_request()
+                entity.defend_arrived = False
+                entity.path.clear()
+                entity.move_target = None
+                simulation._reset_movement_liveness(entity, clear_stop=True)
+            else:
+                simulation.entities[entity_id].clear_recovery_request()
     if command.minimum_units is not None:
         reinforcement_parameters(automation).minimum_units = command.minimum_units
     if command.target_count is not None:

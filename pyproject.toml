@@ -42,6 +42,11 @@ addopts = [
     "-ra",
     "--strict-config",
     "--strict-markers",
+    "-m",
+    "not performance",
+]
+markers = [
+    "performance: hardware or wall-clock acceptance; opt in with -m performance",
 ]
 
 
