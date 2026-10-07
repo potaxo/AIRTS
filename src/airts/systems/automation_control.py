@@ -20,7 +20,7 @@ from airts.contracts.commands import (
     claim_precedes,
 )
 from airts.contracts.events import EventType
-from airts.systems import production
+from airts.systems import automation_execution, construction, movement, production
 from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
         entity.path.clear()
         entity.move_target = None
         entity.state = UnitState.IDLE
-        simulation._reset_movement_liveness(entity, clear_stop=True)
+        movement.reset_movement_liveness(entity)
     return simulation._accept("pause_automation", automation_id)
 
 
@@ -93,13 +93,13 @@ def resume(simulation: Simulation, automation_id: str, owner_id: str) -> Command
         for entity_id in automation.entity_ids
     ):
         transition(simulation, automation, AutomationStatus.WAITING, "BUILDERS_QUEUED")
-        simulation._start_next_construction()
+        construction.start_next_construction(simulation)
         return simulation._accept("resume_automation", automation_id)
     else:
         for entity_id in automation.entity_ids:
             if simulation.assignments.get(entity_id) == automation_id:
                 simulation.entities[entity_id].clear_recovery_request()
-                simulation._reset_movement_liveness(simulation.entities[entity_id], clear_stop=True)
+                movement.reset_movement_liveness(simulation.entities[entity_id])
     transition(simulation, automation, AutomationStatus.ACTIVE, "PLAYER_RESUMED")
     return simulation._accept("resume_automation", automation_id)
 
@@ -126,9 +126,9 @@ def cancel(simulation: Simulation, automation_id: str, owner_id: str) -> Command
     else:
         release_automation(simulation, automation, clear_suspended=True)
     if automation.kind is AutomationKind.PRODUCTION:
-        simulation._start_next_production(production_parameters(automation).factory_id)
+        production.start_next_production(simulation, production_parameters(automation).factory_id)
     elif automation.kind is AutomationKind.CONSTRUCTION:
-        simulation._start_next_construction()
+        construction.start_next_construction(simulation)
     return simulation._accept("cancel_automation", automation_id)
 
 
@@ -142,6 +142,7 @@ def activate(
     assign_entities: bool = True,
 ) -> None:
     simulation.automations[automation.automation_id] = automation
+    simulation._rebuild_live_automations((*simulation._live_automation_candidates, automation))
     simulation._next_automation_number += 1
     simulation.events.record(
         simulation.tick,
@@ -169,7 +170,7 @@ def activate(
         for previous_id, removed_ids in sorted(previous_groups.items()):
             previous = simulation.automations[previous_id]
             previous.remove_entities(frozenset(removed_ids))
-            simulation._refresh_gathering_formation(previous)
+            automation_execution.refresh_gathering_formation(simulation, previous)
             handle_automation_without_entities(simulation, previous)
         for entity_id in entity_ids:
             previous_id = previous_ids[entity_id]
@@ -187,7 +188,7 @@ def activate(
     transition(simulation, automation, AutomationStatus.ACTIVE, "VALIDATION_SUCCEEDED")
     if assign_entities:
         for entity_id in entity_ids:
-            simulation._initialize_runtime_entity(automation, entity_id)
+            automation_execution.initialize_runtime_entity(simulation, automation, entity_id)
 
 
 def new_automation(
@@ -219,6 +220,8 @@ def transition(
     simulation: Simulation, automation: Automation, status: AutomationStatus, reason: str
 ) -> None:
     automation.transition(status, simulation.tick, reason)
+    if status.terminal:
+        simulation._rebuild_live_automations(simulation._live_automation_candidates)
     simulation.events.record(
         simulation.tick,
         EventType.AUTOMATION_STATE_CHANGED,
@@ -254,7 +257,7 @@ def assign(
         else:
             previous = simulation.automations[previous_id]
             previous.remove_entity(entity_id)
-            simulation._refresh_gathering_formation(previous)
+            automation_execution.refresh_gathering_formation(simulation, previous)
             handle_automation_without_entities(simulation, previous)
             simulation.suspended_assignments.pop(entity_id, None)
     simulation.assignments[entity_id] = automation.automation_id
@@ -293,7 +296,7 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
                 )
         else:
             automation.remove_entities(frozenset(removed_ids))
-            simulation._refresh_gathering_formation(automation)
+            automation_execution.refresh_gathering_formation(simulation, automation)
             handle_automation_without_entities(simulation, automation)
     for entity_id, (automation_id, suspended_id) in previous.items():
         if automation_id is None:
@@ -334,7 +337,7 @@ def release_automation(
             entity.move_target = None
             entity.pursue_target = False
             entity.state = UnitState.IDLE
-            simulation._reset_movement_liveness(entity, clear_stop=True)
+            movement.reset_movement_liveness(entity)
         if clear_suspended:
             suspended_id = simulation.suspended_assignments.pop(entity_id, None)
             if suspended_id is not None and suspended_id in simulation.automations:
@@ -357,10 +360,10 @@ def resume_suspended_assignment(
             simulation.assignments[entity_id] = resume_id
             if resume.status in {AutomationStatus.WAITING, AutomationStatus.BLOCKED}:
                 transition(simulation, resume, AutomationStatus.ACTIVE, "REPAIRED_UNIT_RETURNED")
-            simulation._reset_movement_liveness(entity, clear_stop=True)
+            movement.reset_movement_liveness(entity)
             entity.state = state_for_assignment(simulation, entity_id)
             return
-    simulation._reset_movement_liveness(entity, clear_stop=True)
+    movement.reset_movement_liveness(entity)
     entity.state = UnitState.IDLE
 
 

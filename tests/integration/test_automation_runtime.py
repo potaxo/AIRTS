@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from tests.integration.scenarios import (
     runtime_map,
@@ -10,24 +12,137 @@ from tests.integration.scenarios import (
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
+    ConstructionParameters,
     DefendParameters,
+    ProductionParameters,
     RepairParameters,
 )
 from airts.contracts.commands import (
     AttackCommand,
     CancelAutomationCommand,
+    CreateConstructionCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
+    CreateProductionCommand,
     CreateReinforcementCommand,
     CreateRepairAndReturnCommand,
     HoldPositionCommand,
     MoveCommand,
 )
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point, PointTarget, rectangle_region
+from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
+from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind, load_map_data
+
+
+def test_defenses_share_enemy_queries_by_owner_and_refresh_each_tick() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "shared_defense_queries",
+                "name": "Shared defense queries",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"{owner}_{index}",
+                        "kind": "builder",
+                        "owner": owner,
+                        "position": [4.5 + side * 4, 4.5 + index * 3],
+                    }
+                    for side, owner in enumerate(("player", "enemy"))
+                    for index in range(2)
+                ],
+            }
+        )
+    )
+    for entity in simulation.entities.values():
+        assert simulation.execute(
+            CreateDefendCommand(
+                (entity.entity_id,), PointTarget(entity.position), owner_id=entity.owner_id
+            )
+        ).accepted
+    with patch("airts.systems.automation_execution.SpatialIndex", wraps=SpatialIndex) as index:
+        simulation.advance()
+        snapshots = [call.args[0] for call in index.call_args_list if call.args[0]]
+    assert len(snapshots) == 2
+    assert {frozenset(snapshot) for snapshot in snapshots} == {
+        frozenset({"player_0", "player_1"}),
+        frozenset({"enemy_0", "enemy_1"}),
+    }
+    previous = simulation.entities["enemy_0"].position
+    assert simulation.execute(MoveCommand(("enemy_0",), Point(15.5, 4.5), "enemy")).accepted
+    simulation.advance()
+    current = simulation.entities["enemy_0"].position
+    assert current != previous
+    with patch("airts.systems.automation_execution.SpatialIndex", wraps=SpatialIndex) as index:
+        simulation.advance()
+        snapshots = [call.args[0] for call in index.call_args_list if "enemy_0" in call.args[0]]
+    assert len(snapshots) == 1
+    assert snapshots[0]["enemy_0"] == current
+
+
+@pytest.mark.parametrize("source", ["production", "construction"])
+def test_later_defense_sees_enemy_created_between_defense_updates(source: str) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "defense_membership_growth",
+                "name": "Defense membership growth",
+                "width": 24,
+                "height": 20,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "first", "kind": "builder", "position": [5.5, 4.5]},
+                    {"id": "later", "kind": "builder", "position": [6.5, 9.5]},
+                    {"id": "factory", "kind": "factory", "owner": "enemy", "position": [8, 12]},
+                    {"id": "builder", "kind": "builder", "owner": "enemy", "position": [9.5, 10.5]},
+                ],
+            }
+        )
+    )
+    assert simulation.execute(
+        CreateDefendCommand(("first",), PolylineTarget((Point(5.5, 4), Point(5.5, 5))))
+    ).accepted
+    if source == "production":
+        created = simulation.execute(
+            CreateProductionCommand("factory", EntityKind.SCOUT, 1, owner_id="enemy")
+        )
+        parameters = simulation.automations[created.automation_id or ""].parameters
+        assert isinstance(parameters, ProductionParameters)
+        parameters.progress_ticks = parameters.build_ticks - 1
+    else:
+        created = simulation.execute(
+            CreateConstructionCommand(
+                "builder", EntityKind.RESOURCE_GENERATOR, Point(7, 9), owner_id="enemy"
+            )
+        )
+        parameters = simulation.automations[created.automation_id or ""].parameters
+        assert isinstance(parameters, ConstructionParameters)
+        parameters.construction_value = (
+            parameters.required_value - EntityKind.BUILDER.profile.build_speed
+        )
+    assert created.accepted
+    assert simulation.execute(
+        CreateDefendCommand(("later",), PolylineTarget((Point(6.5, 9), Point(6.5, 10))))
+    ).accepted
+    # Tick three visits first defense, creation, then later defense in that order.
+    simulation.tick = 2
+    simulation.advance()
+    new_id = (
+        parameters.produced_entity_ids[0]
+        if isinstance(parameters, ProductionParameters)
+        else parameters.constructed_entity_id
+    )
+    assert new_id is not None
+    assert simulation.entities["later"].attack_target_id == new_id
+    assert any(
+        event.subject_id == "later" and event.details["target_id"] == new_id
+        for event in simulation.events.query(event_types=frozenset({EventType.DEFEND_ENGAGED}))
+    )
 
 
 def test_ownership_validation_is_atomic_and_structured() -> None:
@@ -446,6 +561,32 @@ def test_repair_only_claims_selected_units_strictly_below_thirty_percent() -> No
     assert simulation.assignments["unit_01"] == automation.automation_id
     assert simulation.assignments["unit_02"] == patrol.automation_id
     assert simulation.assignments["unit_03"] == patrol.automation_id
+
+
+@pytest.mark.parametrize(
+    ("entity_ids", "health", "title", "priority", "reason"),
+    [
+        (("missing",), 10, "", 101, "UNKNOWN_ENTITY:missing"),
+        (("unit_01", "unit_01"), 10, "", 101, "DUPLICATE_ENTITY"),
+        (("unit_01",), 60, "", 101, "NO_UNITS_BELOW_REPAIR_THRESHOLD"),
+        (("unit_01",), 10, " ", 101, "EMPTY_TITLE"),
+        (("unit_01",), 10, "Repair", 101, "PRIORITY_OUT_OF_RANGE"),
+    ],
+)
+def test_repair_validation_preserves_failure_order_and_does_not_claim_units(
+    entity_ids: tuple[str, ...], health: int, title: str, priority: int, reason: str
+) -> None:
+    simulation = Simulation(runtime_map())
+    simulation.entities["unit_01"].health = health
+    before = simulation.snapshot()
+
+    result = simulation.execute(
+        CreateRepairAndReturnCommand(entity_ids, title=title, priority=priority)
+    )
+
+    assert not result.accepted
+    assert result.reason == reason
+    assert simulation.snapshot() == before
 
 
 def test_unassigned_repaired_unit_returns_to_its_pre_repair_position() -> None:

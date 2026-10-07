@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from gc import collect as collect_garbage
 from math import ceil, floor, sqrt
 
@@ -140,6 +141,7 @@ class Simulation:
         for entity in self.entities.values():
             self.occupancy.place(entity.entity_id, entity.occupied_cells)
         self.automations: dict[str, Automation] = {}
+        self._live_automation_candidates: tuple[Automation, ...] = ()
         self.assignments: dict[str, str] = {}
         self.suspended_assignments: dict[str, str] = {}
         self.events = EventLog()
@@ -156,7 +158,6 @@ class Simulation:
         self.projectile_traces: list[ProjectileTrace] = []
         self._command_history: list[dict[str, object]] = []
         self._movement_blocked: set[str] = set()
-        self._blocked_ticks: dict[str, int] = {}
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
         self._contact_candidate_count = 0
@@ -191,13 +192,17 @@ class Simulation:
         """Automations that still own work and belong in the live management panel."""
 
         return tuple(
+            automation
+            for automation in self._live_automation_candidates
+            if not automation.status.terminal
+            and (automation.entity_ids or automation.has_future_source)
+        )
+
+    def _rebuild_live_automations(self, automations: Iterable[Automation]) -> None:
+        """Rebuild the disposable query index on activation, retirement or load."""
+        self._live_automation_candidates = tuple(
             sorted(
-                (
-                    automation
-                    for automation in self.automations.values()
-                    if not automation.status.terminal
-                    and (automation.entity_ids or automation.has_future_source)
-                ),
+                (automation for automation in automations if not automation.status.terminal),
                 key=lambda automation: (automation.created_tick, automation.automation_id),
                 reverse=True,
             )
@@ -338,19 +343,26 @@ class Simulation:
 
     def _drive_automations(self) -> None:
         automation_ids = sorted(
-            automation_id
-            for automation_id, automation in self.automations.items()
+            automation.automation_id
+            for automation in self._live_automation_candidates
             if automation.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
         )
         if automation_ids:
             offset = self.tick % len(automation_ids)
             automation_ids = automation_ids[offset:] + automation_ids[:offset]
+        # Positions and owners are fixed during this pass. Production/construction
+        # can add entities between defenses, so discard snapshots on membership growth.
+        enemy_indexes: dict[str, tuple[dict[str, Point], SpatialIndex]] = {}
+        entity_count = len(self.entities)
         for automation_id in automation_ids:
             automation = self.automations[automation_id]
             if automation.kind is AutomationKind.PATROL:
                 automation_execution.drive_patrol(self, automation)
             elif automation.kind is AutomationKind.DEFEND:
-                automation_execution.drive_defend(self, automation)
+                if len(self.entities) != entity_count:
+                    enemy_indexes.clear()
+                    entity_count = len(self.entities)
+                automation_execution.drive_defend(self, automation, enemy_indexes)
             elif automation.kind is AutomationKind.PRODUCTION:
                 production_system.drive_production(self, automation)
             elif automation.kind is AutomationKind.REINFORCEMENT:
@@ -384,7 +396,7 @@ class Simulation:
         if current_id is not None:
             current = self.automations[current_id]
             current.remove_entity(entity_id)
-            self._refresh_gathering_formation(current)
+            automation_execution.refresh_gathering_formation(self, current)
             if current.kind is AutomationKind.PRODUCTION and not current.status.terminal:
                 self._transition(current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
             else:
@@ -392,7 +404,7 @@ class Simulation:
         if suspended_id is not None:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
-            self._refresh_gathering_formation(suspended)
+            automation_execution.refresh_gathering_formation(self, suspended)
             automation_control.handle_automation_without_entities(self, suspended)
         for automation in tuple(self.automations.values()):
             if (
@@ -437,7 +449,7 @@ class Simulation:
             reason=command.reason,
         )
         if removed_entity.kind is EntityKind.BUILDER:
-            self._start_next_construction()
+            construction_system.start_next_construction(self)
         return self._accept("remove_entity")
 
     def snapshot(self) -> dict[str, object]:
@@ -483,20 +495,8 @@ class Simulation:
             "next_entity_number": self._next_entity_number,
             "next_projectile_number": self._next_projectile_number,
             "movement_blocked": sorted(self._movement_blocked),
-            "blocked_ticks": dict(sorted(self._blocked_ticks.items())),
+            "blocked_ticks": {},  # Retired save-v11 field; no runtime congestion counter.
         }
-
-    @staticmethod
-    def _reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
-        movement_system.reset_movement_liveness(entity, clear_stop=clear_stop)
-
-    def _start_path(
-        self, entity: Entity, target: Point, path: PathResult, source: str, state: UnitState
-    ) -> None:
-        movement_system.start_path(self, entity, target, path, source, state)
-
-    def _refresh_gathering_formation(self, automation: Automation) -> None:
-        automation_execution.refresh_gathering_formation(self, automation)
 
     def _invalidate_navigation_cache(self) -> None:
         self._building_cells_cache = None
@@ -651,28 +651,8 @@ class Simulation:
             raise ValueError("gathering point has insufficient map space")
         return cached[:count]
 
-    def _validate_geometry(self, target: SpatialTarget) -> ValidationFailure | None:
-        return spatial_commands.validate_geometry(self, target)
-
-    def _validate_building_placement(
-        self,
-        kind: EntityKind,
-        position: Point,
-        *,
-        ignore_construction_id: str | None = None,
-    ) -> ValidationFailure | None:
-        return construction_system.validate_building_placement(
-            self, kind, position, ignore_construction_id=ignore_construction_id
-        )
-
     def _cancel(self, automation_id: str, owner_id: str) -> CommandResult:
         return automation_control.cancel(self, automation_id, owner_id)
-
-    def _start_next_construction(self) -> None:
-        construction_system.start_next_construction(self)
-
-    def _start_next_production(self, factory_id: str) -> None:
-        production_system.start_next_production(self, factory_id)
 
     def _activate(
         self,
@@ -719,17 +699,11 @@ class Simulation:
     ) -> None:
         automation_control.assign(self, entity_id, automation, authority=authority, suspend=suspend)
 
-    def _manual_override_many(self, entity_ids: tuple[str, ...]) -> None:
-        automation_control.manual_override_many(self, entity_ids)
-
     def _release_automation(self, automation: Automation, *, clear_suspended: bool = False) -> None:
         automation_control.release_automation(self, automation, clear_suspended=clear_suspended)
 
     def _resume_suspended_assignment(self, repair_automation: Automation, entity_id: str) -> None:
         automation_control.resume_suspended_assignment(self, repair_automation, entity_id)
-
-    def _initialize_runtime_entity(self, automation: Automation, entity_id: str) -> None:
-        automation_execution.initialize_runtime_entity(self, automation, entity_id)
 
     def _nearest_repair_destination(
         self, entity: Entity, required_id: str | None = None
@@ -804,11 +778,6 @@ class Simulation:
         authority: ControlAuthority = ControlAuthority.AUTOMATION,
     ) -> bool:
         return automation_control.claim_wins(self, automation, entity_id, authority)
-
-    def _owned_automation(
-        self, automation_id: str, owner_id: str
-    ) -> tuple[Automation | None, ValidationFailure | None]:
-        return automation_control.owned_automation(self, automation_id, owner_id)
 
     def _state_for_assignment(self, entity_id: str) -> UnitState:
         return automation_control.state_for_assignment(self, entity_id)

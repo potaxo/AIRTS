@@ -20,11 +20,10 @@ system/developer instructions and tool permissions.
 
 1. Read relevant code/docs and check `git status`. For substantial work, briefly state the plan
    and any actual design conflicts; simple edits need no formal plan.
-2. Carry implementation requests through implementation and validation. Resolve routine choices
-   from context; boundaries/types/tests need no approval. Ask only when missing information
-   materially affects correctness or scope and cannot be inferred, or required authorization
-   is absent. Continue independent authorized work while awaiting an answer; do not ask again
-   for authorization already given in the conversation.
+2. Carry implementation requests through validation; resolve routine choices from context.
+   Ask only when information material to correctness/scope cannot be inferred or required
+   authorization is absent. Boundaries/types/tests need no approval. Continue independent
+   authorized work while awaiting an answer; retain authorization already given in the conversation.
 3. Reuse meaningful tests; add coverage only for uncovered behavior. Follow
    [test ownership](docs/architecture/engineering.md#test-ownership).
 4. Run required validation. Report the outcome, key decisions, results, and remaining uncertainty

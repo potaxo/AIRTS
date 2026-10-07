@@ -16,6 +16,7 @@ from airts.adapters.replay import (
     run_replay,
     save_replay,
 )
+from airts.contracts.automations import AutomationStatus, ProductionParameters
 from airts.contracts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
@@ -169,19 +170,33 @@ def test_replay_verification_detects_state_divergence(
         run_replay(replay)
 
 
-def test_replay_reproduces_phase3_controller_commands(tmp_path: Path) -> None:
+def test_replay_preserves_defense_and_completed_production(tmp_path: Path) -> None:
     simulation = Simulation(load_example_map(), random_seed=23)
-    simulation.execute(CreateDefendCommand(("tank_01",), PointTarget(Point(20, 30), radius=3)))
-    simulation.execute(
+    initial_position = simulation.entities["tank_01"].position
+    defense = simulation.execute(
+        CreateDefendCommand(("tank_01",), PointTarget(Point(20, 30), radius=3))
+    )
+    production = simulation.execute(
         CreateProductionCommand("factory_01", EntityKind.LIGHT_TANK, 1, Point(20, 35))
     )
+    assert defense.accepted and defense.automation_id is not None
+    assert production.accepted and production.automation_id is not None
     simulation.advance(25)
-    destination = tmp_path / "phase3-replay.json"
+    assert simulation.assignments["tank_01"] == defense.automation_id
+    assert simulation.entities["tank_01"].position != initial_position
+    automation = simulation.automations[production.automation_id]
+    assert automation.status is AutomationStatus.COMPLETED
+    parameters = automation.parameters
+    assert isinstance(parameters, ProductionParameters)
+    assert parameters.produced_count == len(parameters.produced_entity_ids) == 1
+    produced = simulation.entities[parameters.produced_entity_ids[0]]
+    assert produced.kind is EntityKind.LIGHT_TANK and produced.owner_id == "player"
+    destination = tmp_path / "defense-production-replay.json"
 
     save_replay(simulation, destination)
     replayed = run_replay(load_replay(destination))
 
-    assert replayed.snapshot() == simulation.snapshot()
+    assert replayed.export_state() == simulation.export_state()
 
 
 def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
@@ -197,9 +212,8 @@ def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
     assert replayed.automations[production.automation_id or ""].status.value == "failed"
 
 
-@pytest.mark.parametrize("schema", ["airts-replay-v6", "airts-replay-v7"])
-def test_replay_rejects_recordings_from_before_the_movement_rewrite(schema: str) -> None:
-    document = capture_replay(Simulation(load_example_map())).to_dict()
-    document["schema"] = schema
+@pytest.mark.parametrize("version", [6, 7, 8, 9], ids=lambda version: f"v{version}")
+def test_replay_rejects_unsupported_previous_schemas(version: int) -> None:
+    schema = f"airts-replay-v{version}"
     with pytest.raises(ReplayError, match=f"unsupported replay schema: {schema}"):
-        load_replay_data(document)
+        load_replay_data({"schema": schema})

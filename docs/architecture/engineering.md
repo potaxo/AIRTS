@@ -119,6 +119,8 @@ Architecture checks classify every source module and inspect every domain direct
 `contracts/`, with nested/relative imports and type-only guards. Unclassified packages fail validation.
 
 Keep fixtures local until independent tests need identical setup; never share mutable simulations.
+Share reusable checks through helper modules, not imports from discovered `test_*.py` files;
+[recovery checks](../../tests/integration/recovery_checks.py) own the independent swept-disc oracle.
 Integration modules are organized by behavior rather than historical phase or milestone.
 [Shared scenario constructors](../../tests/integration/scenarios.py) return fresh maps/simulations;
 [persistence tests](../../tests/integration/test_persistence.py) own save/load continuation cases.

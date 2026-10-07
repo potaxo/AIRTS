@@ -408,7 +408,6 @@ def test_large_tiny_defend_formation_settles_with_clearance_and_realtime_ticks(
     assert unsettled == 0, (
         f"{unsettled} of {len(entity_ids)} defenders remained unsettled at tick {simulation.tick}; "
         f"{sum(bool(simulation.entities[item].path) for item in entity_ids)} retained paths, "
-        f"{sum(simulation.entities[item].congestion_stopped for item in entity_ids)} yielded, "
         f"{sum(simulation.entities[item].collision_pressure > 0 for item in entity_ids)} under collision pressure, "
         f"{sum(simulation.entities[item].route_ticks >= Simulation.DESTINATION_REPATH_TICKS for item in entity_ids)} on mature routes, "
         f"{sum(simulation.entities[item].position.distance_to(center) <= automation.parameters.assembly_radius + Simulation.DEFEND_FORMATION_TOLERANCE for item in entity_ids)} inside the assembly envelope, "

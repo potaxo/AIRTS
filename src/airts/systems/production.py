@@ -37,6 +37,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget
 from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
+from airts.systems import automation_execution, movement, spatial_commands
 from airts.systems.automation_execution import coordinate_shared_defend_stations
 from airts.world.entities import Entity, UnitState
 from airts.world.map import Cell, EntityCategory, EntityKind
@@ -110,7 +111,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                     "defend_target",
                 ),
             )
-        geometry_failure = simulation._validate_geometry(command.defend_target)
+        geometry_failure = spatial_commands.validate_geometry(simulation, command.defend_target)
         if geometry_failure is not None:
             return simulation._reject_validation("create_production", geometry_failure)
         try:
@@ -132,7 +133,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 ),
             )
     if command.patrol_target is not None:
-        geometry_failure = simulation._validate_geometry(command.patrol_target)
+        geometry_failure = spatial_commands.validate_geometry(simulation, command.patrol_target)
         if geometry_failure is not None:
             return simulation._reject_validation("create_production", geometry_failure)
         try:
@@ -249,7 +250,7 @@ def supersede_continuous_production(simulation: Simulation, factory_id: str) -> 
         )
         simulation._release_automation(automation)
     if superseded:
-        simulation._start_next_production(factory_id)
+        start_next_production(simulation, factory_id)
 
 
 def drive_production(simulation: Simulation, automation: Automation) -> None:
@@ -327,7 +328,7 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
     if not parameters.continuous and parameters.produced_count >= parameters.target_count:
         simulation._transition(automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED")
         simulation._release_automation(automation)
-        simulation._start_next_production(parameters.factory_id)
+        start_next_production(simulation, parameters.factory_id)
 
 
 def factory_production_jobs(simulation: Simulation, factory_id: str) -> tuple[Automation, ...]:
@@ -429,7 +430,8 @@ def spawn_unit(
                 target=[parameters.rally_point.x, parameters.rally_point.y],
             )
         else:
-            simulation._start_path(
+            movement.start_path(
+                simulation,
                 entity,
                 parameters.rally_point,
                 path,
@@ -508,13 +510,13 @@ def assign_produced_defender(
             if changed_owner or previous_stations.get(
                 defender_id
             ) != defend_parameters.stations.get(defender_id):
-                simulation._initialize_runtime_entity(defend, defender_id)
+                automation_execution.initialize_runtime_entity(simulation, defend, defender_id)
         coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
     simulation._assign(entity_id, defend)
     if changed_owner or previous_station != defend_parameters.stations.get(entity_id):
-        simulation._initialize_runtime_entity(defend, entity_id)
+        automation_execution.initialize_runtime_entity(simulation, defend, entity_id)
     coordinate_shared_defend_stations(simulation, target, production.owner_id)
 
 
@@ -567,7 +569,7 @@ def attach_production_defense(
             changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
             simulation._assign(entity_id, defend)
             if changed_owner or previous_stations.get(entity_id) != stations.get(entity_id):
-                simulation._initialize_runtime_entity(defend, entity_id)
+                automation_execution.initialize_runtime_entity(simulation, defend, entity_id)
         coordinate_shared_defend_stations(simulation, target, production.owner_id)
         return
     parameters.defend_automation_id = None
@@ -607,7 +609,7 @@ def assign_produced_patroller(
         else (len(patrol.entity_ids) - 1) % len(patrol_parameters.waypoints)
     )
     simulation._assign(entity_id, patrol)
-    simulation._initialize_runtime_entity(patrol, entity_id)
+    automation_execution.initialize_runtime_entity(simulation, patrol, entity_id)
 
 
 def spawn_cell_available(simulation: Simulation, cell: Cell, kind: EntityKind) -> bool:

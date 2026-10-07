@@ -38,16 +38,6 @@ def _native_four_k_app(simulation: Simulation, entity_ids: tuple[str, ...]) -> A
     return app
 
 
-def test_opengl_runtime_requests_a_native_resizable_double_buffer() -> None:
-    """The default GPU path must render at native pixels rather than scaling a small Surface."""
-
-    flags = AirtsApp.OPENGL_DISPLAY_FLAGS
-    assert flags & pygame.OPENGL
-    assert flags & pygame.DOUBLEBUF
-    assert flags & pygame.RESIZABLE
-    assert not flags & pygame.SCALED
-
-
 def test_wslg_opengl_prefers_wayland_unless_the_user_selected_a_video_driver(
     make_map: Callable[[int], GameMap],
 ) -> None:
@@ -106,6 +96,11 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer(
         app.run(max_frames=1)
 
     set_mode.assert_called_once_with(app.WINDOW_SIZE, app.OPENGL_DISPLAY_FLAGS, vsync=0)
+    flags = set_mode.call_args.args[1]
+    assert flags & pygame.OPENGL
+    assert flags & pygame.DOUBLEBUF
+    assert flags & pygame.RESIZABLE
+    assert not flags & pygame.SCALED
     assert gl_set_attribute.call_count == 4
     renderer.render.assert_called_once_with(app, app.WINDOW_SIZE)
     renderer.release.assert_called_once_with()

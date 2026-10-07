@@ -11,6 +11,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.navigation.spatial_index import SpatialIndex
+from airts.systems import movement
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ def drive_combat(simulation: Simulation) -> None:
         ):
             attacker.path.clear()
             attacker.move_target = None
-            simulation._reset_movement_liveness(attacker, clear_stop=True)
+            movement.reset_movement_liveness(attacker)
             attacker.state = UnitState.ATTACKING
         if (
             attacker.pursue_target
@@ -271,8 +272,6 @@ def _squared_distance(first: Point, second: Point) -> float:
 def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> None:
     """Route an ordered attacker to a valid interaction point."""
 
-    if attacker.congestion_stopped:
-        return
     goals = _firing_approach_points(simulation, attacker, target)
     try:
         point, path = simulation._routes.shared_path_to_any(
@@ -296,7 +295,7 @@ def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> No
             (point,),
             sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
         )
-    simulation._start_path(attacker, point, path, "combat", UnitState.ATTACKING)
+    movement.start_path(simulation, attacker, point, path, "combat", UnitState.ATTACKING)
 
 
 def _firing_approach_points(

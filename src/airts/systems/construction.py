@@ -19,6 +19,7 @@ from airts.contracts.commands import (
 )
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
+from airts.systems import automation_execution, movement
 from airts.world.entities import Entity, UnitState
 from airts.world.map import Cell, EntityKind, footprint_cells
 
@@ -203,14 +204,14 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
             builder.path.clear()
             builder.move_target = None
             builder.state = UnitState.BUILDING
-            simulation._reset_movement_liveness(builder, clear_stop=True)
+            movement.reset_movement_liveness(builder)
             builders_in_range.append(builder_id)
             route_available = True
             continue
         if inside_footprint and builder.move_target not in destinations:
             builder.path.clear()
             builder.move_target = None
-            simulation._reset_movement_liveness(builder, clear_stop=True)
+            movement.reset_movement_liveness(builder)
         if builder.path or builder.move_target is not None:
             route_available = True
             continue
@@ -222,7 +223,8 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
             )
         except PathfindingError:
             continue
-        simulation._start_path(
+        movement.start_path(
+            simulation,
             builder,
             destination,
             path,
@@ -343,5 +345,5 @@ def start_next_construction(simulation: Simulation) -> None:
             continue
         for builder_id in builder_ids:
             simulation._assign(builder_id, automation)
-            simulation._initialize_runtime_entity(automation, builder_id)
+            automation_execution.initialize_runtime_entity(simulation, automation, builder_id)
         simulation._transition(automation, AutomationStatus.ACTIVE, "BUILDERS_AVAILABLE")

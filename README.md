@@ -73,7 +73,7 @@ These measurements do not count physical monitor scan-out;
 | `E` | Edit the selected point, route, or region by redrawing it |
 | `Delete` | Delete one selected route or region and explicitly cancel automations using it |
 | `F5` / `F9` | Save or load `airts-quicksave.json` |
-| `F2` | Reset the bundled/current starting scenario |
+| `F2` | Start over with the startup map, seed, and enemy spawn settings; in-window loads do not replace these settings |
 | `U` | Replace the inspected patrol/defend target or production loop's defense target with the active spatial target |
 | `Shift` + build click | Keep placement mode active and append the site to the selected builders' FIFO construction queue |
 | Right-click while placing | Close building placement without moving builders or changing queued construction |

@@ -14,9 +14,7 @@ from airts.world.map import load_example_map, load_map
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run the AIRTS Phase 5 economy and combat runtime."
-    )
+    parser = argparse.ArgumentParser(description="Run the AIRTS simulation and automation runtime.")
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--map", type=Path, help="Load a map JSON file instead of the example.")
     sources.add_argument("--load-state", type=Path, help="Continue a saved simulation state.")

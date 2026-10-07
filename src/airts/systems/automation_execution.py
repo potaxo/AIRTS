@@ -62,7 +62,7 @@ def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:
             continue
         simulation._assign(entity_id, target)
         target.entity_ids.append(entity_id)
-        simulation._initialize_runtime_entity(target, entity_id)
+        initialize_runtime_entity(simulation, target, entity_id)
         parameters.transferred_entity_ids.append(entity_id)
         transferred = True
         if len(target.entity_ids) >= parameters.minimum_units:
@@ -85,11 +85,6 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
             continue
         phase = parameters.phases[entity_id]
         entity = simulation.entities[entity_id]
-        if entity.congestion_stopped and phase in {
-            RepairPhase.TRAVELING,
-            RepairPhase.RETURNING,
-        }:
-            continue
         if phase is RepairPhase.TRAVELING:
             if entity.path or entity.move_target is not None:
                 continue
@@ -117,8 +112,8 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
             except PathfindingError as error:
                 simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
                 return
-            simulation._start_path(
-                entity, point, path, automation.automation_id, UnitState.RETURNING
+            movement.start_path(
+                simulation, entity, point, path, automation.automation_id, UnitState.RETURNING
             )
         elif phase is RepairPhase.REPAIRING:
             if entity.path:
@@ -171,7 +166,8 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
             except PathfindingError as error:
                 simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
                 return
-            simulation._start_path(
+            movement.start_path(
+                simulation,
                 entity,
                 return_position,
                 path,
@@ -196,7 +192,7 @@ def initialize_runtime_entity(
     entity.move_target = None
     entity.attack_target_id = None
     entity.pursue_target = False
-    simulation._reset_movement_liveness(entity, clear_stop=True)
+    movement.reset_movement_liveness(entity)
     if automation.kind is AutomationKind.PATROL:
         patrol_parameters = _patrol_parameters(automation)
         patrol_parameters.waypoint_indices.setdefault(entity_id, 0)
@@ -242,12 +238,16 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
             simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
             return
         parameters.waypoint_indices[key] = (waypoint_index + 1) % len(parameters.waypoints)
-        simulation._start_path(
-            entity, target, paths[key], automation.automation_id, UnitState.PATROLLING
+        movement.start_path(
+            simulation, entity, target, paths[key], automation.automation_id, UnitState.PATROLLING
         )
 
 
-def drive_defend(simulation: Simulation, automation: Automation) -> None:
+def drive_defend(
+    simulation: Simulation,
+    automation: Automation,
+    enemy_indexes: dict[str, tuple[dict[str, Point], SpatialIndex]],
+) -> None:
     parameters = _defend_parameters(automation)
     allowance = simulation._routes.automation_allowance(
         simulation.GATHERING_PATH_BUDGET
@@ -275,12 +275,17 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
             key=lambda p: (p.distance_to(center), p.y, p.x),
             default=None,
         )
-    enemies = {
-        key: e.position
-        for key, e in simulation.entities.items()
-        if e.owner_id != automation.owner_id
-    }
-    enemy_index = SpatialIndex(enemies)
+    snapshot = enemy_indexes.get(automation.owner_id)
+    if snapshot is None:
+        enemies = {
+            key: e.position
+            for key, e in simulation.entities.items()
+            if e.owner_id != automation.owner_id
+        }
+        enemy_index = SpatialIndex(enemies)
+        enemy_indexes[automation.owner_id] = enemies, enemy_index
+    else:
+        enemies, enemy_index = snapshot
     attacked = [
         simulation.entities[other]
         for other in automation.entity_ids
@@ -391,8 +396,8 @@ def drive_defend(simulation: Simulation, automation: Automation) -> None:
         except PathfindingError as error:
             simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
             return
-        simulation._start_path(
-            entity, station, paths[key], automation.automation_id, UnitState.DEFENDING
+        movement.start_path(
+            simulation, entity, station, paths[key], automation.automation_id, UnitState.DEFENDING
         )
 
 
@@ -463,4 +468,4 @@ def coordinate_shared_defend_stations(
                 entity.defend_arrived = False
                 entity.path.clear()
                 entity.move_target = None
-                simulation._reset_movement_liveness(entity, clear_stop=True)
+                movement.reset_movement_liveness(entity)

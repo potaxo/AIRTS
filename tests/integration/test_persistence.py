@@ -24,10 +24,8 @@ from airts.adapters.persistence import (
     save_simulation,
 )
 from airts.adapters.replay import (
-    ReplayError,
     capture_replay,
     load_replay,
-    load_replay_data,
     run_replay,
     save_replay,
 )
@@ -419,14 +417,6 @@ def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) ->
         )
 
 
-@pytest.mark.parametrize("schema", ["airts-replay-v8", "airts-replay-v9"])
-def test_previous_replay_schema_is_explicitly_rejected(schema: str) -> None:
-    document = capture_replay(hold_contact_simulation()).to_dict()
-    document["schema"] = schema
-    with pytest.raises(ReplayError, match="unsupported replay schema"):
-        load_replay_data(document)
-
-
 def test_modified_automation_round_trips_without_a_new_lifecycle_transition(
     make_map: Callable[[int], GameMap], tmp_path: Path
 ) -> None:
@@ -656,7 +646,6 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
         )
     )
     simulation.advance(9)
-    simulation.entities["unit_01"].congestion_stopped = True
     simulation.entities["unit_01"].collision_pressure = 3
     destination = tmp_path / "state.json"
 
@@ -665,8 +654,50 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
 
     assert restored.export_state() == simulation.export_state()
     assert restored.entities["unit_01"].collision_pressure == 3
+    assert [item.automation_id for item in restored.live_automations] == [
+        item.automation_id for item in simulation.live_automations
+    ]
 
     _assert_continues_identically(simulation, restored, 25)
+
+
+def test_loading_retired_congestion_state_preserves_repair_continuation() -> None:
+    simulation = Simulation(runtime_map())
+    simulation.entities["unit_01"].health = 10
+    assert simulation.execute(CreateRepairAndReturnCommand(("unit_01",))).accepted
+    simulation.advance()
+    assert simulation.entities["unit_01"].path
+    state = simulation.export_state()
+    state["entities"]["unit_01"]["congestion_stopped"] = True
+    state["blocked_ticks"] = {"unit_01": 17}
+
+    restored = load_simulation_data(
+        {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+    )
+
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 40)
+
+
+@pytest.mark.parametrize("invalid_field", ["stop-flag", "negative-counter", "unknown-unit"])
+def test_loading_retired_congestion_fields_still_rejects_malformed_data(
+    invalid_field: str,
+) -> None:
+    simulation = Simulation(runtime_map())
+    state = simulation.export_state()
+    if invalid_field == "stop-flag":
+        state["entities"]["unit_01"]["congestion_stopped"] = "false"
+        message = "congestion_stopped"
+    else:
+        state["blocked_ticks"] = (
+            {"unit_01": -1} if invalid_field == "negative-counter" else {"missing": 1}
+        )
+        message = "blocked_ticks"
+
+    with pytest.raises(PersistenceError, match=message):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
 
 
 def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:

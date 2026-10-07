@@ -127,6 +127,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         state.get("projectile_traces", []), simulation
     )
     simulation.automations = _load_automations(state.get("automations"), simulation)
+    simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
     simulation.suspended_assignments = _load_suspended_assignments(
         state.get("suspended_assignments", {}), simulation
@@ -177,16 +178,13 @@ def load_simulation_data(raw_data: object) -> Simulation:
     if not simulation._movement_blocked.issubset(simulation.entities):
         raise PersistenceError("movement_blocked references an unknown entity")
     blocked_ticks = _mapping(state.get("blocked_ticks", {}), "state.blocked_ticks")
-    simulation._blocked_ticks = {
-        entity_id: _integer(value, f"blocked_ticks.{entity_id}", minimum=0)
-        for entity_id, value in blocked_ticks.items()
-    }
-    if not set(simulation._blocked_ticks).issubset(simulation.entities):
+    for entity_id, value in blocked_ticks.items():
+        _integer(value, f"blocked_ticks.{entity_id}", minimum=0)
+    if not set(blocked_ticks).issubset(simulation.entities):
         raise PersistenceError("blocked_ticks references an unknown entity")
     if legacy_movement:
         _validate_legacy_traffic(state.get("traffic_reservations"), simulation)
         for entity in simulation.entities.values():
-            entity.congestion_stopped = False
             entity.no_progress_ticks = 0
             entity.progress_target = entity.path[0] if entity.path else None
             entity.progress_distance = (
@@ -521,7 +519,6 @@ def _load_entities(
             progress_target=progress_target,
             progress_distance=progress_distance,
             no_progress_ticks=no_progress_ticks,
-            congestion_stopped=congestion_stopped,
             collision_pressure=collision_pressure,
             route_ticks=route_ticks,
             hold_anchor=hold_anchor,

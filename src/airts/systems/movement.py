@@ -19,12 +19,10 @@ if TYPE_CHECKING:
     from airts.simulation import Simulation
 
 
-def reset_movement_liveness(entity: Entity, *, clear_stop: bool = False) -> None:
+def reset_movement_liveness(entity: Entity) -> None:
     entity.progress_target = None
     entity.progress_distance = None
     entity.no_progress_ticks = entity.route_ticks = entity.collision_pressure = 0
-    if clear_stop:
-        entity.congestion_stopped = False
 
 
 def start_path(
@@ -35,7 +33,7 @@ def start_path(
     source: str,
     state: UnitState,
 ) -> None:
-    reset_movement_liveness(entity, clear_stop=True)
+    reset_movement_liveness(entity)
     entity.path = list(path.waypoints)
     entity.move_target = target if entity.path else None
     entity.path_cost = path.cost
@@ -145,13 +143,10 @@ def _recovery_goal(simulation: Simulation, entity: Entity) -> tuple[Point | None
     """Read the business-owned weak return intent without creating a player order."""
     if entity.hold_anchor is not None:
         return entity.hold_anchor, HOLD_TOLERANCE
+    if not entity.defend_arrived or entity.state is not UnitState.DEFENDING:
+        return None, HOLD_TOLERANCE
     automation = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
-    if (
-        entity.defend_arrived
-        and entity.state is UnitState.DEFENDING
-        and automation is not None
-        and isinstance(automation.parameters, DefendParameters)
-    ):
+    if automation is not None and isinstance(automation.parameters, DefendParameters):
         return (
             automation.parameters.stations.get(entity.entity_id),
             simulation.DEFEND_STATION_TOLERANCE,
@@ -175,14 +170,14 @@ def _track_progress(entity: Entity, target: Point, minimum: float) -> float:
 
 
 def move_entities(simulation: Simulation) -> None:
-    entities = {key: e for key, e in simulation.entities.items() if e.is_movable}
-    if not entities:
+    keys = sorted(key for key, entity in simulation.entities.items() if entity.is_movable)
+    if not keys:
         return
-    keys = sorted(entities)
+    entities = [simulation.entities[key] for key in keys]
     obstacles = simulation._building_cells()
     planned: set[str] = set()
-    for key in keys:
-        entity = entities[key]
+    for entity in entities:
+        key = entity.entity_id
         if entity.contact_wait_ticks:
             entity.contact_wait_ticks -= 1
         if not entity.path:
@@ -216,8 +211,8 @@ def move_entities(simulation: Simulation) -> None:
     recovery_ticks: list[int] = []
     recovery_released: list[bool] = []
     recovery_tolerances: list[float] = []
-    for key in keys:
-        entity = entities[key]
+    stalled: list[bool] = []
+    for entity in entities:
         target = entity.path[0] if entity.path else _hold_target(simulation, entity)
         point = entity.position
         recovery_goal, recovery_tolerance = _recovery_goal(simulation, entity)
@@ -262,10 +257,27 @@ def move_entities(simulation: Simulation) -> None:
         )
         recovery_released.append(entity.recovery_released)
         recovery_tolerances.append(recovery_tolerance)
+        stalled.append(
+            (strong_intent or pending_recovery)
+            and entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
+        )
         if not strong_intent and entity.contact_wait_ticks:
             target = point
         profile = entity.kind.profile
         assert profile.movement_speed is not None
+        # Compute ordering geometry while the authoritative points are already in hand.
+        # Keep scalar hypot and Python's ordered sums, including their rounding behavior.
+        has_route = bool(entity.path)
+        if has_route:
+            px, py = float(point.x), float(point.y)
+            gx, gy = float(goal.x) - px, float(goal.y) - py
+            length = max(hypot(gx, gy), 1e-9)
+            heading_x, heading_y = gx / length, gy / length
+            dx, dy = float(target.x) - px, float(target.y) - py
+            front = -(px * dx + py * dy) / max(hypot(dx, dy), 1e-9)
+        else:
+            # Pathless bodies use the common axis/sign below, never route geometry.
+            heading_x = heading_y = front = 0.0
         records.append(
             (
                 point.x,
@@ -277,7 +289,10 @@ def move_entities(simulation: Simulation) -> None:
                 collision_radius(entity.kind),
                 profile.movement_speed * simulation.TICK_SECONDS,
                 strong_intent,
-                bool(entity.path),
+                has_route,
+                heading_x,
+                heading_y,
+                front,
             )
         )
     data = np.asarray(records, dtype=np.float64)
@@ -288,32 +303,17 @@ def move_entities(simulation: Simulation) -> None:
     # One stable front ordering for active routes and nearby resting bodies.
     # Batch the arithmetic; IDs are already sorted and provide the last tie break.
     routed = data[:, 9].astype(np.bool_)
-    vectors = goals - positions
-    lengths = np.asarray(
-        [
-            max(hypot(x, y), 1e-9)
-            for x, y in zip(vectors[:, 0].tolist(), vectors[:, 1].tolist(), strict=True)
-        ]
-    )
-    headings = vectors / lengths[:, None]
+    headings = data[:, 10:12]
     totals = [sum(np.abs(headings[routed, axis]).tolist()) for axis in (0, 1)]
     axis = int(totals[1] > totals[0])
     sign = 1.0 if sum(headings[routed, axis].tolist()) >= 0 else -1.0
     priority = np.where(routed, headings[:, axis] >= 0, sign >= 0).astype(np.int64)
     priority ^= simulation.tick % 2
-    route_vectors = target_data - positions
-    route_lengths = np.asarray(
-        [
-            max(hypot(x, y), 1e-9)
-            for x, y in zip(route_vectors[:, 0].tolist(), route_vectors[:, 1].tolist(), strict=True)
-        ]
-    )
     # At a turn or merge, the front is measured along the segment being submitted,
     # not a remote goal behind a wall. Keep group/parity/ID tie breaks unchanged.
     fronts = np.where(
         routed,
-        -(positions[:, 0] * route_vectors[:, 0] + positions[:, 1] * route_vectors[:, 1])
-        / route_lengths,
+        data[:, 12],
         -sign * positions[:, axis],
     )
     order = np.asarray(np.lexsort((np.arange(len(keys)), fronts, priority)), dtype=np.int64)
@@ -332,14 +332,7 @@ def move_entities(simulation: Simulation) -> None:
         simulation._routes.obstacle_mask(obstacles),
         axis,
         work,
-        np.asarray(
-            [
-                (bool(moving[index]) or recovering[index])
-                and entities[key].no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
-                for index, key in enumerate(keys)
-            ],
-            dtype=np.bool_,
-        ),
+        np.asarray(stalled, dtype=np.bool_),
         recovering=np.asarray(recovering, dtype=np.bool_),
         recovery_ticks=np.asarray(recovery_ticks, dtype=np.int64),
         recovery_released=np.asarray(recovery_released, dtype=np.bool_),
@@ -352,10 +345,11 @@ def move_entities(simulation: Simulation) -> None:
     simulation._contact_component_count += int(work[1])
     simulation._contact_coordination_work += int(work[2])
     simulation._contact_blocked_component_count += int(work[3])
-    movable = frozenset(entities)
+    movable = frozenset(keys)
     xs, ys, pressures = updated[:, 0].tolist(), updated[:, 1].tolist(), pressure.tolist()
-    for index, key in enumerate(keys):
-        entity = entities[key]
+    statuses = recovery_status.tolist()
+    for index, entity in enumerate(entities):
+        key = entity.entity_id
         changed = xs[index] != entity.position.x or ys[index] != entity.position.y
         candidate = Point(xs[index], ys[index]) if changed else entity.position
         entity.collision_pressure = int(pressures[index])
@@ -367,18 +361,18 @@ def move_entities(simulation: Simulation) -> None:
             entity.position = candidate
         if pressures[index]:
             entity.contact_wait_ticks = CONTACT_WAIT_TICKS
-        if recovery_status[index] == 1:
+        if statuses[index] == 1:
             entity.clear_recovery_request()
             if entity.hold_anchor is not None:
                 reset_movement_liveness(entity)
-        elif recovery_status[index] == 2:
+        elif statuses[index] == 2:
             entity.recovery_released = False
         recovery_goal = recovery_goals[index]
         if recovery_goal is not None:
             if candidate.distance_to(recovery_goal) > recovery_tolerances[index]:
                 if entity.recovery_request_tick is None:
                     entity.recovery_request_tick = simulation.tick
-            elif entity.recovery_request_tick is not None and recovery_status[index] != 2:
+            elif entity.recovery_request_tick is not None and statuses[index] != 2:
                 entity.recovery_released = True
                 if entity.hold_anchor is not None:
                     reset_movement_liveness(entity)
@@ -412,7 +406,7 @@ def _finish_path(simulation: Simulation, entity: Entity) -> None:
     if entity.path:
         return
     entity.move_target = None
-    reset_movement_liveness(entity, clear_stop=True)
+    reset_movement_liveness(entity)
     entity.state = simulation._state_for_assignment(entity.entity_id)
     if entity.state is UnitState.DEFENDING:
         entity.defend_arrived = True

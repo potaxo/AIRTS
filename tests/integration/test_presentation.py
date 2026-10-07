@@ -357,6 +357,47 @@ def test_window_close_exits_before_another_tick_or_render_and_releases_resources
     ]
 
 
+def test_software_runtime_keeps_a_logical_framebuffer_when_the_window_resizes_to_4k() -> None:
+    app = AirtsApp(interaction_simulation(), renderer_backend=RendererBackend.SOFTWARE)
+    screen = pygame.Surface(app.WINDOW_SIZE)
+    physical_size = (3840, 2160)
+    clock = Mock()
+    clock.tick.return_value = 0
+    app.paused = True
+    with (
+        patch("airts.presentation.app.pygame.display.init"),
+        patch("airts.presentation.app.pygame.font.init"),
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=screen) as set_mode,
+        patch("airts.presentation.app.pygame.display.get_surface", return_value=screen),
+        patch("airts.presentation.app.pygame.display.set_caption"),
+        patch("airts.presentation.app.pygame.font.Font", side_effect=(Mock(), Mock())),
+        patch("airts.presentation.app.pygame.time.Clock", return_value=clock),
+        patch(
+            "airts.presentation.app.pygame.event.get",
+            return_value=(pygame.event.Event(pygame.VIDEORESIZE, size=physical_size),),
+        ),
+        patch("airts.presentation.app.pygame.event.clear"),
+        patch("airts.presentation.app.pygame.font.quit"),
+        patch("airts.presentation.app.pygame.display.quit"),
+        patch("airts.presentation.app.pygame.quit"),
+        patch("airts.presentation.app.pygame.display.flip") as flip,
+        patch.object(app, "_draw") as draw,
+    ):
+        app.run(max_frames=1)
+
+    set_mode.assert_called_once_with(screen.get_size(), app.DISPLAY_FLAGS)
+    flags = set_mode.call_args.args[1]
+    assert flags & pygame.SCALED and flags & pygame.RESIZABLE
+    assert not flags & pygame.OPENGL
+    assert app.window_size == screen.get_size() == app.WINDOW_SIZE
+    assert all(
+        logical < physical
+        for logical, physical in zip(screen.get_size(), physical_size, strict=True)
+    )
+    draw.assert_called_once_with(screen)
+    flip.assert_called_once_with()
+
+
 def test_render_failure_still_releases_pygame_resources_in_order() -> None:
     app = AirtsApp(
         interaction_simulation(),

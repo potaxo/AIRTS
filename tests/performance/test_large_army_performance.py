@@ -455,7 +455,6 @@ def test_delayed_unit_in_five_hundred_unit_army_avoids_repath_storm_and_keeps_pr
     )
     assert len(delayed_repaths) <= 2
     assert simulation.entities["mover"].position.x > 20
-    assert not simulation.entities["mover"].congestion_stopped
 
 
 def test_thousand_unit_enemy_focus_click_has_generous_hit_area_and_stays_responsive(
@@ -492,17 +491,12 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work(check_ti
     assert simulation.execute(MoveCommand(entity_ids, Point(70.5, 20.5))).accepted
     movement_attempts: list[int] = []
     collision_checks: list[int] = []
-    maximum_stopped = 0
 
     started = perf_counter()
     for _ in range(100):
         simulation.advance()
         movement_attempts.append(simulation.movement_step_attempt_count)
         collision_checks.append(simulation.collision_pair_check_count)
-        maximum_stopped = max(
-            maximum_stopped,
-            sum(simulation.entities[entity_id].congestion_stopped for entity_id in entity_ids),
-        )
     elapsed = perf_counter() - started
 
     density_waits = tuple(
@@ -511,7 +505,6 @@ def test_five_hundred_unit_choke_preserves_throughput_with_bounded_work(check_ti
         if event.details.get("reason") == "DENSITY_BACKPRESSURE"
     )
     assert not density_waits
-    assert maximum_stopped < 100
     assert sum(simulation.entities[entity_id].position.x >= 50 for entity_id in entity_ids) >= 50
     assert min(movement_attempts[10:]) >= 350
     assert max(collision_checks) <= 6_000
@@ -590,12 +583,10 @@ def test_two_large_head_on_armies_pass_without_a_global_freeze(check_timing: boo
     simulation.advance(180)
     elapsed = perf_counter() - started
 
-    all_ids = eastbound + westbound
     assert not any(
         event.details.get("reason") == "DENSITY_BACKPRESSURE" for event in simulation.events.events
     )
     assert sum(simulation.entities[entity_id].position.x > 40 for entity_id in eastbound) >= 75
     assert sum(simulation.entities[entity_id].position.x < 40 for entity_id in westbound) >= 75
-    assert sum(simulation.entities[entity_id].congestion_stopped for entity_id in all_ids) < 30
     if check_timing:
         assert elapsed < 6.0

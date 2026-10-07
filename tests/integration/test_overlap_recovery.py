@@ -6,6 +6,7 @@ from math import hypot
 
 import numpy as np
 import pytest
+from tests.integration.recovery_checks import RecoveryChecks, _disc_metrics, _positions
 from tests.integration.scenarios import injected_overlap_simulation
 
 from airts.contracts.automations import DefendParameters
@@ -20,67 +21,9 @@ from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import RoutingService
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
-from airts.world._numeric import FloatArray, compile_numeric
+from airts.world._numeric import FloatArray
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind
-
-
-@compile_numeric
-def _disc_metrics(
-    before: FloatArray, after: FloatArray, radii: FloatArray, speeds: FloatArray
-) -> tuple[float, float, float, float, int]:
-    """Independent exact relative-segment distance; no N-by-N storage."""
-    max_excess = max_deepening = max_depth = depth_sum = 0.0
-    overlaps = 0
-    for i in range(len(before)):
-        vx, vy = after[i, 0] - before[i, 0], after[i, 1] - before[i, 1]
-        max_excess = max(max_excess, hypot(vx, vy) - speeds[i])
-        for j in range(i):
-            px, py = before[i, 0] - before[j, 0], before[i, 1] - before[j, 1]
-            rx = vx - after[j, 0] + before[j, 0]
-            ry = vy - after[j, 1] + before[j, 1]
-            vv = rx * rx + ry * ry
-            t = min(1.0, max(0.0, -(px * rx + py * ry) / vv)) if vv else 0.0
-            distance = hypot(px, py)
-            contact = radii[i] + radii[j]
-            closest = hypot(px + rx * t, py + ry * t)
-            max_deepening = max(max_deepening, min(distance, contact) - closest)
-            depth = max(0.0, contact - hypot(after[i, 0] - after[j, 0], after[i, 1] - after[j, 1]))
-            max_depth = max(max_depth, depth)
-            depth_sum += depth
-            if depth > 1e-7:
-                overlaps += 1
-    return max_excess, max_deepening, max_depth, depth_sum, overlaps
-
-
-def _positions(simulation: Simulation, ids: tuple[str, ...]) -> FloatArray:
-    return np.asarray(
-        [(simulation.entities[k].position.x, simulation.entities[k].position.y) for k in ids],
-        dtype=np.float64,
-    )
-
-
-def _advance_checked(
-    simulation: Simulation, ids: tuple[str, ...], before: FloatArray
-) -> tuple[FloatArray, tuple[float, float, float, float, int]]:
-    simulation.advance()
-    after = _positions(simulation, ids)
-    radii = np.array([collision_radius(simulation.entities[k].kind) for k in ids])
-    speeds = np.array([simulation.entities[k].speed * simulation.TICK_SECONDS for k in ids])
-    metrics = _disc_metrics(before, after, radii, speeds)
-    assert metrics[0] <= 1e-8, (
-        f"tick {simulation.tick}: total displacement exceeded speed by {metrics[0]}"
-    )
-    assert metrics[1] <= 1e-7, f"tick {simulation.tick}: swept contact deepened by {metrics[1]}"
-    assert np.all(after >= radii[:, None] - 1e-8)
-    assert np.all(
-        after
-        <= np.array([simulation.game_map.width, simulation.game_map.height]) - radii[:, None] + 1e-8
-    )
-    for key in ids:
-        entity = simulation.entities[key]
-        assert simulation.occupancy.cells_for(key) == entity.occupied_cells
-    return after, metrics
 
 
 def _assert_recovers_and_escapes(
@@ -108,12 +51,11 @@ def _assert_recovers_and_escapes(
             pending.difference_update(members)
     assert not pending, "selected recovery bodies must retain their accepted Move command"
     before = initial = _positions(simulation, ids)
-    radii = np.array([collision_radius(simulation.entities[k].kind) for k in ids])
-    speeds = np.array([simulation.entities[k].speed * simulation.TICK_SECONDS for k in ids])
-    initial_depth = _disc_metrics(before, before, radii, speeds)[3]
+    checks = RecoveryChecks(simulation, ids)
+    initial_depth = _disc_metrics(before, before, checks.radii, checks.speeds)[3]
     observed_depth = initial_depth
     for _ in range(maximum_ticks):
-        before, metrics = _advance_checked(simulation, ids, before)
+        before, metrics = checks.advance(before)
         if simulation.tick == 100:
             observed_depth = metrics[3]
             assert observed_depth < initial_depth * 0.75, (
@@ -192,8 +134,9 @@ def test_severe_overlap_recovers_every_body_and_extracts_entire_internal_squad(
     assert simulation.execute(MoveCommand(selected, Point(80, 48))).accepted
     _, before = _assert_recovers_and_escapes(simulation, ids, selected)
     rested = before.copy()
+    checks = RecoveryChecks(simulation, ids)
     for _ in range(40):
-        before, metrics = _advance_checked(simulation, ids, before)
+        before, metrics = checks.advance(before)
         assert metrics[2] <= 1e-7
     assert float(np.linalg.norm(before - rested, axis=1).max()) < 0.05, (
         "released formation keeps drifting or jittering without pressure"
@@ -252,8 +195,9 @@ def test_mixed_discs_preserve_passive_behavior_and_conflicting_anchors(behavior:
     assert simulation.execute(MoveCommand(selected, Point(80, 48))).accepted
     _, before = _assert_recovers_and_escapes(simulation, ids, selected)
     rested = before.copy()
+    checks = RecoveryChecks(simulation, ids)
     for _ in range(40):
-        before, metrics = _advance_checked(simulation, ids, before)
+        before, metrics = checks.advance(before)
         assert metrics[2] <= 1e-7
     assert float(np.linalg.norm(before - rested, axis=1).max()) < 0.08
     if behavior == "hold":
@@ -309,8 +253,9 @@ def test_closed_insufficient_area_reports_constraint_and_retains_move_intent() -
     assert simulation.execute(MoveCommand(selected, Point(49, 48))).accepted
     before = _positions(simulation, ids)
     blocked = False
+    checks = RecoveryChecks(simulation, ids)
     for _ in range(100):
-        before, metrics = _advance_checked(simulation, ids, before)
+        before, metrics = checks.advance(before)
         blocked |= simulation.contact_blocked_component_count > 0
         for key in ids:
             entity = simulation.entities[key]

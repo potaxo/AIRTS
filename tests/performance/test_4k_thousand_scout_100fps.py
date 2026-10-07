@@ -142,12 +142,3 @@ def test_4k_thousand_scout_head_on_collision_sustains_100_real_fps_end_to_end(
     assert maximum_collision_checks > 0
     if check_timing:
         assert_real_fps(probe, TARGET_FPS, "head-on 4K collision")
-
-
-def test_explicit_software_runtime_scales_a_bounded_framebuffer_for_4k_windows() -> None:
-    """The compatibility backend must not expand its software buffer to physical 4K."""
-
-    assert AirtsApp.DISPLAY_FLAGS & pygame.SCALED
-    assert AirtsApp.DISPLAY_FLAGS & pygame.RESIZABLE
-    assert AirtsApp.WINDOW_SIZE[0] < DISPLAY_SIZE[0]
-    assert AirtsApp.WINDOW_SIZE[1] < DISPLAY_SIZE[1]

@@ -132,39 +132,30 @@ specified simulation commands, passive submission, Hold/defense recovery and rep
 Use identical fixture, seed, duration and timer for before/after measurements and keep raw samples
 under ignored `outputs/`. Other frame gates and the 6,000-pair choke gate remain unchanged.
 
-Compatible anchor return uses a sparse local constraint graph rather than a dense distance or
-normal matrix. Internal projection retains pairs within both members' combined passive half-step
-envelopes, with a numerical margin. Farther pairs cannot touch under either body's actual cap;
-the full query's evaluated relationship is still counted, and complete final safety certification
-remains unchanged. This geometric exclusion does not truncate neighbors or apply a weak cap to
-external strong travel. For a region with `P` participating bodies, `E` retained edges and endpoint degrees
+Movement computes front-order geometry during state packing, retaining scalar `hypot`, ordered
+Python sums and stable ID tie breaks. Defense controllers share one enemy-position snapshot/index
+per owner within the automation pass. Positions and ownership do not change during that pass;
+production/construction membership growth discards the snapshots before the next defense update.
+Snapshots never cross into the later movement/combat phases or persist between ticks or saves.
+
+The [contact yielding and anchor-return contract](runtime.md#contact-yielding-and-hold-anchors)
+owns release fields, sparse joint projection, passive step-envelope exclusion and final certification.
+For a region with `P` participating bodies, `E` retained edges and endpoint degrees
 `degree_i`, its active-set refinement operation allowance is
 `8 * (P + E + sum(degree_i ** 2))`. Each CG solve has dimension at most
 `min(active_edges, 2 * P)` and can stop earlier on its residual, a nonnegative-multiplier boundary
-or the operation allowance. Singular dual directions release redundant active rows locally.
+or the operation allowance.
 During CG, compact incidence products skip inactive edges that contribute zero; endpoint packing,
 active-set changes and all actual numerical visits remain measured. Full constraint admission,
 the final all-edge scan and swept/static certification are mandatory even after early termination;
 the numerical refinement allowance never licenses omitted safety checks. All their costs remain
-inside complete tick/frame measurements. Scratch arrays, multipliers and dependency graphs rebuild
-from current authoritative state, with no persistent numerical cache affecting future trajectories.
-
-The two contact prediction sweeps remain unchanged. Weak corridor opening considers three finite
-monotone transverse fields (both sides or either side) under the same passive cap and static/external
-certificates. Followers can use independently certified free return corridors while opening remains
-pending; those additional local pair checks remain counted. Other compressed-contact release
-retains the finite affine directions. Common return
-shares scaling along binding/dependent rays and applies the minimum normal compensation needed by
-remaining local constraints; it does not add repeated full-world recovery sweeps. An exhausted
-return direction uses the saved request lifecycle to schedule another local opening, rather than
-permanently freezing a soluble region or allowing deeper penetration. Compatible-return behavior
-and continuation are covered by the [return integration matrix](../../tests/integration/test_hold_recovery_capacity.py)
-and [save/replay cases](../../tests/integration/test_hold_recovery_continuation.py); their functional
+inside complete tick/frame measurements. Both contact sweeps, independently certified follower
+returns and complete displacement-envelope queries also remain measured; excluded projection pairs
+still contribute their evaluated relationships to the counters.
+Compatible-return behavior and continuation are covered by the
+[return integration matrix](../../tests/integration/test_hold_recovery_capacity.py) and
+[save/replay cases](../../tests/integration/test_hold_recovery_continuation.py); their functional
 results are separate from hardware timing acceptance.
-The common-return gradient is generated once, without an additional per-body weak forecast whose
-corrections would be overwritten by the joint result. Both contact sweeps still discover actual
-overlap and forecast real travel/opening intent. With common return alone, discovery uses contact
-neighborhoods; its later complete displacement envelopes and safety checks remain fully measured.
 
 Hardware/timing acceptance runs on the designated native-Windows machine with its renderer and
 environment identified. Record repeated complete runs, including failures; do not auto-retry until
@@ -174,15 +165,10 @@ properties. The sample cadence remains 100 frames per simulated second regardles
 floor, preserving 300 frames, 30 ticks and the original collision/combat/UI work. Offscreen completed
 frames are not a measurement of three seconds of physical monitor output.
 
-Fixed contact sweeps bound prediction rounds, not neighbor count. Active travel keeps contact-sized
-prediction neighborhoods; passive endpoints inspect the full local displacement envelope.
-Recovery only admits compressed or sustained stalled local contact components and extends their
-bounded fringe through a queue that visits each admitted body at most once. Joining a component
-also queues its remaining members, and a region can grow to contain the whole army. This does not
-bound the number of pair candidates per queue visit. Finite transverse opening or affine release
-directions precede continuous certification. Component storage and supporting-plane workspace are
-linear in body count; there is no dense pair matrix. Stable regions skip release and
-stationary-body certificates. Ordinary separated distributions have small local neighborhoods;
+Fixed contact sweeps bound prediction rounds, not neighbor count. The admitted fringe queue visits
+each body at most once, but does not bound the number of pair candidates per visit; a region can
+contain the whole army. Component storage and supporting-plane workspace are linear in body count.
+Ordinary separated distributions have small local neighborhoods;
 dense chains increase those neighborhoods and may need more ticks to clear. Identical centers can
 produce quadratic candidate count, and repeated half-plane solving can be worse than quadratic in
 an extreme dense component. There is no universal linear-time claim,
@@ -194,8 +180,7 @@ internal extraction and continued recovery. These preparations are explicitly in
 from the normal spawn/arrival reproduction. Compare identical seed, commands, duration and timers;
 record first meaningful advance, entire-squad escape/completion, longest stall, overlap pairs/depth
 and spatial distribution, passive displacement/settling, all work counters, tick p95/p99, and
-completed-frame p99/Real FPS. Keep JIT and renderer warm-up separate and preserve complete repeated
-runs, including failures, under ignored `outputs/`. This adds evidence for recovery without changing
+completed-frame p99/Real FPS. This adds evidence for recovery without changing
 any existing 1,000-unit, tick-p95, choke-pair or frame acceptance gate.
 The [recovery timing counterparts](../../tests/performance/test_overlap_recovery_performance.py)
 retain all 1,000 units and 300 ticks for 30% spacing and identical centers, including all movement,

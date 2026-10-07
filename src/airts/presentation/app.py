@@ -56,6 +56,7 @@ from airts.presentation.metrics import PresentationMetrics, PresentationProfiler
 from airts.presentation.opengl_renderer import OpenGLRenderer, OpenGLRendererError
 from airts.presentation.rendering import RendererBackend, SoftwareRenderer
 from airts.simulation import Simulation
+from airts.systems import construction
 from airts.world.entities import Entity
 from airts.world.map import EntityCategory, EntityKind
 
@@ -1570,7 +1571,10 @@ class AirtsApp:
         if self.placement_kind is None:
             return None
         position = Point(float(int(point.x)), float(int(point.y)))
-        valid = self.simulation._validate_building_placement(self.placement_kind, position) is None
+        valid = (
+            construction.validate_building_placement(self.simulation, self.placement_kind, position)
+            is None
+        )
         return position, valid
 
     def _draw_assembly_glows(self, screen: pygame.Surface) -> None:

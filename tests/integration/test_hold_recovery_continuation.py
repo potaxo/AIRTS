@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.integration.test_hold_recovery_capacity import (
-    _advance_weak_checked,
-    _assert_passive_half_steps,
+from tests.integration.recovery_checks import (
+    RecoveryChecks,
     _assert_restored_and_stable,
     _displace_legally,
+    _positions,
     _resting_formation,
 )
-from tests.integration.test_overlap_recovery import _advance_checked, _positions
 
 from airts.adapters.persistence import SAVE_SCHEMA, load_simulation_data
 from airts.adapters.replay import capture_replay, load_replay_data, run_replay
@@ -33,8 +32,9 @@ def test_complete_save_continues_identically_during_both_weak_return_phases(
     # represent it. This case makes no claim of a replayable player operation chain.
     _displace_legally(simulation, ids, selected, Point(1, 0))
     before = _positions(simulation, ids)
+    checks = RecoveryChecks(simulation, ids)
     for _ in range(800):
-        before, _ = _advance_weak_checked(simulation, ids, before)
+        before, _ = checks.advance_weak(before)
         entities = [simulation.entities[key] for key in ids]
         if phase == "opening":
             reached_phase = any(
@@ -59,7 +59,7 @@ def test_complete_save_continues_identically_during_both_weak_return_phases(
     assert restored.export_state() == simulation.export_state()
     assert any(simulation.entities[key].recovery_request_tick is not None for key in ids)
     while simulation.tick < 1_000:
-        before, _ = _advance_weak_checked(simulation, ids, before)
+        before, _ = checks.advance_weak(before)
         restored.advance()
         assert restored.export_state() == simulation.export_state()
     _assert_restored_and_stable(simulation, ids, anchors, "hold")
@@ -96,13 +96,14 @@ def test_normal_command_pressure_and_complete_hold_return_replay_identically() -
     anchors = {key: simulation.entities[key].position for key in passive}
     before = _positions(simulation, ids)
     saw_request = False
+    checks = RecoveryChecks(simulation, ids)
     for destination in (Point(70, 40), Point(20, 40)):
         assert simulation.execute(MoveCommand(selected, destination)).accepted
         accepted = simulation.entities[selected[0]].move_target
         assert accepted is not None
         for _ in range(800):
-            after, metrics = _advance_checked(simulation, ids, before)
-            _assert_passive_half_steps(simulation, ids, passive, before, after)
+            after, metrics = checks.advance(before)
+            checks.assert_passive_half_steps(passive, before, after)
             before = after
             assert metrics[2] <= 1e-7
             saw_request |= any(

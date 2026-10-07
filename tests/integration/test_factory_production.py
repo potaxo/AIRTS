@@ -143,7 +143,6 @@ def test_continuous_factory_production_assigns_units_to_compact_area_defense() -
         entity.position = Point(index + 0.5, 14.5)
         entity.path.clear()
         entity.move_target = None
-        entity.congestion_stopped = False
     field_builds = simulation.navigation_field_build_count
 
     simulation.advance()

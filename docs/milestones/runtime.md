@@ -314,6 +314,17 @@ contact graphs, release geometry, derived leaders, per-tick work diagnostics and
 fields rebuild from authoritative positions and intent. Presentation history is not saved. Mobile
 units may share occupancy cells, while buildings remain exclusive obstacles.
 
+The unfinished-automation query index is derived, rebuilt on load, and updated by lifecycle
+activation and terminal transitions. Live panel membership still reads current members and future
+sources; repeated queries and tick scheduling do not scan terminal history. History remains saved
+and inspectable, and query ordering and tick rotation remain unchanged.
+
+Obsolete congestion-stop flags and blocked-tick counters no longer exist in runtime state.
+For save v11 and replay v10 compatibility, JSON retains `congestion_stopped: false` and
+`blocked_ticks: {}`. Loading supported saves validates these old fields and their references,
+then discards them; an old stop flag cannot suppress repair travel or combat pursuit. Authoritative
+movement progress and recovery fields retain their existing validation and continuation semantics.
+
 v11 requires both recovery request fields explicitly. A request tick is null or a non-boolean
 integer from zero through the saved tick; the released flag is boolean and cannot be true without
 a request. After restoring assignments, the loader requires a movable Hold owner with its original

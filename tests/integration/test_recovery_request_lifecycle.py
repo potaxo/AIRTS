@@ -30,6 +30,7 @@ from airts.contracts.spatial import (
     rectangle_region,
 )
 from airts.simulation import Simulation
+from airts.systems.movement import start_path
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind
 
@@ -108,7 +109,7 @@ def test_weak_defense_route_and_unchanged_station_preserve_the_return_phase() ->
     holder.recovery_released = True
     station = automation.parameters.stations["holder"]
     route = simulation._routes.shared_path(holder.position, station, simulation._building_cells())
-    simulation._start_path(holder, station, route, automation.automation_id, UnitState.DEFENDING)
+    start_path(simulation, holder, station, route, automation.automation_id, UnitState.DEFENDING)
     simulation._assign("holder", automation)
     assert simulation.execute(
         ModifyAutomationCommand(automation.automation_id, title="Retained station", target=target)

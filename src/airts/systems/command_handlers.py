@@ -43,7 +43,13 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, SpatialTarget
 from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
-from airts.systems import automation_execution, movement, production
+from airts.systems import (
+    automation_control,
+    automation_execution,
+    movement,
+    production,
+    spatial_commands,
+)
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind
 
@@ -52,7 +58,9 @@ if TYPE_CHECKING:
 
 
 def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) -> CommandResult:
-    automation, failure = simulation._owned_automation(command.automation_id, command.owner_id)
+    automation, failure = automation_control.owned_automation(
+        simulation, command.automation_id, command.owner_id
+    )
     if failure is not None:
         return simulation._reject_validation("modify_automation", failure)
     assert automation is not None
@@ -146,7 +154,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                         "target",
                     ),
                 )
-            geometry_failure = simulation._validate_geometry(command.target)
+            geometry_failure = spatial_commands.validate_geometry(simulation, command.target)
             if geometry_failure is not None:
                 return simulation._reject_validation("modify_automation", geometry_failure)
             try:
@@ -220,7 +228,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                 entity.defend_arrived = False
                 entity.path.clear()
                 entity.move_target = None
-                simulation._reset_movement_liveness(entity, clear_stop=True)
+                movement.reset_movement_liveness(entity)
             else:
                 simulation.entities[entity_id].clear_recovery_request()
     if command.minimum_units is not None:
@@ -268,11 +276,12 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                 {"target": [command.target.x, command.target.y]},
             ),
         )
-    simulation._manual_override_many(command.entity_ids)
+    automation_control.manual_override_many(simulation, command.entity_ids)
     path_source = "human"
     for entity_id in command.entity_ids:
         simulation.entities[entity_id].pursue_target = False
-        simulation._start_path(
+        movement.start_path(
+            simulation,
             simulation.entities[entity_id],
             destinations[entity_id],
             paths[entity_id],
@@ -306,12 +315,12 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
                 "attack",
                 ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
             )
-    simulation._manual_override_many(command.entity_ids)
+    automation_control.manual_override_many(simulation, command.entity_ids)
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
         entity.path.clear()
         entity.move_target = None
-        simulation._reset_movement_liveness(entity, clear_stop=True)
+        movement.reset_movement_liveness(entity)
         entity.attack_target_id = target.entity_id
         entity.pursue_target = True
         entity.state = UnitState.ATTACKING
@@ -324,7 +333,7 @@ def stop(
     failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("hold_position" if hold else "stop", failure)
-    simulation._manual_override_many(command.entity_ids)
+    automation_control.manual_override_many(simulation, command.entity_ids)
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
         entity.path.clear()
@@ -332,7 +341,7 @@ def stop(
         entity.pursue_target = False
         entity.state = UnitState.HOLDING if hold and entity.is_movable else UnitState.IDLE
         entity.hold_anchor = entity.position if hold and entity.is_movable else None
-        simulation._reset_movement_liveness(entity, clear_stop=True)
+        movement.reset_movement_liveness(entity)
         simulation._movement_blocked.discard(entity_id)
     return simulation._accept("hold_position" if hold else "stop")
 
@@ -383,7 +392,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
     )
     if failure is not None:
         return simulation._reject_validation("create_defend", failure)
-    geometry_failure = simulation._validate_geometry(command.target)
+    geometry_failure = spatial_commands.validate_geometry(simulation, command.target)
     if geometry_failure is not None:
         return simulation._reject_validation("create_defend", geometry_failure)
     try:
@@ -534,14 +543,7 @@ def create_repair(simulation: Simulation, command: CreateRepairAndReturnCommand)
                 {"health_threshold": command.health_threshold},
             ),
         )
-    failure = validate_automation_common(
-        simulation,
-        eligible_ids,
-        command.owner_id,
-        command.priority,
-        command.title,
-        require_movable=True,
-    )
+    failure = validate_automation_metadata(command.priority, command.title)
     if failure is not None:
         return simulation._reject_validation("create_repair_and_return", failure)
     destinations: dict[str, str] = {}
@@ -636,12 +638,16 @@ def validate_automation_common(
     *,
     require_movable: bool,
 ) -> ValidationFailure | None:
+    failure = validate_automation_metadata(priority, title)
+    if failure is not None:
+        return failure
+    return validate_entities(simulation, entity_ids, owner_id, require_movable=require_movable)
+
+
+def validate_automation_metadata(priority: int, title: str) -> ValidationFailure | None:
     if not title.strip():
         return ValidationFailure(ValidationPhase.SCHEMA, "EMPTY_TITLE", "title")
-    priority_failure = validate_priority(priority)
-    if priority_failure is not None:
-        return priority_failure
-    return validate_entities(simulation, entity_ids, owner_id, require_movable=require_movable)
+    return validate_priority(priority)
 
 
 def validate_entities(
