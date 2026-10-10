@@ -78,10 +78,24 @@ class EntityKind(StrEnum):
     REPAIR_HUB = "repair_hub"
     COMMAND_CENTER = "command_center"
     RESOURCE_GENERATOR = "resource_generator"
+    RESOURCE_EXTRACTOR = "resource_generator"  # Preserve existing map/save/command tags.
 
     @property
     def profile(self) -> EntityProfile:
         return _ENTITY_PROFILES[self]
+
+    @property
+    def production_kinds(self) -> tuple[EntityKind, ...]:
+        if self is EntityKind.FACTORY:
+            return (
+                EntityKind.SCOUT,
+                EntityKind.LIGHT_TANK,
+                EntityKind.HEAVY_TANK,
+                EntityKind.BUILDER,
+            )
+        if self is EntityKind.COMMAND_CENTER:
+            return (EntityKind.BUILDER,)
+        return ()
 
     @property
     def movement_speed(self) -> float:
@@ -132,6 +146,18 @@ class EntitySpec:
         return footprint_cells(self.kind, self.position)
 
 
+@dataclass(frozen=True, slots=True)
+class MatchSlot:
+    """An immutable starting owner, controller and alliance."""
+
+    owner_id: str
+    controller: str
+    team: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {"owner": self.owner_id, "controller": self.controller, "team": self.team}
+
+
 def footprint_cells(kind: EntityKind, position: Point) -> frozenset[Cell]:
     """Return the profile's occupied grid cells at a continuous position."""
 
@@ -155,6 +181,8 @@ class GameMap:
     height: int
     terrain: tuple[tuple[Terrain, ...], ...]
     entities: tuple[EntitySpec, ...]
+    resource_sites: tuple[Point, ...] | None = None
+    match_slots: tuple[MatchSlot, ...] = ()
 
     def contains(self, point: Point) -> bool:
         return 0 <= point.x < self.width and 0 <= point.y < self.height
@@ -182,7 +210,7 @@ class GameMap:
         return self.contains_cell(cell) and self.terrain_at_cell(cell).passable
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "id": self.map_id,
             "version": self.map_version,
             "name": self.display_name,
@@ -199,6 +227,11 @@ class GameMap:
                 for spec in self.entities
             ],
         }
+        if self.resource_sites is not None:
+            result["resource_sites"] = [[point.x, point.y] for point in self.resource_sites]
+        if self.match_slots:
+            result["match_slots"] = [slot.to_dict() for slot in self.match_slots]
+        return result
 
 
 def load_map(path: str | Path) -> GameMap:
@@ -271,6 +304,52 @@ def load_map_data(raw_data: object) -> GameMap:
 
     if not specs:
         raise MapValidationError("a playable map requires at least one entity")
+    sites: list[Point] | None = None
+    if "resource_sites" in data:
+        sites = []
+        site_cells: set[Cell] = set()
+        for raw_site in _list(data["resource_sites"], "resource_sites"):
+            coordinates = _list(raw_site, "resource site")
+            if len(coordinates) != 2:
+                raise MapValidationError("resource site requires two coordinates")
+            point = Point(*(_number(value, "resource coordinate") for value in coordinates))
+            if not point.x.is_integer() or not point.y.is_integer():
+                raise MapValidationError("resource sites must be grid-aligned")
+            cells = footprint_cells(EntityKind.RESOURCE_GENERATOR, point)
+            if (
+                any(
+                    not (0 <= x < width and 0 <= y < height) or not rows[y][x].passable
+                    for x, y in cells
+                )
+                or cells & site_cells
+            ):
+                raise MapValidationError("resource sites must be passable, disjoint and in bounds")
+            site_cells.update(cells)
+            sites.append(point)
+        if any(
+            spec.kind is EntityKind.RESOURCE_GENERATOR and spec.position not in sites
+            for spec in specs
+        ):
+            raise MapValidationError("extractor must occupy a resource site")
+    slots: list[MatchSlot] = []
+    for raw_slot in _list(data.get("match_slots", []), "match_slots"):
+        slot = _mapping(raw_slot, "match slot")
+        owner = _string(slot.get("owner"), "slot.owner")
+        controller = _string(slot.get("controller"), "slot.controller")
+        team = _integer(slot.get("team"), "slot.team")
+        if controller not in {"player", "ai"} or team not in range(1, 5):
+            raise MapValidationError("invalid match controller or team")
+        if owner in {item.owner_id for item in slots}:
+            raise MapValidationError("duplicate match owner")
+        if (controller == "player") != (owner == "player"):
+            raise MapValidationError("the human controller must own player")
+        slots.append(MatchSlot(owner, controller, team))
+    if slots and (
+        sum(slot.controller == "player" for slot in slots) != 1
+        or len({slot.team for slot in slots}) < 2
+        or {spec.owner_id for spec in specs} != {slot.owner_id for slot in slots}
+    ):
+        raise MapValidationError("match requires one human, opposing teams and matching owners")
     return GameMap(
         map_id=map_id,
         map_version=map_version,
@@ -279,6 +358,8 @@ def load_map_data(raw_data: object) -> GameMap:
         height=height,
         terrain=tuple(tuple(row) for row in rows),
         entities=tuple(specs),
+        resource_sites=None if sites is None else tuple(sites),
+        match_slots=tuple(slots),
     )
 
 

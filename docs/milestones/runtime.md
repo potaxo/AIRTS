@@ -50,20 +50,42 @@ and patrol/defend dispatch.
 
 Static routing uses reverse Dijkstra fields over four-neighbor weighted terrain. A bounded LRU cache
 shares each destination field across units; changing building obstacles changes the cache key.
-Group orders preserve physically compatible translated positions, fitting the group inside map
-edges. When terrain, buildings, or overlapping source geometry prevent that placement, they allocate
-reachable separated destination slots using the existing group planner. An already compressed
-selection cannot become a set of mutually overlapping final goals. Ordinary mobile units
+Fields expand only until the requested starting cell is settled and retain their indexed-heap
+frontier for later requests. Strict relaxation, cost/index ties and neighbor order are unchanged;
+request order, cache eviction and load cannot change routes. Immutable cell centers are shared
+across extracted paths to reduce allocations. Gathering uses compiled connected-component masks
+and preserves the same nearest-anchor and station ordering. Combat checks its existing direct
+approach before requesting a field; its chosen path and route allowance are unchanged.
+Attackers sharing a target and range reuse its firing ring within the same combat pass;
+positions do not change during that pass, and the snapshot never survives into another tick.
+Direct move commands default to preserving the current formation for every army size; an explicit
+`gathering` flag instead allocates separated reachable slots around the destination. Missing flags
+in saved command histories and v10 replays retain the default behavior. Existing movement state and
+replay trajectories remain compatible, so no save/replay schema migration is needed.
+Direct gathering searches expanding circles for the same nearest-slot prefix as the complete
+planner, reuses connected reachability, and constructs static clearance obstacles once per
+allocation. Partial slot lists do not enter the full formation cache. Friendly entity hits take
+precedence over nearby enemies' generous click areas; single and double enemy hits still attack.
+Formation-preserving group orders preserve physically compatible translated positions, fitting
+the group inside map edges. When terrain, buildings, or overlapping source geometry prevent that
+placement, they allocate reachable separated destination slots using the existing group planner.
+An already compressed selection cannot become a set of mutually overlapping final goals. Ordinary mobile units
 remain local collision obstacles, so an occupied destination can wait for them to move. Groups share
 an approach route and branch through clear terrain to their destinations.
+Movement batches its sixteen-waypoint visibility checks into one serial compiled pass, preserving
+the farthest-first choice and exact terrain/corner rules. Starts or goals embedded in a building
+retain their original per-unit exception mask.
 Movement shortens visible route segments and submits all actual displacement through the local
 contact controller described below. The front key within each processing group uses the current
 waypoint direction through turns and merges. Group priority still alternates each tick, with stable
 IDs resolving ties. Opposing groups prefer a common passing side. Sustained stalls trigger budgeted
 replanning; a blocked order stays queued.
-Numeric movement, lookahead, and exact visibility unions run in serial compiled CPU loops without
-fastmath or parallel reductions. Compilation happens during simulation construction; compilation
-errors propagate. Numeric buffers and navigation caches rebuild after load and do not enter saves.
+Numeric movement, reverse Dijkstra fields, lookahead, and exact visibility unions run in serial compiled CPU loops without
+fastmath or parallel reductions. Simulation construction compiles kernels or loads their Numba
+disk cache; compilation/cache errors propagate. Numeric buffers and navigation caches rebuild
+after load and do not enter saves.
+Compiled routing retains the same cost/index ties, neighbor order and route-request budgets;
+its warm-up occurs during simulation construction, never on the first movement click.
 
 Line defenses spread along the line. Area defenses use separated stations, expanding small gathering
 areas into hexagonal slots with a unit-width aisle between neighbors. This deliberately replaces
@@ -261,16 +283,32 @@ to the previous position. Low health alone does not replace the current automati
 
 ## Economy, production, and construction
 
+In the default skirmish, resource generators are replaced by resource extractors. Their historical
+`resource_generator` map/command/save tag is retained (`RESOURCE_EXTRACTOR` is an enum alias).
+Maps with `resource_sites` restrict extractor placement to an exact site's grid origin through
+the shared construction validator. One real building, including unfinished construction, occupies a site; a
+destroyed extractor frees it for either side. Income is unlimited and equal across sites.
+The original example and custom maps without sites retain sandbox placement and income behavior.
+[skirmish.py](../../src/airts/world/skirmish.py) owns the new fixed map geometry.
+
 Each owner has an integer resource balance. Generators add periodic income even without an
 automation; [economy.py](../../src/airts/systems/economy.py) owns the amount and interval.
-An economy automation tracks an owner-balance target; it does not enable or accelerate income.
+Only completed extractors earn income. There is no resource-production action or economy hotkey
+in the UI. The historical economy command remains a balance-target tracker for existing callers
+and supported saves; it does not enable or accelerate income.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
 disables ambient spawning by default; [README](../../README.md#run) owns CLI defaults and controls.
 
-Factories produce scouts, light/heavy tanks, and builders through one paid production path;
+Factories produce scouts, light/heavy tanks, and builders; completed command centers produce
+only builders through the same paid production path. The existing `factory_id` field identifies
+either production source, preserving command and parameter tags;
 [simulation.py](../../src/airts/simulation.py) owns default build timing and construction progress.
-Finite staged quantities run FIFO; finite work preempts the continuous loop, which resumes
-afterward. A newer loop replaces the previous unfinished loop without discarding finite requests.
+Finite requests run FIFO; finite work preempts the continuous loop, which resumes afterward.
+`ReduceProductionCommand` removes one unfinished unit of the requested kind from the newest
+matching finite request, including saved batch sequences. It preserves other items and their
+progress, cancels an exhausted request, and advances the source queue immediately. Canceling
+the current paid unit discards its progress without refund; continuous loops are unaffected.
+A newer loop replaces the previous unfinished loop without discarding finite requests.
 No spawn space/resources means waiting; source destruction fails the job. IDs are deterministic.
 Factory and ambient spawn candidates check actual disc capacity against local authoritative units,
 including adjacent occupancy cells and mixed radii. Empty cells alone do not establish clearance;
@@ -285,25 +323,92 @@ line. Factories remain independent owners of costs, queues, and progress.
 
 Builders construct factories, repair hubs, and generators, not command centers. Entity profiles
 own costs, build speeds, and build ranges. Placement validates capability, ownership, bounds,
-terrain, footprints, and reservations. One job charges once; each assigned builder contributes
+terrain and real building footprints. Remote orders are owner-only blueprints: they do not occupy
+space, reserve resource sites, block movement or become combat targets. Blueprints may overlap.
+Builders travel even without funds, then wait in range for money or mobile occupants to leave.
+Placement is revalidated on arrival; a blueprint covered by a real building fails and the queue
+continues. Only when work starts does a job charge once and publish an unfinished building into
+authoritative occupancy. Each assigned builder contributes
 only within its build range of the footprint and outside it. Builders route to the perimeter first.
-Multiple builders accelerate one job without duplicating cost or the building.
+Multiple builders accelerate one job without duplicating cost or the building. Unfinished
+buildings are visible and attackable, block movement, and cannot produce income/units or repair.
+Their health grows with work while retaining accumulated damage. Destruction fails the associated
+job and releases builders to the next order. Canceling work or losing every builder leaves the
+physical scaffold; reissuing construction at an unclaimed friendly scaffold resumes progress
+without another charge. Such scaffolds count as surviving assets but not productive factories.
 
-Shift-placement appends FIFO jobs and keeps placement active. Waiting jobs reserve footprints,
-not resources or builders; activation claims available builders and charges once. Ordinary placement
+Shift-placement appends FIFO jobs and keeps placement active. Waiting blueprints reserve neither
+space, resources nor builders; activation claims the surviving builders. A repair interruption
+retains the construction assignment for return. Ordinary placement
 replaces pending jobs for those builders only after validation, including control claims, succeeds.
 Rejected placement preserves accepted queues. Right-click closes placement without issuing movement or
-altering accepted work. A completed occupied site waits with `SITE_OCCUPIED`; commit occupancy before
-publishing a building. Queue, progress, resource, and assignment state survive save/replay.
+altering accepted work. An unstarted occupied site waits with `SITE_OCCUPIED`; commit occupancy before
+publishing the scaffold. Queue, progress, damage, resource, and assignment state survive save/replay.
 
 ## Persistence and presentation
+
+### Skirmish configuration and results
+
+The opening cover leads to four-slot configuration: one human player, AI or closed slots, and
+teams 1 through 4, with at least two opposing teams. Closed slots retain terrain and resource
+sites but have no starting assets. The immutable map `match_slots` owns controller/team settings;
+no in-match alliance changes, asset gifting, or revival are implemented. Units and buildings are
+visible without a fog overlay; all resource sites are public. Allies cannot acquire one another
+as combat/defense targets, and explicit allied attack commands are rejected. Physical collision
+is unchanged. Each active slot starts with a command center, factory, extractor, builder, scout
+and funds. Exact opening funds and income remain in their code owners.
+
+The deterministic CPU-only AI in [opponent_ai.py](../../src/airts/systems/opponent_ai.py)
+replaces the previous produce-and-attack policy through the shared validated command dispatcher.
+It keeps a small home reserve and persistent squads: gathering, advancing, attacking, retreating
+and defending. Squads wait for most members to assemble, select valuable targets with affordable
+local resistance, maintain pursuit orders, retreat from unfavorable fights and regroup before
+another attack. A small raid uses the reserve; a larger raid recalls the closest capable squad.
+Severely wounded units use the existing repair-and-return automation.
+
+Combat estimates combine current health, damage and range; close estimates add twelve aggregate
+exchanges with approach delays. This is a heuristic forecast, without collision, individual focus
+fire, terrain routing or reinforcement prediction. Knowledge uses the existing fully visible
+world. Economic decisions avoid enemy-controlled construction sites, replace lost builders and
+factories, recover income before an unaffordable factory, expand extraction and add factories or
+repair facilities when affordable. Production combines light tanks, scouts and heavy tanks.
+Unpaid construction and needed expensive units reserve funds by pausing the AI's continuous
+production; only AI budget pauses are resumed automatically. Manual pauses remain respected.
+
+Owners make decisions every ten ticks with staggered slots; economy runs every twenty ticks.
+Each decision updates at most two combat squads of up to 32 units, evaluates at most four attack
+candidates per squad and attempts at most three commands. Placement examines at most 64 candidates.
+Movement and combat use the existing core budgets. Decisions derive from ticks and authoritative
+state; generated commands are not external inputs and are regenerated exactly once during replay.
+Ambient enemy generation is disallowed in team matches.
+
+An owner with no completed factory, command center, or builder is eliminated but retains control of remaining
+assets. Missing funds, paused production and blocked exits do not eliminate a completed
+production source; unfinished buildings do not qualify. An owner without any surviving unit/building is out. Existing
+construction fails when all builders are lost; blueprints are not surviving assets, while real
+unfinished buildings remain assets.
+Results are evaluated once after each complete simulation tick. A sole team with any production-
+capable member wins immediately, regardless of enemy residual armies. No viable teams means a
+draw. A recorded result stops simulation advancement and is displayed with an option to return
+to opening configuration. A command center keeps its owner viable because it can produce a builder.
+
+Team matches use `airts-match-save-v4` and `airts-match-replay-v4`, carrying site/controller/team
+map data, results, physical construction and opponent memory. Squad membership, phases, targets,
+destinations, command/retry ticks and budget pauses are authoritative and validated on load.
+Match saves v1/v2 migrate with empty opponent memory; surviving units regroup under the new policy
+on its next decision. Saves v3 retain opponent memory. Saves v1-v3 first validate their recorded
+result under the old factory/builder rule, then recompute it with command-center production; an
+older concluded match can resume if a surviving command center makes both teams viable. Existing
+event history remains intact. Match replays v1-v3 require their original AIRTS version and are
+explicitly rejected because older opponent or elimination rules can change their outcome. Sandbox
+save/replay schemas are unchanged. New save continuation and replay share the same decisions.
 
 [persistence.py](../../src/airts/adapters/persistence.py) and
 [replay.py](../../src/airts/adapters/replay.py) own versioned JSON schemas and rejection of malformed
 or incompatible input. Saves preserve complete authoritative state, selections, queues, combat,
 movement progress, events, and counters; replay compares the final `snapshot()` and ordered events
 against recorded expectations, rather than comparing the full `export_state()` representation.
-Saves use v11 without traffic reservations. Anchors, internal recovery waypoints/retry tick,
+Sandbox saves use v12 without traffic reservations. Anchors, internal recovery waypoints/retry tick,
 contact quiet timers, failed static-route obstacle snapshots and established-defense arrival state
 are authoritative: losing them can change later movement or consume different route budgets.
 The first weak-return request tick and its released phase also affect subsequent coordination and
@@ -320,7 +425,7 @@ sources; repeated queries and tick scheduling do not scan terminal history. Hist
 and inspectable, and query ordering and tick rotation remain unchanged.
 
 Obsolete congestion-stop flags and blocked-tick counters no longer exist in runtime state.
-For save v11 and replay v10 compatibility, JSON retains `congestion_stopped: false` and
+JSON retains `congestion_stopped: false` and
 `blocked_ticks: {}`. Loading supported saves validates these old fields and their references,
 then discards them; an old stop flag cannot suppress repair travel or combat pursuit. Authoritative
 movement progress and recovery fields retain their existing validation and continuation semantics.
@@ -334,27 +439,46 @@ Pathless Hold progress must match its saved anchor and carry a request; ordinary
 still matches the next path waypoint. Malformed owner/progress state is rejected rather than
 normalized into a different intent.
 
-The loader supports v7 through v10 saves. v7/v8/v9 holders use their recorded body position as the
+The loader supports v7 through v11 sandbox saves and v1 match saves. Existing entities migrate as
+complete; historical construction preserves paid cost and work, then creates its physical scaffold
+when a builder arrives at an unoccupied site. This migration follows the corrected behavior rather
+than promising the previous trajectories. New saves explicitly require entity construction progress
+and construction-site references, validating owner, kind, position, payment and live-job progress.
+v7/v8/v9 holders use their recorded body position as the
 migration anchor; those files never recorded the original anchor, so it cannot be recovered.
 Their contact recovery state starts fresh. v10 preserves recorded anchors, contact recovery and
 defense arrival state. All four older versions initialize the new request tick/released phase to
 null/false; their progress retains the previous path semantics. v7/v8 traffic reservations are
 validated and discarded and their obsolete congestion/progress state is reset. Saving again writes
-v11; other older save schemas remain unsupported. Migration continues under the corrected behavior
+v12 (or match v2); other older save schemas remain unsupported. Migration continues under the corrected behavior
 and does not promise the previous implementation's future trajectories.
 
-Replays use v10 and explicitly reject earlier schemas, including published v9: their expected
-trajectories/events belong to the previous movement/spawn behavior. There is no automatic replay
+Replays use v11 (or match v2) and explicitly reject earlier schemas: their expected
+trajectories/events belong to the previous construction/movement behavior. There is no automatic replay
 migration. New replay verification still compares snapshot and ordered events; save continuation
 tests additionally compare complete exported authoritative state.
 
 [events.py](../../src/airts/contracts/events.py) provides ordered, filterable events and JSON Lines export.
 
-The UI has status/scrollable automation, pannable canvas, and selection/action rails. It displays
+The UI has status/scrollable automation, pannable canvas, and selection/action rails. The automation
+list, linked-work grouping, inspection and scroll bounds include only the human owner's work;
+enemy and allied AI work remains authoritative but does not appear in this management panel.
+Held camera keys move smoothly using presentation elapsed time, independently of simulation pause.
+Release or focus loss stops motion; naming and modal UI suppress it. Panning and zooming keep the
+viewport within the map; dimensions smaller than the viewport remain centered. It displays
 valid controls for the selected kind and selected count. Double-click selects visible friendlies
 of one kind; Escape clears selection/placement/inspection. Same-kind actions broadcast ordinary
 commands to the compatible selection. Linked production/area defense share a management item;
-scrollbars clamp/backfill when work disappears. Placement previews validity and job progress.
+production, construction, and other unit automations have separate category tabs. Each automation
+uses one row containing its name, pause/resume, cancel, and details controls; details appear on
+demand in the right sidebar. Selection health, kinds and controls also belong to the right sidebar.
+Production rows contain a unit inspection target and plus/minus/Loop controls: plus submits one
+unit immediately per selected source, minus reduces unfinished finite orders, and inspection
+shows attributes and cost without ordering a unit. There is no staged/start-queue UI; the batch
+command and saved queues remain supported. Scrollbars clamp/backfill when work disappears.
+Pause freezes presentation-driven simulation advancement while camera and controls remain usable;
+it is local presentation state and does not alter save/replay state. Placement previews validity
+and job progress.
 Settings owns save/load/reset, resolution, and timing. UI loading clears presentation selection
 and inspection even though the persistence adapter restores the saved domain selection.
 [README](../../README.md#controls) owns keys and [CLI limitations](../../README.md#run).

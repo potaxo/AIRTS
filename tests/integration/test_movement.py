@@ -78,6 +78,100 @@ def test_move_preserves_existing_physically_legal_translated_layout() -> None:
     assert simulation.entities["heavy"].move_target == Point(17.5, 8.5)
 
 
+@pytest.mark.parametrize("unit_count", [1, 3, 120])
+@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
+def test_move_formation_mode_is_independent_of_army_size(unit_count: int, gathering: bool) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "explicit_move_formation",
+                "name": "Explicit move formation",
+                "width": 96,
+                "height": 64,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"unit_{index:03d}",
+                        "kind": "scout",
+                        "position": [3.5 + index % 12 * 3, 3.5 + index // 12 * 3],
+                    }
+                    for index in range(unit_count)
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    positions = {key: simulation.entities[key].position for key in ids}
+    center = Point(
+        sum(point.x for point in positions.values()) / unit_count,
+        sum(point.y for point in positions.values()) / unit_count,
+    )
+    target = Point(60.5, 35.5)
+    assert simulation.execute(MoveCommand(ids, target, gathering=gathering)).accepted
+    goals = []
+    for key in ids:
+        goal = simulation.entities[key].move_target
+        assert goal is not None
+        goals.append(goal)
+        if not gathering:
+            assert goal == Point(
+                positions[key].x + target.x - center.x,
+                positions[key].y + target.y - center.y,
+            )
+    if gathering and unit_count > 1:
+        assert max(goal.distance_to(target) for goal in goals) < max(
+            point.distance_to(center) for point in positions.values()
+        )
+        for index, goal in enumerate(goals):
+            assert all(goal.distance_to(other) >= 0.6 - 1e-8 for other in goals[index + 1 :])
+    if unit_count <= 3:
+        _advance_with_clearance(simulation, 250)
+        for key, goal in zip(ids, goals, strict=True):
+            entity = simulation.entities[key]
+            assert entity.move_target is None
+            # Arrived idle bodies can yield to companions finishing their approach.
+            assert entity.position.distance_to(goal) <= collision_radius(entity.kind) + 1e-8
+
+
+@pytest.mark.parametrize("count", [1, 4, 120, 2000])
+@pytest.mark.parametrize(
+    "target", [Point(0.1, 0.1), Point(10, 10), Point(24, 12)], ids=["edge", "building", "wall"]
+)
+def test_bounded_gathering_matches_complete_slots_and_reports_capacity(
+    count: int, target: Point
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "bounded_gathering",
+                "name": "Bounded gathering",
+                "width": 48,
+                "height": 24,
+                "terrain": {"default": "grass", "rectangles": [[24, 0, 1, 24, "rock"]]},
+                "entities": [{"id": "factory", "kind": "factory", "position": [10, 10]}],
+            }
+        )
+    )
+    spatial_target = PointTarget(target)
+    local = simulation._gathering_slots(
+        spatial_target, count, 0.3, require_count=False, bounded=True
+    )
+    complete = simulation._gathering_slots(spatial_target, count, 0.3, require_count=False)
+    assert local == complete
+    if len(local) < count:
+        with pytest.raises(ValueError, match="insufficient map space"):
+            simulation._gathering_slots(spatial_target, count, 0.3, bounded=True)
+    # A different center in the same component can share reachability; it must not
+    # retain a separate map-sized copy on every right click.
+    next_target = PointTarget(Point(target.x + 0.1, target.y + 0.1))
+    simulation._gathering_slots(next_target, 1, 0.3, bounded=True)
+    if target != Point(24, 12):
+        assert (
+            simulation._gathering_reachable_cache[next_target]
+            is simulation._gathering_reachable_cache[spatial_target]
+        )
+
+
 def _advance_with_clearance(simulation: Simulation, ticks: int = 1) -> None:
     """Check actual trajectories, total speed, static clearance and submitted occupancy."""
     units = [entity for entity in simulation.entities.values() if entity.is_movable]

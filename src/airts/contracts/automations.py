@@ -161,6 +161,15 @@ class ProductionParameters:
     def current_unit_kind(self) -> EntityKind:
         return self.sequence[self.sequence_index][0] if self.sequence else self.unit_kind
 
+    def remaining_count(self, kind: EntityKind) -> int:
+        if self.sequence:
+            return sum(
+                quantity - (self.sequence_produced if index == self.sequence_index else 0)
+                for index, (unit_kind, quantity) in enumerate(self.sequence)
+                if index >= self.sequence_index and unit_kind is kind
+            )
+        return self.target_count - self.produced_count if self.unit_kind is kind else 0
+
 
 @dataclass(slots=True)
 class ConstructionParameters:
@@ -172,6 +181,7 @@ class ConstructionParameters:
     cost_paid: bool = False
     constructed_entity_id: str | None = None
     builder_ids: list[str] = field(default_factory=list)
+    site_entity_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -182,6 +192,7 @@ class ConstructionParameters:
             "construction_value": self.construction_value,
             "cost_paid": self.cost_paid,
             "constructed_entity_id": self.constructed_entity_id,
+            "site_entity_id": self.site_entity_id,
             "builder_ids": list(self.builder_ids),
         }
 

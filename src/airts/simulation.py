@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Iterable
 from gc import collect as collect_garbage
 from math import ceil, floor, sqrt
@@ -12,6 +11,7 @@ from airts.contracts.automations import (
     AutomationKind,
     AutomationParameters,
     AutomationStatus,
+    ConstructionParameters,
     assign_formation_slots,
     target_center,
 )
@@ -39,6 +39,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    ReduceProductionCommand,
     RemoveEntityCommand,
     RenameRegionCommand,
     ResumeAutomationCommand,
@@ -63,6 +64,7 @@ from airts.systems import (
     automation_control,
     automation_execution,
     command_handlers,
+    opponent_ai,
     spatial_commands,
 )
 from airts.systems import combat as combat_system
@@ -70,13 +72,17 @@ from airts.systems import construction as construction_system
 from airts.systems import economy as economy_system
 from airts.systems import movement as movement_system
 from airts.systems import production as production_system
+from airts.systems import skirmish as skirmish_system
+from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
 from airts.world.map import Cell, EntityCategory, EntityKind, GameMap, OccupancyGrid
+from airts.world.opponents import OpponentState
 from airts.world.visibility import VisibilitySystem
 
 
 class Simulation:
     LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
+    LARGE_SCENE_GC_CELL_THRESHOLD = 256 * 256
     TICKS_PER_SECOND = 10
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
     NO_PROGRESS_YIELD_TICKS = 30
@@ -110,12 +116,18 @@ class Simulation:
             raise ValueError("enemy_spawn_interval_ticks must be positive")
         if enemy_spawn_cap < 0:
             raise ValueError("enemy_spawn_cap cannot be negative")
-        if len(game_map.entities) >= self.LARGE_SCENE_GC_ENTITY_THRESHOLD:
-            # Starting a large match is a natural non-frame boundary.  Drain cycles retained by a
-            # previous scenario here so an unrelated generation-2 collection cannot become a live
-            # simulation or presentation p99 stall several ticks later.
-            collect_garbage()
         self.game_map = game_map
+        if game_map.match_slots and ambient_enemy_spawns:
+            raise ValueError("ambient enemy spawning is unavailable in team matches")
+        self.match_result: int | None = None
+        self.opponents = {
+            slot.owner_id: OpponentState()
+            for slot in game_map.match_slots
+            if slot.controller == "ai"
+        }
+        self._opponent_command_count = 0
+        self._opponent_candidate_count = 0
+        self._opponent_forecast_count = 0
         self._terrain_obstacles = frozenset(
             (x, y)
             for y, row in enumerate(game_map.terrain)
@@ -147,7 +159,8 @@ class Simulation:
         self.events = EventLog()
         self.visibility = VisibilitySystem(game_map)
         self.resources = {
-            owner_id: 500 for owner_id in {entity.owner_id for entity in self.entities.values()}
+            owner_id: (1000 if game_map.match_slots else 500)
+            for owner_id in {entity.owner_id for entity in self.entities.values()}
         }
         self.spatial = SpatialStore()
         self.selection = GroundingSelection()
@@ -172,10 +185,18 @@ class Simulation:
             combat_budget=self.COMBAT_PATH_BUDGET,
         )
         self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
-        self._gathering_reachable_cache: dict[SpatialTarget, frozenset[Cell]] = {}
+        self._gathering_reachable_cache: dict[SpatialTarget, BoolArray] = {}
         warm_collision_kernel()
         warm_spatial_index()
         self._update_visibility()
+        if (
+            len(game_map.entities) >= self.LARGE_SCENE_GC_ENTITY_THRESHOLD
+            or game_map.width * game_map.height >= self.LARGE_SCENE_GC_CELL_THRESHOLD
+        ):
+            # Drain previous-scene and JIT initialization cycles at the non-frame
+            # startup boundary, including large maps with a small opening army.
+            # Normal automatic collection remains enabled throughout the match.
+            collect_garbage()
 
     @property
     def command_history(self) -> tuple[dict[str, object], ...]:
@@ -275,7 +296,23 @@ class Simulation:
         return self._movement_replan_count
 
     def execute(self, command: Command) -> CommandResult:
-        self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
+        return self._execute_command(command, record=True)
+
+    def are_hostile(self, first_owner: str, second_owner: str) -> bool:
+        if first_owner == second_owner:
+            return False
+        if not self.game_map.match_slots:
+            return True
+        teams = {slot.owner_id: slot.team for slot in self.game_map.match_slots}
+        return not (
+            first_owner in teams
+            and second_owner in teams
+            and teams[first_owner] == teams[second_owner]
+        )
+
+    def _execute_command(self, command: Command, *, record: bool) -> CommandResult:
+        if record:
+            self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
         if isinstance(command, CreateSpatialReferenceCommand):
             return spatial_commands.create_spatial_reference(self, command)
         if isinstance(command, EditSpatialReferenceCommand):
@@ -306,6 +343,8 @@ class Simulation:
             return production_system.create_production(self, command)
         if isinstance(command, CreateProductionBatchCommand):
             return production_system.create_production_batch(self, command)
+        if isinstance(command, ReduceProductionCommand):
+            return production_system.reduce_production(self, command)
         if isinstance(command, CreateConstructionCommand):
             return construction_system.create_construction(self, command)
         if isinstance(command, CreateReinforcementCommand):
@@ -324,6 +363,8 @@ class Simulation:
         if ticks < 0:
             raise ValueError("tick count cannot be negative")
         for _ in range(ticks):
+            if self.game_map.match_slots and self.match_result is not None:
+                break
             self.tick += 1
             self._routes.begin_tick()
             self._movement_step_attempt_count = 0
@@ -333,15 +374,23 @@ class Simulation:
             self._contact_coordination_work = 0
             self._contact_blocked_component_count = 0
             self._movement_replan_count = 0
+            self._opponent_command_count = 0
+            self._opponent_candidate_count = 0
+            self._opponent_forecast_count = 0
             economy_system.generate_income(self)
             economy_system.spawn_ambient_enemy(self)
+            if self.game_map.match_slots:
+                opponent_ai.drive_opponents(self)
             self._drive_automations()
             movement_system.move_entities(self)
             combat_system.drive_projectiles(self)
             combat_system.drive_combat(self)
             self._update_visibility()
+            if self.game_map.match_slots:
+                self.match_result = skirmish_system.evaluate_result(self)
 
     def _drive_automations(self) -> None:
+        construction_system.start_next_construction(self)
         automation_ids = sorted(
             automation.automation_id
             for automation in self._live_automation_candidates
@@ -356,6 +405,8 @@ class Simulation:
         entity_count = len(self.entities)
         for automation_id in automation_ids:
             automation = self.automations[automation_id]
+            if automation.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
+                continue
             if automation.kind is AutomationKind.PATROL:
                 automation_execution.drive_patrol(self, automation)
             elif automation.kind is AutomationKind.DEFEND:
@@ -408,6 +459,14 @@ class Simulation:
             automation_control.handle_automation_without_entities(self, suspended)
         for automation in tuple(self.automations.values()):
             if (
+                automation.kind is AutomationKind.CONSTRUCTION
+                and not automation.status.terminal
+                and isinstance(automation.parameters, ConstructionParameters)
+                and automation.parameters.site_entity_id == entity_id
+            ):
+                self._transition(automation, AutomationStatus.FAILED, "CONSTRUCTION_DESTROYED")
+                self._release_automation(automation)
+            elif (
                 automation.kind is AutomationKind.PRODUCTION
                 and not automation.status.terminal
                 and _production_parameters(automation).factory_id == entity_id
@@ -423,6 +482,8 @@ class Simulation:
                     self._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
         self.occupancy.remove(entity_id)
         del self.entities[entity_id]
+        for opponent in self.opponents.values():
+            opponent.remove_entity(entity_id)
         if removed_entity.category is EntityCategory.BUILDING:
             self._invalidate_navigation_cache()
         if entity_id in self.selection.entity_ids:
@@ -448,7 +509,7 @@ class Simulation:
             automation_id=None,
             reason=command.reason,
         )
-        if removed_entity.kind is EntityKind.BUILDER:
+        if removed_entity.kind is EntityKind.BUILDER or not removed_entity.is_complete:
             construction_system.start_next_construction(self)
         return self._accept("remove_entity")
 
@@ -461,7 +522,16 @@ class Simulation:
     def _domain_state(self) -> dict[str, object]:
         """Serialize the authoritative fields shared by snapshots and complete saves."""
 
-        return {
+        return (
+            {
+                "match_result": self.match_result,
+                "opponents": {
+                    owner: opponent.to_dict() for owner, opponent in sorted(self.opponents.items())
+                },
+            }
+            if self.game_map.match_slots
+            else {}
+        ) | {
             "tick": self.tick,
             "random_seed": self.random_seed,
             "ambient_enemy_spawns": self.ambient_enemy_spawns,
@@ -505,73 +575,78 @@ class Simulation:
         self._gathering_reachable_cache.clear()
 
     def _allocate_destinations(
-        self, entity_ids: tuple[str, ...], target: Point
+        self, entity_ids: tuple[str, ...], target: Point, *, gathering: bool = False
     ) -> dict[str, Point]:
         blocked = self._building_cells()
-        center = Point(
-            sum(self.entities[key].position.x for key in entity_ids) / len(entity_ids),
-            sum(self.entities[key].position.y for key in entity_ids) / len(entity_ids),
-        )
-        # Fit the existing shape at a map edge instead of reshuffling every unit.
+        static_obstacles = self._terrain_obstacles | blocked
         members = [self.entities[key] for key in entity_ids]
-        dx = max(
-            max(collision_radius(e.kind) - e.position.x for e in members),
-            min(
-                target.x - center.x,
-                min(self.game_map.width - collision_radius(e.kind) - e.position.x for e in members),
-            ),
-        )
-        dy = max(
-            max(collision_radius(e.kind) - e.position.y for e in members),
-            min(
-                target.y - center.y,
-                min(
-                    self.game_map.height - collision_radius(e.kind) - e.position.y for e in members
-                ),
-            ),
-        )
-        translated = {e.entity_id: Point(e.position.x + dx, e.position.y + dy) for e in members}
         maximum_radius = max(collision_radius(entity.kind) for entity in members)
-        index = SpatialIndex(translated)
-        separated = True
-        for entity in members:
-            point = translated[entity.entity_id]
-            radius = collision_radius(entity.kind)
-            for neighbor_id in index.nearby(point, radius + maximum_radius):
-                if neighbor_id <= entity.entity_id:
-                    continue
-                self._collision_pair_check_count += 1
-                contact = radius + collision_radius(self.entities[neighbor_id].kind)
-                if point.distance_to(translated[neighbor_id]) < contact - 1e-8:
-                    separated = False
-                    break
-            if not separated:
-                break
-        # Translation preserves physical compression as well as shape. Reuse the
-        # existing reachable slot allocator when an imported/recovering selection
-        # cannot all settle at those translated centers.
-        if separated and all(
-            self.game_map.is_passable(point)
-            and self.game_map.cell_for(point) not in blocked
-            and movement_system.position_clear(
-                point,
-                collision_radius(self.entities[key].kind),
-                self.game_map.width,
-                self.game_map.height,
-                self._terrain_obstacles | self._building_cells(),
+        if not gathering:
+            center = Point(
+                sum(self.entities[key].position.x for key in entity_ids) / len(entity_ids),
+                sum(self.entities[key].position.y for key in entity_ids) / len(entity_ids),
             )
-            for key, point in translated.items()
-        ):
-            return translated
+            # Fit the existing shape at a map edge instead of reshuffling every unit.
+            dx = max(
+                max(collision_radius(e.kind) - e.position.x for e in members),
+                min(
+                    target.x - center.x,
+                    min(
+                        self.game_map.width - collision_radius(e.kind) - e.position.x
+                        for e in members
+                    ),
+                ),
+            )
+            dy = max(
+                max(collision_radius(e.kind) - e.position.y for e in members),
+                min(
+                    target.y - center.y,
+                    min(
+                        self.game_map.height - collision_radius(e.kind) - e.position.y
+                        for e in members
+                    ),
+                ),
+            )
+            translated = {e.entity_id: Point(e.position.x + dx, e.position.y + dy) for e in members}
+            index = SpatialIndex(translated)
+            separated = True
+            for entity in members:
+                point = translated[entity.entity_id]
+                radius = collision_radius(entity.kind)
+                for neighbor_id in index.nearby(point, radius + maximum_radius):
+                    if neighbor_id <= entity.entity_id:
+                        continue
+                    self._collision_pair_check_count += 1
+                    contact = radius + collision_radius(self.entities[neighbor_id].kind)
+                    if point.distance_to(translated[neighbor_id]) < contact - 1e-8:
+                        separated = False
+                        break
+                if not separated:
+                    break
+            # Translation preserves physical compression as well as shape. Reuse the
+            # existing reachable slot allocator when an imported/recovering selection
+            # cannot all settle at those translated centers.
+            if separated and all(
+                self.game_map.is_passable(point)
+                and self.game_map.cell_for(point) not in blocked
+                and movement_system.position_clear(
+                    point,
+                    collision_radius(self.entities[key].kind),
+                    self.game_map.width,
+                    self.game_map.height,
+                    static_obstacles,
+                )
+                for key, point in translated.items()
+            ):
+                return translated
         slots = self._gathering_slots(
             PointTarget(target),
-            self.game_map.width * self.game_map.height,
+            len(entity_ids),
             maximum_radius,
             require_count=False,
+            bounded=gathering,
         )
-        available = tuple(p for p in slots if self.game_map.cell_for(p) not in blocked)[
-            : len(entity_ids)
-        ]
+        available = slots
         if len(available) != len(entity_ids):
             raise PathfindingError("INSUFFICIENT_DESTINATIONS")
         if len(entity_ids) == 1 and self.game_map.cell_for(target) not in blocked:
@@ -581,7 +656,13 @@ class Simulation:
         )
 
     def _gathering_slots(
-        self, target: SpatialTarget, count: int, unit_radius: float, *, require_count: bool = True
+        self,
+        target: SpatialTarget,
+        count: int,
+        unit_radius: float,
+        *,
+        require_count: bool = True,
+        bounded: bool = False,
     ) -> tuple[Point, ...]:
         if count <= 0:
             return ()
@@ -590,63 +671,71 @@ class Simulation:
         if cached is None:
             center = target_center(target)
             blocked = self._building_cells()
-            candidates = [
-                (x, y)
-                for y in range(self.game_map.height)
-                for x in range(self.game_map.width)
-                if self.game_map.is_cell_passable((x, y)) and (x, y) not in blocked
-            ]
-            if not candidates:
-                raise ValueError("gathering point has no passable space")
-            anchor = min(
-                candidates,
-                key=lambda c: (
-                    (c[0] + 0.5 - center.x) ** 2 + (c[1] + 0.5 - center.y) ** 2,
-                    c[1],
-                    c[0],
-                ),
-            )
-            reachable = {anchor}
-            frontier = deque([anchor])
-            while frontier:
-                x, y = frontier.popleft()
-                for cell in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
-                    if (
-                        cell not in reachable
-                        and cell not in blocked
-                        and self.game_map.is_cell_passable(cell)
-                    ):
-                        reachable.add(cell)
-                        frontier.append(cell)
+            static_obstacles = self._terrain_obstacles | blocked
+            reachable = self._gathering_reachable_cache.get(target)
+            if reachable is None:
+                anchor = self._routes.nearest_cell(center, blocked)
+                reachable = next(
+                    (
+                        region
+                        for region in self._gathering_reachable_cache.values()
+                        if region[anchor[1], anchor[0]]
+                    ),
+                    None,
+                )
+                if reachable is None:
+                    reachable = self._routes.reachable_cells(anchor, blocked)
+                self._gathering_reachable_cache[target] = reachable
             # Leave a unit-width aisle between settled neighbors.
             spacing = unit_radius * 4 + 0.12
             row_height = spacing * sqrt(3) / 2
-            points = []
-            for row in range(
-                floor(-center.y / row_height), ceil((self.game_map.height - center.y) / row_height)
-            ):
-                station_y = center.y + row * row_height
-                offset = (row % 2) * spacing / 2
-                for column in range(
-                    floor((-center.x - offset) / spacing),
-                    ceil((self.game_map.width - center.x - offset) / spacing),
+            map_radius = max(
+                center.distance_to(Point(x, y))
+                for x in (0, self.game_map.width)
+                for y in (0, self.game_map.height)
+            )
+            search_radius = min(map_radius, spacing * sqrt(count)) if bounded else map_radius
+            # A disk containing enough slots has the same nearest prefix as the
+            # complete map. Cache only complete lists for later formation growth.
+            while True:
+                points = []
+                for row in range(
+                    floor(max(-center.y, -search_radius) / row_height),
+                    min(
+                        ceil((self.game_map.height - center.y) / row_height),
+                        floor(search_radius / row_height) + 1,
+                    ),
                 ):
-                    point = Point(center.x + column * spacing + offset, station_y)
-                    if (
-                        self.game_map.contains(point)
-                        and self.game_map.cell_for(point) in reachable
-                        and movement_system.position_clear(
-                            point,
-                            unit_radius,
-                            self.game_map.width,
-                            self.game_map.height,
-                            self._terrain_obstacles | blocked,
-                        )
+                    station_y = center.y + row * row_height
+                    offset = (row % 2) * spacing / 2
+                    for column in range(
+                        floor((max(-center.x, -search_radius) - offset) / spacing),
+                        min(
+                            ceil((self.game_map.width - center.x - offset) / spacing),
+                            floor((search_radius - offset) / spacing) + 1,
+                        ),
                     ):
-                        points.append(point)
-            cached = tuple(sorted(points, key=lambda p: (p.distance_to(center), p.y, p.x)))
-            self._gathering_slot_cache[key] = cached
-            self._gathering_reachable_cache[target] = frozenset(reachable)
+                        point = Point(center.x + column * spacing + offset, station_y)
+                        if (
+                            self.game_map.contains(point)
+                            and (not bounded or point.distance_to(center) <= search_radius)
+                            and reachable[floor(point.y), floor(point.x)]
+                            and movement_system.position_clear(
+                                point,
+                                unit_radius,
+                                self.game_map.width,
+                                self.game_map.height,
+                                static_obstacles,
+                            )
+                        ):
+                            points.append(point)
+                cached = tuple(sorted(points, key=lambda p: (p.distance_to(center), p.y, p.x)))
+                if search_radius == map_radius:
+                    self._gathering_slot_cache[key] = cached
+                    break
+                if len(cached) >= count:
+                    break
+                search_radius = min(map_radius, search_radius * 2)
         if require_count and count > len(cached):
             raise ValueError("gathering point has insufficient map space")
         return cached[:count]
@@ -717,6 +806,7 @@ class Simulation:
         for building in self.entities.values():
             if (
                 building.owner_id != entity.owner_id
+                or not building.is_complete
                 or building.kind not in order
                 or (required_id is not None and building.entity_id != required_id)
             ):

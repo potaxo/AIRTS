@@ -133,11 +133,14 @@ def test_map_defined_overlapping_mobile_discs_recover_and_replay(tmp_path: Path)
     assert replayed.export_state() == simulation.export_state()
 
 
+@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
 def test_recorded_commands_reproduce_state_and_events(
-    make_map: Callable[[int], GameMap], tmp_path: Path
+    make_map: Callable[[int], GameMap], tmp_path: Path, gathering: bool
 ) -> None:
     simulation = Simulation(make_map(2), random_seed=17)
-    simulation.execute(MoveCommand(("unit_01",), Point(5.5, 1.5)))
+    assert simulation.execute(
+        MoveCommand(("unit_01", "unit_02"), Point(5.5, 3.5), gathering=gathering)
+    ).accepted
     simulation.advance(12)
     simulation.execute(CreatePatrolCommand(("unit_02",), PointTarget(Point(7.5, 7.5))))
     simulation.advance(30)
@@ -150,6 +153,7 @@ def test_recorded_commands_reproduce_state_and_events(
     assert [event.to_dict() for event in replayed.events.events] == [
         event.to_dict() for event in simulation.events.events
     ]
+    assert replayed.export_state() == simulation.export_state()
 
 
 def test_replay_verification_detects_state_divergence(

@@ -26,6 +26,8 @@ src/airts/
 |-- world/                      World models and lowest-level numeric execution support
 |   |-- __init__.py
 |   |-- map.py                  Cells, terrain/entity profiles, loading and occupancy
+|   |-- skirmish.py             Fixed symmetric map and opening slot configuration
+|   |-- opponents.py            Serializable opponent squads and economy memory
 |   |-- entities.py             Runtime entities, projectiles and trajectory traces
 |   |-- visibility.py           Per-owner visibility and exploration
 |   `-- _numeric.py             Typed serial CPU compilation for domain kernels
@@ -44,6 +46,8 @@ src/airts/
 |   |-- combat.py               Pursuit, firing, projectile impacts and damage
 |   |-- production.py           Factory queues, spawning and linked automation work
 |   |-- construction.py         Placement, builder queues and construction progress
+|   |-- opponent_ai.py          Bounded economy planning, combat forecasts and squad decisions
+|   |-- skirmish.py             Elimination, team results and match-state validation
 |   `-- economy.py              Income, economy targets and ambient enemy spawning
 |-- adapters/                   Versioned persistence and deterministic replay
 |   |-- __init__.py
@@ -52,9 +56,11 @@ src/airts/
 |-- presentation/               Window/input state, interface and scene presentation
 |   |-- __init__.py
 |   |-- app.py                  Event loop, input, UI drawing and frame composition
+|   |-- lobby.py                Opening cover and pre-match player/team configuration
 |   |-- rendering.py            Shared SceneView, backend choice and software scene caches
 |   |-- metrics.py              Frame-pacing samples and Real FPS calculation
 |   |-- opengl_renderer.py      GPU batches, interpolation, uploads and resource lifetime
+|   |-- gpu_feedback.py         Cached world feedback, camera transforms and text atlas
 |   `-- palette.py              Shared terrain, entity and projectile colors
 `-- data/
     `-- phase1_map.json          Bundled starting map

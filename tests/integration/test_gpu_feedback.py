@@ -1,0 +1,138 @@
+"""GPU world feedback visibility, geometry and camera cache regressions."""
+
+from array import array
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pygame
+import pytest
+
+from airts.contracts.commands import CreateConstructionCommand
+from airts.contracts.spatial import Point, PolygonRegion
+from airts.presentation.app import AirtsApp
+from airts.presentation.gpu_feedback import GPUFeedback, _triangles
+from airts.simulation import Simulation
+from airts.world.map import EntityKind, load_map_data
+
+
+def feedback_scene() -> AirtsApp:
+    game_map = load_map_data(
+        {
+            "id": "feedback",
+            "name": "Feedback",
+            "width": 64,
+            "height": 64,
+            "terrain": {"default": "grass"},
+            "entities": [
+                {"id": "builder", "kind": "builder", "position": [2.5, 2.5]},
+                {
+                    "id": "enemy_builder",
+                    "kind": "builder",
+                    "owner": "enemy",
+                    "position": [20.5, 2.5],
+                },
+                {"id": "enemy_factory", "kind": "factory", "owner": "enemy", "position": [16, 16]},
+            ],
+        }
+    )
+    simulation = Simulation(replace(game_map, resource_sites=(Point(2, 18),)))
+    for owner, builder, point in [
+        ("player", "builder", Point(6, 10)),
+        ("enemy", "enemy_builder", Point(18, 10)),
+    ]:
+        result = simulation.execute(
+            CreateConstructionCommand(builder, EntityKind.REPAIR_HUB, point, owner_id=owner)
+        )
+        assert result.accepted
+    simulation.entities["enemy_factory"].construction_progress = 0.25
+    return AirtsApp(simulation)
+
+
+def mocked_feedback() -> GPUFeedback:
+    context = MagicMock()
+
+    def buffer(*args: object, **kwargs: object) -> MagicMock:
+        result = MagicMock()
+        result.size = 4096
+        return result
+
+    context.buffer.side_effect = buffer
+
+    def program(**kwargs: object) -> MagicMock:
+        result = MagicMock()
+        uniforms: dict[str, SimpleNamespace] = {}
+        result.__getitem__.side_effect = lambda name: uniforms.setdefault(
+            name, SimpleNamespace(value=None)
+        )
+        return result
+
+    context.program.side_effect = program
+    module = SimpleNamespace(LINEAR=1, TRIANGLES=2, TRIANGLE_STRIP=3)
+    return GPUFeedback(module, context)
+
+
+def test_camera_uses_gpu_uniforms_without_redrawing_or_uploading_world_feedback() -> None:
+    pygame.font.init()
+    app = feedback_scene()
+    app._small_font = pygame.font.Font(None, 19)
+    app._font = pygame.font.Font(None, 24)
+    feedback = mocked_feedback()
+    try:
+        feedback.draw(app, app.WINDOW_SIZE)
+        key = app._opengl_overlay_key()
+        initial_transform = (app.map_origin, app.tile_size)
+        uploads = feedback.shapes.write.call_count
+        texture = feedback.texture
+        with patch.object(feedback, "_build", wraps=feedback._build) as build:
+            app.zoom_camera(4, app.canvas_rect.center)
+            app.pan_camera(30, -20)
+            feedback.draw(app, app.WINDOW_SIZE)
+            build.assert_not_called()
+        assert (app.map_origin, app.tile_size) != initial_transform
+        assert app._opengl_overlay_key() == key
+        assert feedback.shapes.write.call_count == uploads
+        assert feedback.texture is texture
+        assert feedback.shape_program["origin"].value == app.map_origin
+        assert feedback.shape_program["tile"].value == app.tile_size
+        assert feedback.context.scissor is None
+        shapes = array("f")
+        shapes.frombytes(feedback.shapes.write.call_args.args[0])
+        centers = [tuple(shapes[i : i + 2]) for i in range(0, len(shapes), 18)]
+        assert (7.5, 11.5) in centers  # Own repair-hub blueprint.
+        assert (19.5, 11.5) not in centers  # Enemy blueprint is private.
+        assert (18, 18) in centers  # Enemy actual scaffold remains visible.
+        assert (3, 19) in centers  # Resource sites are visible from the opening.
+        assert feedback.counts[0] == len(shapes) // 18
+        assert feedback.counts[3] == 1  # Scaffold percentage is retained.
+        # Construction/progress must never invoke a full-canvas Pygame surface.
+        with (
+            patch.object(app, "_draw_construction", side_effect=AssertionError("CPU construction")),
+            patch.object(
+                app, "_draw_resource_sites", side_effect=AssertionError("CPU resource sites")
+            ),
+        ):
+            app._draw_opengl_overlay(pygame.Surface(app.WINDOW_SIZE, pygame.SRCALPHA))
+    finally:
+        feedback.release()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_gpu_region_fill_triangulates_concave_and_collinear_vertices(reverse: bool) -> None:
+    points = (Point(0, 0), Point(2, 0), Point(4, 0), Point(4, 4), Point(2, 2), Point(0, 4))
+    region = PolygonRegion(points[::-1] if reverse else points)
+    vertices = _triangles(region)
+    area = 0.0
+    for i in range(0, len(vertices), 3):
+        a, b, c = vertices[i : i + 3]
+        area += abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / 2
+    assert area == abs(region.signed_area)
+
+
+def test_gpu_feedback_releases_partial_shader_initialization() -> None:
+    context = MagicMock()
+    program = MagicMock()
+    context.program.side_effect = [program, RuntimeError("shader rejected")]
+    with pytest.raises(RuntimeError, match="shader rejected"):
+        GPUFeedback(SimpleNamespace(), context)
+    program.release.assert_called_once()

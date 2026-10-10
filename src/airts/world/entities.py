@@ -53,6 +53,11 @@ class Entity:
     recovery_blocked_cells: frozenset[Cell] | None = None
     recovery_request_tick: int | None = None
     recovery_released: bool = False
+    construction_progress: float | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.construction_progress is None
 
     def clear_recovery_request(self) -> None:
         """End the return phase when its owning intent is replaced or settled."""
@@ -94,6 +99,7 @@ class Entity:
             "owner": self.owner_id,
             "position": [self.position.x, self.position.y],
             "health": self.health,
+            "construction_progress": self.construction_progress,
             "state": self.state.value,
             "move_target": (
                 None if self.move_target is None else [self.move_target.x, self.move_target.y]

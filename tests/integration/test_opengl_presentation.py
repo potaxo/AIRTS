@@ -176,11 +176,15 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         "GL_VERSION": "3.3 test",
     }
     context.version_code = 330
-    programs = [MagicMock() for _ in range(3)]
+    programs = [MagicMock() for _ in range(7)]
+    uniforms: dict[str, SimpleNamespace] = {}
+    programs[0].__getitem__.side_effect = lambda name: uniforms.setdefault(
+        name, SimpleNamespace(value=None)
+    )
     context.program.side_effect = programs
-    buffers = [MagicMock() for _ in range(5)]
+    buffers = [MagicMock() for _ in range(10)]
     context.buffer.side_effect = buffers
-    vertex_arrays = [MagicMock() for _ in range(4)]
+    vertex_arrays = [MagicMock() for _ in range(8)]
     context.vertex_array.side_effect = vertex_arrays
     texture = MagicMock()
     context.texture.return_value = texture
@@ -196,7 +200,7 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         frame = renderer.render(app, app.WINDOW_SIZE)
         renderer.render(app, app.WINDOW_SIZE)
 
-    terrain_draw, shape_draw, line_draw, overlay_draw = vertex_arrays
+    terrain_draw, shape_draw, line_draw, overlay_draw = vertex_arrays[:4]
     terrain_draw.render.assert_called_with(
         mode=module.TRIANGLE_STRIP,
         vertices=4,
@@ -220,6 +224,24 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert buffers[2].write.call_count == 1
     assert buffers[3].write.call_count == 1
     texture.write.assert_called_once()
+    # Camera transforms change uniforms, preserving every terrain primitive and
+    # its already-uploaded world-coordinate buffer.
+    app.zoom_camera(4, app.canvas_rect.center)
+    app.pan_camera(30, -20)
+    with (
+        patch.object(app, "_draw_opengl_overlay"),
+        patch.object(app, "_draw_opengl_partial_overlay"),
+    ):
+        transformed = renderer.render(app, app.WINDOW_SIZE)
+    assert transformed.terrain_buffer is frame.terrain_buffer
+    assert transformed.terrain_count == frame.terrain_count
+    assert buffers[1].write.call_count == 1
+    assert buffers[2].write.call_count == 1
+    assert buffers[3].write.call_count == 1
+    assert transformed.shape_buffer is frame.shape_buffer
+    assert transformed.line_buffer is frame.line_buffer
+    assert programs[0]["terrain_origin"].value == app.map_origin
+    assert programs[0]["terrain_tile_size"].value == app.tile_size
     assert renderer.info["renderer"] == "test renderer"
 
     renderer.release()
@@ -459,15 +481,15 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
         LINEAR=6,
     )
     context = MagicMock()
-    programs = [MagicMock() for _ in range(3)]
-    uniforms = [{}, {}, {}]
+    programs = [MagicMock() for _ in range(7)]
+    uniforms = [{} for _ in programs]
     for program, program_uniforms in zip(programs, uniforms, strict=True):
         program.__getitem__.side_effect = lambda key, values=program_uniforms: values.setdefault(
             key, SimpleNamespace(value=None)
         )
     context.program.side_effect = programs
-    context.buffer.side_effect = [MagicMock() for _ in range(5)]
-    context.vertex_array.side_effect = [MagicMock() for _ in range(4)]
+    context.buffer.side_effect = [MagicMock() for _ in range(10)]
+    context.vertex_array.side_effect = [MagicMock() for _ in range(8)]
     context.texture.return_value = MagicMock()
     renderer = OpenGLRenderer(module, context)
     try:
@@ -480,3 +502,41 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
 
     assert rendered is rerendered
     assert uniforms[0]["interpolation_alpha"].value == pytest.approx(0.9)
+
+
+def test_immutable_projectile_traces_reuse_world_geometry_and_expire() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "trace_cache",
+                "name": "Trace cache",
+                "width": 12,
+                "height": 12,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "scout", "kind": "scout", "position": [3.5, 3.5]},
+                    {"id": "enemy", "kind": "scout", "owner": "enemy", "position": [6.5, 3.5]},
+                ],
+            }
+        )
+    )
+    simulation.advance(4)
+    assert simulation.projectile_traces
+    app = _native_four_k_app(simulation, ())
+    builder = OpenGLFrameBuilder()
+    first = builder.build(app, DISPLAY_SIZE)
+    cached = dict(builder._trace_buffers)
+    assert cached
+    app.inspected_entity_id = "scout"
+    inspected = builder.build(app, DISPLAY_SIZE)
+    assert inspected is not first
+    assert inspected.line_buffer == first.line_buffer
+    assert all(builder._trace_buffers[key] is value for key, value in cached.items())
+    for entity in simulation.entities.values():
+        entity.attack_cooldown = 1000
+    expires = max(trace.expires_tick for trace in simulation.projectile_traces)
+    simulation.advance(expires - simulation.tick + 1)
+    assert not simulation.projectile_traces
+    expired = builder.build(app, DISPLAY_SIZE)
+    assert not builder._trace_buffers
+    assert not expired.line_buffer

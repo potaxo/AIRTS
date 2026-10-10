@@ -11,6 +11,7 @@ from airts.presentation.app import AirtsApp
 from airts.presentation.rendering import RendererBackend
 from airts.simulation import Simulation
 from airts.world.map import load_example_map, load_map
+from airts.world.skirmish import create_skirmish_map
 
 
 def main() -> int:
@@ -19,6 +20,9 @@ def main() -> int:
     sources.add_argument("--map", type=Path, help="Load a map JSON file instead of the example.")
     sources.add_argument("--load-state", type=Path, help="Continue a saved simulation state.")
     sources.add_argument("--replay", type=Path, help="Verify and open a recorded replay result.")
+    parser.add_argument(
+        "--legacy-map", action="store_true", help="Open the original 64 x 64 sandbox directly."
+    )
     parser.add_argument(
         "--event-log", type=Path, help="Write structured events as JSON Lines on exit."
     )
@@ -60,8 +64,18 @@ def main() -> int:
     elif arguments.replay is not None:
         simulation = run_replay(load_replay(arguments.replay))
     else:
-        game_map = load_map(arguments.map) if arguments.map is not None else load_example_map()
-        spawn_enabled = arguments.enemy_spawn_seconds > 0 and arguments.enemy_cap > 0
+        game_map = (
+            load_map(arguments.map)
+            if arguments.map is not None
+            else load_example_map()
+            if arguments.legacy_map
+            else create_skirmish_map()
+        )
+        spawn_enabled = (
+            not game_map.match_slots
+            and arguments.enemy_spawn_seconds > 0
+            and arguments.enemy_cap > 0
+        )
         spawn_ticks = (
             max(1, round(arguments.enemy_spawn_seconds * Simulation.TICKS_PER_SECOND))
             if spawn_enabled
@@ -73,7 +87,12 @@ def main() -> int:
             enemy_spawn_interval_ticks=spawn_ticks,
             enemy_spawn_cap=arguments.enemy_cap,
         )
-    AirtsApp(simulation, renderer_backend=arguments.renderer).run(arguments.max_frames)
+    show_lobby = not any(
+        (arguments.map, arguments.legacy_map, arguments.load_state, arguments.replay)
+    )
+    app = AirtsApp(simulation, renderer_backend=arguments.renderer, show_lobby=show_lobby)
+    app.run(arguments.max_frames)
+    simulation = app.simulation
     if arguments.event_log is not None:
         simulation.events.write_jsonl(arguments.event_log)
     if arguments.save_state is not None:

@@ -175,6 +175,23 @@ def move_entities(simulation: Simulation) -> None:
         return
     entities = [simulation.entities[key] for key in keys]
     obstacles = simulation._building_cells()
+    lookahead = []
+    for entity in entities:
+        if len(entity.path) < 2:
+            continue
+        if _route_obstacles(simulation, entity, obstacles) != obstacles:
+            skip_crowded_waypoints(simulation, entity, obstacles)
+        else:
+            lookahead.append(entity)
+    if lookahead:
+        visible = simulation._routes.visible_waypoints(
+            [entity.position for entity in lookahead],
+            [entity.path for entity in lookahead],
+            obstacles,
+        )
+        for entity, index in zip(lookahead, visible.tolist(), strict=True):
+            if index:
+                del entity.path[:index]
     planned: set[str] = set()
     for entity in entities:
         key = entity.entity_id
@@ -183,7 +200,6 @@ def move_entities(simulation: Simulation) -> None:
         if not entity.path:
             continue
         entity.route_ticks += 1
-        skip_crowded_waypoints(simulation, entity, obstacles)
         target = entity.path[0]
         distance = _track_progress(entity, target, simulation.MIN_PROGRESS_DISTANCE)
         automation = simulation.automations.get(simulation.assignments.get(key, ""))
@@ -461,10 +477,9 @@ def plan_group_paths(
     result: dict[str, PathResult] = {}
     for key in entity_ids:
         start, target = simulation.entities[key].position, destinations[key]
-        direct = passable_segment_cells(simulation.game_map, start, target, blocked)
-        if direct is not None and all(
-            simulation.game_map.terrain_at_cell(c).movement_cost <= 1 for c in direct
-        ):
+        if simulation._routes.clear_segment(start, target, blocked):
+            direct = passable_segment_cells(simulation.game_map, start, target, blocked)
+            assert direct is not None
             result[key] = PathResult(
                 direct,
                 () if start == target else (target,),
@@ -473,6 +488,8 @@ def plan_group_paths(
             continue
         shared = simulation._routes.shared_path(start, anchor, blocked)
         for index, point in enumerate(shared.waypoints):
+            if not simulation._routes.passable_segment(point, target, blocked):
+                continue
             branch = passable_segment_cells(simulation.game_map, point, target, blocked)
             if branch is not None:
                 last = shared.cells.index(simulation.game_map.cell_for(point))

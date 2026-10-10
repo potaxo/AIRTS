@@ -15,4 +15,4 @@ WordArray = NDArray[np.uint64]
 
 def compile_numeric[F: Callable[..., Any]](function: F) -> F:
     """Keep normal arithmetic and one execution order; propagate compilation errors."""
-    return cast(F, njit(cache=False, fastmath=False)(function))
+    return cast(F, njit(cache=True, fastmath=False)(function))

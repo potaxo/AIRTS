@@ -31,6 +31,7 @@ from airts.adapters.replay import (
 )
 from airts.contracts.automations import (
     AutomationStatus,
+    ConstructionParameters,
     DefendParameters,
     ProductionParameters,
 )
@@ -229,7 +230,7 @@ def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) 
     assert restored.entities["holder"].position == Point(*saved_position)
     assert restored.entities["holder"].recovery_request_tick is None
     assert not restored.entities["holder"].recovery_released
-    assert SAVE_SCHEMA == "airts-save-v11"
+    assert SAVE_SCHEMA == "airts-save-v12"
 
 
 def test_v10_preserves_recovery_intent_and_initializes_the_new_return_phase() -> None:
@@ -566,6 +567,10 @@ def test_construction_and_batch_progress_round_trip(tmp_path: Path) -> None:
     )
     simulation.advance(3)
     destination = tmp_path / "builder-factory.json"
+    construction_parameters = simulation.automations[construction.automation_id or ""].parameters
+    assert isinstance(construction_parameters, ConstructionParameters)
+    site = simulation.entities[construction_parameters.site_entity_id or ""]
+    site.health -= 17
     save_simulation(simulation, destination)
 
     restored = load_simulation(destination)
@@ -583,6 +588,7 @@ def test_construction_and_batch_progress_round_trip(tmp_path: Path) -> None:
         "builder",
         "builder_2",
     ]
+    assert restored.entities[site.entity_id].health == site.kind.profile.max_health - 17
     batch_parameters = restored.automations[batch.automation_id or ""].parameters
     assert isinstance(batch_parameters, ProductionParameters)
     assert [restored.entities[item].kind for item in batch_parameters.produced_entity_ids] == [
@@ -795,15 +801,116 @@ def test_continuous_production_compact_defense_link_round_trips(
     _assert_continues_identically(simulation, restored, 10)
 
 
+@pytest.mark.parametrize(
+    "stage", ["traveling", "waiting_for_money", "paused_site", "destroyed_builder"]
+)
+def test_blueprint_and_unfinished_site_state_continues_after_loading(stage: str) -> None:
+    simulation = builder_factory_simulation()
+    simulation.resources["player"] = 0 if stage in {"traveling", "waiting_for_money"} else 500
+    result = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(16, 14), queued=True)
+    )
+    simulation.execute(
+        CreateConstructionCommand(
+            "builder", EntityKind.RESOURCE_EXTRACTOR, Point(6, 10), queued=True
+        )
+    )
+    simulation.advance(1 if stage == "traveling" else 40)
+    if stage == "paused_site":
+        assert simulation.execute(PauseAutomationCommand(result.automation_id or "")).accepted
+    elif stage == "destroyed_builder":
+        simulation.remove_entity("builder")
+    elif stage == "waiting_for_money":
+        assert (
+            simulation.automations[result.automation_id or ""].reason_code
+            == "INSUFFICIENT_RESOURCES"
+        )
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 80)
+
+
+def test_v11_construction_migrates_prepaid_progress_without_charging_again() -> None:
+    simulation = builder_factory_simulation()
+    created = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(6, 10))
+    )
+    simulation.advance(3)
+    state = simulation.export_state()
+    parameters = state["automations"][created.automation_id]["parameters"]
+    site_id = parameters.pop("site_entity_id")
+    del state["entities"][site_id]
+    for entity in state["entities"].values():
+        entity.pop("construction_progress")
+    balance = simulation.resources["player"]
+    restored = load_simulation_data(
+        {"schema": "airts-save-v11", "map": simulation.game_map.to_dict(), "state": state}
+    )
+    restored.advance(20)
+    assert restored.automations[created.automation_id or ""].status is AutomationStatus.COMPLETED
+    assert restored.resources["player"] == balance
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "negative_progress",
+        "complete_progress",
+        "wrong_site",
+        "unpaid_site",
+        "mismatched_progress",
+        "missing_site_field",
+    ],
+)
+def test_save_rejects_inconsistent_construction_site(corruption: str) -> None:
+    simulation = builder_factory_simulation()
+    result = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(6, 10))
+    )
+    simulation.advance()
+    state = simulation.export_state()
+    parameters = state["automations"][result.automation_id]["parameters"]
+    site = state["entities"][parameters["site_entity_id"]]
+    if corruption == "negative_progress":
+        site["construction_progress"] = -1
+    elif corruption == "complete_progress":
+        site["construction_progress"] = 1
+    elif corruption == "wrong_site":
+        parameters["site_entity_id"] = "factory"
+    elif corruption == "unpaid_site":
+        parameters["cost_paid"] = False
+    elif corruption == "mismatched_progress":
+        parameters["construction_value"] += 1
+    else:
+        parameters.pop("site_entity_id")
+    with pytest.raises(PersistenceError):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
 def _assert_continues_identically(original: Simulation, restored: Simulation, ticks: int) -> None:
     original.advance(ticks)
     restored.advance(ticks)
     assert restored.export_state() == original.export_state()
 
 
-def test_growing_army_save_preserves_shared_cells_and_movement_continuation() -> None:
+@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
+def test_growing_army_save_preserves_shared_cells_and_movement_continuation(
+    gathering: bool,
+) -> None:
     simulation, _ = growing_factory_simulation()
     simulation.advance(260)
+    if gathering:
+        selected = tuple(key for key, entity in simulation.entities.items() if entity.is_movable)
+        assert simulation.execute(MoveCommand(selected, Point(35, 35), gathering=True)).accepted
+        simulation.advance(5)
     document = {
         "schema": SAVE_SCHEMA,
         "map": simulation.game_map.to_dict(),

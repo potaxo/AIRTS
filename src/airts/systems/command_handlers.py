@@ -264,7 +264,9 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             ),
         )
     try:
-        destinations = simulation._allocate_destinations(command.entity_ids, command.target)
+        destinations = simulation._allocate_destinations(
+            command.entity_ids, command.target, gathering=command.gathering
+        )
         paths = movement.plan_group_paths(simulation, command.entity_ids, destinations)
     except PathfindingError as error:
         return simulation._reject_validation(
@@ -303,7 +305,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
             "attack",
             ValidationFailure(ValidationPhase.REFERENCE, "UNKNOWN_TARGET", "target_entity_id"),
         )
-    if target.owner_id == command.owner_id:
+    if not simulation.are_hostile(target.owner_id, command.owner_id):
         return simulation._reject_validation(
             "attack",
             ValidationFailure(ValidationPhase.OWNERSHIP, "TARGET_IS_FRIENDLY", "target_entity_id"),
@@ -405,8 +407,10 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
         if expanded:
             reachable = simulation._gathering_reachable_cache[command.target]
             if any(
-                simulation.game_map.cell_for(simulation.entities[entity_id].position)
-                not in reachable
+                not reachable[
+                    simulation.game_map.cell_for(simulation.entities[entity_id].position)[1],
+                    simulation.game_map.cell_for(simulation.entities[entity_id].position)[0],
+                ]
                 for entity_id in command.entity_ids
             ):
                 raise PathfindingError("NO_PATH")

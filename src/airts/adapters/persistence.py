@@ -46,9 +46,11 @@ from airts.world.map import (
     OccupancyGrid,
     load_map_data,
 )
+from airts.world.opponents import OpponentState, Squad, SquadPhase
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v11"
+SAVE_SCHEMA = "airts-save-v12"
+MATCH_SAVE_SCHEMA = "airts-match-save-v4"
 
 
 class PersistenceError(ValueError):
@@ -57,7 +59,7 @@ class PersistenceError(ValueError):
 
 def save_simulation(simulation: Simulation, path: str | Path) -> None:
     document = {
-        "schema": SAVE_SCHEMA,
+        "schema": MATCH_SAVE_SCHEMA if simulation.game_map.match_slots else SAVE_SCHEMA,
         "map": simulation.game_map.to_dict(),
         "state": simulation.export_state(),
     }
@@ -79,12 +81,34 @@ def load_simulation_data(raw_data: object) -> Simulation:
     legacy_movement = document.get("schema") in {"airts-save-v7", "airts-save-v8"}
     legacy_contact = document.get("schema") in {"airts-save-v7", "airts-save-v8", "airts-save-v9"}
     legacy_recovery = legacy_contact or document.get("schema") == "airts-save-v10"
-    if document.get("schema") != SAVE_SCHEMA and not legacy_recovery:
+    legacy_construction = document.get("schema") not in {
+        SAVE_SCHEMA,
+        MATCH_SAVE_SCHEMA,
+        "airts-match-save-v3",
+        "airts-match-save-v2",
+    }
+    if (
+        document.get("schema")
+        not in {
+            SAVE_SCHEMA,
+            MATCH_SAVE_SCHEMA,
+            "airts-match-save-v3",
+            "airts-save-v11",
+            "airts-match-save-v1",
+            "airts-match-save-v2",
+        }
+        and not legacy_recovery
+    ):
         raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
     try:
         game_map = load_map_data(document.get("map"))
     except MapValidationError as error:
         raise PersistenceError(f"invalid saved map: {error}") from error
+    if bool(game_map.match_slots) != (
+        document.get("schema")
+        in {MATCH_SAVE_SCHEMA, "airts-match-save-v1", "airts-match-save-v2", "airts-match-save-v3"}
+    ):
+        raise PersistenceError("match maps require the match save schema")
     state = _mapping(document.get("state"), "state")
     tick = _integer(state.get("tick"), "state.tick", minimum=0)
     random_seed = _integer(state.get("random_seed"), "state.random_seed")
@@ -104,6 +128,8 @@ def load_simulation_data(raw_data: object) -> Simulation:
         "state.enemy_spawn_cap",
         minimum=0,
     )
+    if game_map.match_slots and ambient_enemy_spawns:
+        raise PersistenceError("team matches cannot use ambient enemy spawning")
     simulation = Simulation(
         game_map,
         random_seed,
@@ -119,6 +145,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         legacy_movement=legacy_movement,
         legacy_contact=legacy_contact,
         legacy_recovery=legacy_recovery,
+        legacy_construction=legacy_construction,
     )
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
@@ -126,7 +153,10 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation.projectile_traces = _load_projectile_traces(
         state.get("projectile_traces", []), simulation
     )
-    simulation.automations = _load_automations(state.get("automations"), simulation)
+    simulation.automations = _load_automations(
+        state.get("automations"), simulation, legacy_construction=legacy_construction
+    )
+    _validate_construction_sites(simulation)
     simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
     simulation.suspended_assignments = _load_suspended_assignments(
@@ -192,7 +222,119 @@ def load_simulation_data(raw_data: object) -> Simulation:
             )
     elif state.get("traffic_reservations") is not None:
         raise PersistenceError("traffic reservations are unsupported by save v9")
+    if game_map.match_slots:
+        from airts.systems.skirmish import evaluate_result, validate_match_state
+
+        if "match_result" not in state:
+            raise PersistenceError("match_result is required for match saves")
+        result = state["match_result"]
+        teams = {slot.team for slot in game_map.match_slots}
+        if result is not None and (type(result) is not int or result not in {0, *teams}):
+            raise PersistenceError("invalid match_result")
+        simulation.match_result = result
+        if document.get("schema") in {MATCH_SAVE_SCHEMA, "airts-match-save-v3"}:
+            simulation.opponents = _load_opponents(state.get("opponents"), simulation)
+        try:
+            validate_match_state(simulation)
+        except ValueError as error:
+            raise PersistenceError(str(error)) from error
+        current_rules = document.get("schema") == MATCH_SAVE_SCHEMA
+        if tick > 0 and result != evaluate_result(
+            simulation, command_centers_produce=current_rules
+        ):
+            raise PersistenceError("saved match result disagrees with production assets")
+        if tick > 0 and not current_rules:
+            simulation.match_result = evaluate_result(simulation)
+    elif state.get("match_result") is not None:
+        raise PersistenceError("legacy maps cannot have a match result")
     return simulation
+
+
+def _load_opponent_squad(
+    raw_squad: object, simulation: Simulation, owner: str, assigned: set[str]
+) -> Squad:
+    field = f"opponents.{owner}"
+    squad_data = _mapping(raw_squad, f"{field}.squad")
+    members = _string_list(squad_data.get("entity_ids"), f"{field}.entity_ids")
+    if len(members) > 32:
+        raise PersistenceError("opponent squad exceeds its unit budget")
+    for key in members:
+        entity = simulation.entities.get(key)
+        if (
+            entity is None
+            or entity.owner_id != owner
+            or not entity.is_movable
+            or entity.kind.profile.attack_damage <= 0
+            or key in assigned
+        ):
+            raise PersistenceError("opponent squad has an invalid or duplicate member")
+        assigned.add(key)
+    try:
+        phase = SquadPhase(_string(squad_data.get("phase"), f"{field}.phase"))
+    except ValueError as error:
+        raise PersistenceError(f"invalid opponent squad phase: {error}") from error
+    target = _nullable_string(squad_data.get("target_id"), f"{field}.target_id")
+    if target is not None and (
+        target not in simulation.entities
+        or not simulation.are_hostile(owner, simulation.entities[target].owner_id)
+    ):
+        raise PersistenceError("opponent target must reference a surviving hostile entity")
+    destination = (
+        None
+        if squad_data.get("destination") is None
+        else _point(squad_data["destination"], f"{field}.destination")
+    )
+    if destination is not None and not simulation.game_map.contains(destination):
+        raise PersistenceError("opponent destination lies outside the map")
+    retry_tick = _integer(squad_data.get("retry_tick"), f"{field}.retry_tick", minimum=0)
+    if retry_tick > simulation.tick + 50:
+        raise PersistenceError("opponent retry tick exceeds its order cooldown")
+    return Squad(
+        entity_ids=members,
+        phase=phase,
+        phase_tick=_past_tick(squad_data.get("phase_tick"), f"{field}.phase_tick", simulation.tick),
+        target_id=target,
+        destination=destination,
+        last_order_tick=_past_tick(
+            squad_data.get("last_order_tick"), f"{field}.last_order_tick", simulation.tick
+        ),
+        retry_tick=retry_tick,
+        last_failure=_nullable_string(squad_data.get("last_failure"), f"{field}.last_failure"),
+    )
+
+
+def _load_opponents(raw_data: object, simulation: Simulation) -> dict[str, OpponentState]:
+    data = _mapping(raw_data, "state.opponents")
+    owners = {slot.owner_id for slot in simulation.game_map.match_slots if slot.controller == "ai"}
+    if set(data) != owners:
+        raise PersistenceError("opponents must contain exactly the AI-controlled owners")
+    opponents: dict[str, OpponentState] = {}
+    for owner, raw_opponent in data.items():
+        field = f"opponents.{owner}"
+        item = _mapping(raw_opponent, field)
+        assigned: set[str] = set()
+
+        reserve = _load_opponent_squad(item.get("reserve"), simulation, owner, assigned)
+        if len(reserve.entity_ids) > 4:
+            raise PersistenceError("opponent reserve exceeds its unit budget")
+        squads = [
+            _load_opponent_squad(raw_squad, simulation, owner, assigned)
+            for raw_squad in _list(item.get("squads"), f"{field}.squads")
+        ]
+        paused = _string_list(item.get("budget_paused_ids"), f"{field}.budget_paused_ids")
+        for key in paused:
+            job = simulation.automations.get(key)
+            if (
+                job is None
+                or job.owner_id != owner
+                or not isinstance(job.parameters, ProductionParameters)
+                or not job.parameters.continuous
+            ):
+                raise PersistenceError(
+                    "opponent budget pause must reference its continuous production"
+                )
+        opponents[owner] = OpponentState(reserve, squads, paused)
+    return opponents
 
 
 def _validate_legacy_traffic(raw_data: object, simulation: Simulation) -> None:
@@ -305,6 +447,7 @@ def _load_entities(
     legacy_movement: bool = False,
     legacy_contact: bool = False,
     legacy_recovery: bool = False,
+    legacy_construction: bool = False,
 ) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
@@ -318,6 +461,20 @@ def _load_entities(
         except ValueError as error:
             raise PersistenceError(f"invalid entity {entity_id}: {error}") from error
         position = _point(entity.get("position"), "entity.position")
+        if not legacy_construction and "construction_progress" not in entity:
+            raise PersistenceError("entity.construction_progress is required")
+        progress_raw = entity.get("construction_progress")
+        construction_progress = (
+            None
+            if progress_raw is None
+            else _number(progress_raw, "entity.construction_progress", minimum=0)
+        )
+        if construction_progress is not None and (
+            kind not in {EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR}
+            or not 0 <= construction_progress < 1
+            or state is not UnitState.IDLE
+        ):
+            raise PersistenceError("invalid unfinished building state")
         if legacy_recovery:
             recovery_request_tick = None
             recovery_released = False
@@ -529,6 +686,7 @@ def _load_entities(
             recovery_blocked_cells=recovery_blocked_cells,
             recovery_request_tick=recovery_request_tick,
             recovery_released=recovery_released,
+            construction_progress=construction_progress,
         )
     for loaded_entity in entities.values():
         if (
@@ -630,7 +788,9 @@ def _load_projectile_traces(raw_data: object, simulation: Simulation) -> list[Pr
     return traces
 
 
-def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Automation]:
+def _load_automations(
+    raw_data: object, simulation: Simulation, *, legacy_construction: bool = False
+) -> dict[str, Automation]:
     automations_data = _mapping(raw_data, "state.automations")
     automations: dict[str, Automation] = {}
     for automation_id, raw_automation in automations_data.items():
@@ -654,8 +814,11 @@ def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Aut
         if modified_tick < created_tick:
             raise PersistenceError("automation modified_tick cannot precede created_tick")
         parameters = _load_automation_parameters(
-            kind, data.get("parameters"), entity_ids, simulation
+            kind, data.get("parameters"), entity_ids, simulation, terminal=status.terminal
         )
+        if kind is AutomationKind.CONSTRUCTION and not legacy_construction:
+            if "site_entity_id" not in _mapping(data.get("parameters"), "construction parameters"):
+                raise PersistenceError("construction.site_entity_id is required")
         history = _load_transition_history(data.get("transition_history"), status, simulation.tick)
         automations[automation_id] = Automation(
             automation_id=automation_id,
@@ -733,9 +896,43 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
                     EntityKind.COMMAND_CENTER,
                 }:
                     raise PersistenceError("repair references an invalid destination")
+                if not building.is_complete:
+                    raise PersistenceError("repair destination is unfinished")
             for resume_id in automation.parameters.resume_automation_ids.values():
                 if resume_id is not None and resume_id not in automations:
                     raise PersistenceError("repair references an invalid resume automation")
+
+
+def _validate_construction_sites(simulation: Simulation) -> None:
+    claimed: set[str] = set()
+    for automation in simulation.automations.values():
+        parameters = automation.parameters
+        if not isinstance(parameters, ConstructionParameters):
+            continue
+        site_id = parameters.site_entity_id
+        if site_id is None:
+            continue
+        site = simulation.entities.get(site_id)
+        if site is None:
+            if not automation.status.terminal:
+                raise PersistenceError("construction references a missing site")
+            continue
+        if (
+            site.kind is not parameters.building_kind
+            or site.position != parameters.position
+            or site.owner_id != automation.owner_id
+            or not parameters.cost_paid
+        ):
+            raise PersistenceError("construction site does not match its job")
+        if not automation.status.terminal:
+            if (
+                site_id in claimed
+                or site.is_complete
+                or site.construction_progress
+                != parameters.construction_value / parameters.required_value
+            ):
+                raise PersistenceError("construction site progress or ownership is inconsistent")
+            claimed.add(site_id)
 
 
 def _load_automation_parameters(
@@ -743,6 +940,8 @@ def _load_automation_parameters(
     raw_data: object,
     entity_ids: list[str],
     simulation: Simulation,
+    *,
+    terminal: bool = False,
 ) -> (
     PatrolParameters
     | DefendParameters
@@ -828,7 +1027,8 @@ def _load_automation_parameters(
         factory_id = _string(data.get("factory_id"), "production.factory_id")
         if (
             factory_id not in simulation.entities
-            or simulation.entities[factory_id].kind is not EntityKind.FACTORY
+            or unit_kind not in simulation.entities[factory_id].kind.production_kinds
+            or not simulation.entities[factory_id].is_complete
         ):
             raise PersistenceError("production references an invalid factory")
         rally_data = data.get("rally_point")
@@ -865,6 +1065,8 @@ def _load_automation_parameters(
             quantity = _integer(item[1], "production sequence quantity", minimum=1)
             if sequence_kind.profile.category is not EntityCategory.UNIT:
                 raise PersistenceError("production sequence kind must be a unit")
+            if sequence_kind not in simulation.entities[factory_id].kind.production_kinds:
+                raise PersistenceError("production sequence kind is unsupported by its source")
             sequence.append((sequence_kind, quantity))
         sequence_index = _integer(
             data.get("sequence_index", 0), "production.sequence_index", minimum=0
@@ -915,10 +1117,14 @@ def _load_automation_parameters(
         builder_ids = _string_list(
             data.get("builder_ids", [builder_id]), "construction.builder_ids"
         )
-        if not builder_ids or any(
-            item not in simulation.entities
-            or simulation.entities[item].kind is not EntityKind.BUILDER
-            for item in builder_ids
+        if (
+            builder_ids != entity_ids
+            or (not builder_ids and not terminal)
+            or any(
+                item not in simulation.entities
+                or simulation.entities[item].kind is not EntityKind.BUILDER
+                for item in builder_ids
+            )
         ):
             raise PersistenceError("construction references an invalid builder")
         required_value = _number(
@@ -942,6 +1148,7 @@ def _load_automation_parameters(
                 data.get("constructed_entity_id"), "construction.constructed_entity_id"
             ),
             builder_ids,
+            _nullable_string(data.get("site_entity_id"), "construction.site_entity_id"),
         )
     if kind is AutomationKind.REINFORCEMENT:
         return ReinforcementParameters(

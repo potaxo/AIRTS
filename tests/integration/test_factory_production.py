@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pygame
 import pytest
 from tests.integration.scenarios import (
@@ -11,6 +13,8 @@ from tests.integration.scenarios import (
     runtime_map,
 )
 
+from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import capture_replay, run_replay
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
@@ -25,6 +29,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    ReduceProductionCommand,
     ResumeAutomationCommand,
     StopCommand,
 )
@@ -503,24 +508,125 @@ def test_factory_loop_button_broadcasts_to_same_type_selection() -> None:
     assert "2 factories" in app.notice
 
 
-def test_ordered_factory_queue_broadcasts_to_same_type_selection() -> None:
+def test_factory_plus_starts_immediately_and_minus_removes_newest_request() -> None:
     app = AirtsApp(builder_factory_simulation())
     app.selected_entities = {"factory", "factory_2"}
     app._selection_changed()
-    app.production_sequence = [(EntityKind.SCOUT, 2), (EntityKind.BUILDER, 1)]
     button = pygame.Rect(10, 10, 80, 30)
-    app._command_buttons = [(button, "start_queue")]
-
-    app._handle_command_click(button.center)
-
+    for action in ("queue:scout", "queue:builder", "queue:scout"):
+        app._command_buttons = [(button, action)]
+        app._handle_command_click(button.center)
     for factory_id in ("factory", "factory_2"):
         queue = app.simulation.production_queue(factory_id)
-        assert len(queue) == 1
-        parameters = queue[0].parameters
-        assert isinstance(parameters, ProductionParameters)
-        assert parameters.sequence == ((EntityKind.SCOUT, 2), (EntityKind.BUILDER, 1))
-    assert not app.production_sequence
+        assert [
+            job.parameters.unit_kind
+            for job in queue
+            if isinstance(job.parameters, ProductionParameters)
+        ] == [EntityKind.SCOUT, EntityKind.BUILDER, EntityKind.SCOUT]
+        assert app.simulation.assignments[factory_id] == queue[0].automation_id
+    app._command_buttons = [(button, "reduce:scout")]
+    app._handle_command_click(button.center)
+    for factory_id in ("factory", "factory_2"):
+        assert len(app.simulation.production_queue(factory_id)) == 2
+    app.simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    assert sum(entity.kind is EntityKind.SCOUT for entity in app.simulation.entities.values()) == 3
     assert "2 factories" in app.notice
+
+
+@pytest.mark.parametrize("continuous", [False, True], ids=["finite", "loop"])
+def test_command_center_builder_production_saves_and_replays(
+    tmp_path: Path, continuous: bool
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "command_center_production",
+                "name": "Command center production",
+                "width": 20,
+                "height": 20,
+                "terrain": {"default": "grass"},
+                "entities": [{"id": "center", "kind": "command_center", "position": [5, 5]}],
+            }
+        )
+    )
+    for command in (
+        CreateProductionCommand("center", EntityKind.SCOUT, 1),
+        CreateProductionBatchCommand(
+            "center", ((EntityKind.BUILDER, 1), (EntityKind.HEAVY_TANK, 1))
+        ),
+    ):
+        assert not simulation.execute(command).accepted
+        assert not simulation.automations
+    result = simulation.execute(
+        CreateProductionCommand("center", EntityKind.BUILDER, 2, continuous=continuous)
+    )
+    assert result.accepted
+    simulation.advance(5)
+    save_path = tmp_path / "builder-production.json"
+    save_simulation(simulation, save_path)
+    restored = load_simulation(save_path)
+    replayed = run_replay(capture_replay(simulation))
+    assert restored.export_state() == replayed.export_state() == simulation.export_state()
+    for instance in (simulation, restored, replayed):
+        instance.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+    assert restored.export_state() == replayed.export_state() == simulation.export_state()
+    parameters = simulation.automations[result.automation_id or ""].parameters
+    assert isinstance(parameters, ProductionParameters)
+    assert parameters.produced_count == (3 if continuous else 2)
+    assert all(
+        simulation.entities[key].kind is EntityKind.BUILDER
+        for key in parameters.produced_entity_ids
+    )
+
+
+@pytest.mark.parametrize("remove_kind", [EntityKind.SCOUT, EntityKind.BUILDER])
+def test_reduce_legacy_batch_preserves_progress_save_and_replay(
+    tmp_path: Path, remove_kind: EntityKind
+) -> None:
+    simulation = Simulation(runtime_map())
+    result = simulation.execute(
+        CreateProductionBatchCommand("factory", ((EntityKind.SCOUT, 2), (EntityKind.BUILDER, 1)))
+    )
+    assert result.accepted
+    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS + 3)
+    parameters = simulation.automations[result.automation_id or ""].parameters
+    assert isinstance(parameters, ProductionParameters)
+    assert parameters.produced_count == 1
+    assert parameters.progress_ticks == 3
+    assert simulation.execute(ReduceProductionCommand("factory", remove_kind)).accepted
+    assert parameters.target_count == 2
+    assert parameters.remaining_count(remove_kind) == 0
+    assert parameters.progress_ticks == (0 if remove_kind is EntityKind.SCOUT else 3)
+    destination = tmp_path / "reduced-batch.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    replayed = run_replay(capture_replay(simulation))
+    assert restored.export_state() == replayed.export_state() == simulation.export_state()
+    for instance in (simulation, restored, replayed):
+        instance.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+    assert restored.export_state() == replayed.export_state() == simulation.export_state()
+    assert parameters.produced_count == 2
+    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
+
+
+def test_minus_cancels_paid_current_unit_then_resumes_loop_without_refund() -> None:
+    simulation = builder_factory_simulation()
+    loop = simulation.execute(
+        CreateProductionCommand("factory", EntityKind.BUILDER, 1, continuous=True)
+    )
+    current = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    simulation.advance(3)
+    balance = simulation.resources["player"]
+    rejected = simulation.execute(
+        ReduceProductionCommand("factory", EntityKind.SCOUT, owner_id="enemy")
+    )
+    assert not rejected.accepted
+    assert simulation.automations[current.automation_id or ""].status is AutomationStatus.ACTIVE
+    assert simulation.execute(ReduceProductionCommand("factory", EntityKind.SCOUT)).accepted
+    assert simulation.automations[current.automation_id or ""].status is AutomationStatus.CANCELED
+    assert simulation.resources["player"] == balance
+    assert simulation.assignments["factory"] == loop.automation_id
+    assert not simulation.execute(ReduceProductionCommand("factory", EntityKind.BUILDER)).accepted
 
 
 def test_produce_and_defend_broadcasts_to_every_selected_factory_loop() -> None:

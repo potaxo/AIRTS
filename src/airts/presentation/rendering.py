@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from math import ceil, floor
 from typing import Protocol
 
 import pygame
 
 from airts.contracts.spatial import Point
-from airts.presentation.palette import ENTITY_COLORS, PROJECTILE_COLORS, TERRAIN_COLORS, Color
+from airts.presentation.palette import (
+    ENTITY_COLORS,
+    PROJECTILE_COLORS,
+    TERRAIN_COLORS,
+    Color,
+    match_color,
+)
 from airts.simulation import Simulation
 from airts.world.entities import Entity
 from airts.world.map import EntityCategory, EntityKind
@@ -58,6 +65,7 @@ class SoftwareRenderer:
         self._map_surface: pygame.Surface | None = None
         self._scaled_map_surface: pygame.Surface | None = None
         self._scaled_map_size: tuple[int, int] | None = None
+        self._viewport_terrain_key: tuple[object, ...] | None = None
         self._unit_sprite_cache: dict[tuple[int, tuple[int, int, int]], pygame.Surface] = {}
         self._large_unit_render_key: tuple[object, ...] | None = None
         self._large_unit_blits: tuple[tuple[pygame.Surface, tuple[int, int]], ...] = ()
@@ -73,8 +81,43 @@ class SoftwareRenderer:
         self._map_surface = None
         self._scaled_map_surface = None
         self._scaled_map_size = None
+        self._viewport_terrain_key = None
 
     def draw_map(self, view: SceneView, screen: pygame.Surface) -> None:
+        if view.simulation.game_map.resource_sites is not None:
+            # Cache one pixel per cell, then scale only a viewport-sized crop.
+            # Neither wheel input nor panning rebuilds terrain or allocates a full
+            # zoomed world surface.
+            origin_x, origin_y = view.map_origin
+            tile = view.tile_size
+            clip = screen.get_clip()
+            game_map = view.simulation.game_map
+            if self._map_surface is None:
+                self._map_surface = pygame.Surface((game_map.width, game_map.height))
+                for y, row in enumerate(game_map.terrain):
+                    for x, terrain in enumerate(row):
+                        self._map_surface.set_at((x, y), TERRAIN_COLORS[terrain])
+            left = max(0, floor((clip.left - origin_x) / tile))
+            top = max(0, floor((clip.top - origin_y) / tile))
+            right = min(game_map.width, ceil((clip.right - origin_x) / tile))
+            bottom = min(game_map.height, ceil((clip.bottom - origin_y) / tile))
+            if right <= left or bottom <= top:
+                return
+            crop = pygame.Rect(left, top, right - left, bottom - top)
+            start = (round(origin_x + left * tile), round(origin_y + top * tile))
+            size = (
+                max(1, round(origin_x + right * tile) - start[0]),
+                max(1, round(origin_y + bottom * tile) - start[1]),
+            )
+            key = (tuple(crop), size)
+            if key != self._viewport_terrain_key:
+                self._scaled_map_surface = pygame.transform.scale(
+                    self._map_surface.subsurface(crop), size
+                )
+                self._viewport_terrain_key = key
+            assert self._scaled_map_surface is not None
+            screen.blit(self._scaled_map_surface, start)
+            return
         if self._map_surface is not None:
             if self._scaled_map_surface is None or self._scaled_map_size != view.map_pixel_size:
                 self._scaled_map_surface = pygame.transform.scale(
@@ -117,6 +160,13 @@ class SoftwareRenderer:
         unit_radius = max(5, round(tile_size * 0.42))
         bar_width = max(12, round(tile_size * 1.4))
         for entity_id, entity in view.simulation.entities.items():
+            entity_color = (
+                match_color(view.simulation.game_map, entity.owner_id)
+                if view.simulation.game_map.match_slots
+                else colors[entity.kind]
+                if entity.owner_id == "player"
+                else (218, 78, 78)
+            )
             center = (
                 origin_x + round(entity.selection_position.x * tile_size),
                 origin_y + round(entity.selection_position.y * tile_size),
@@ -129,13 +179,18 @@ class SoftwareRenderer:
                     round(width * tile_size),
                     round(height * tile_size),
                 )
-                pygame.draw.rect(screen, colors[entity.kind], rectangle, border_radius=3)
+                pygame.draw.rect(
+                    screen,
+                    entity_color if view.simulation.game_map.match_slots else colors[entity.kind],
+                    rectangle,
+                    border_radius=3,
+                )
                 pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
                 if entity_id in selected_entities:
                     pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
             else:
                 radius = unit_radius
-                color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
+                color = entity_color
                 pygame.draw.circle(screen, color, center, radius)
                 if entity_id in selected_entities:
                     pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
@@ -201,6 +256,8 @@ class SoftwareRenderer:
             inspected_ring: tuple[tuple[int, int], int] | None = None
             for entity_id, entity in view.simulation.entities.items():
                 color = colors[entity.kind] if entity.owner_id == "player" else (218, 78, 78)
+                if view.simulation.game_map.match_slots:
+                    color = match_color(view.simulation.game_map, entity.owner_id)
                 selected = entity_id in selected_entities
                 if entity.category is EntityCategory.BUILDING:
                     width, height = entity.kind.profile.footprint

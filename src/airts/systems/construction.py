@@ -54,10 +54,13 @@ def create_construction(
             ),
         )
     placement_failure = validate_building_placement(
-        simulation, command.building_kind, command.position
+        simulation, command.building_kind, command.position, owner_id=command.owner_id
     )
     if placement_failure is not None:
         return simulation._reject_validation("create_construction", placement_failure)
+    existing_site = resumable_site(
+        simulation, command.building_kind, command.position, command.owner_id
+    )
     automation = simulation._new_automation(
         AutomationKind.CONSTRUCTION,
         command.title,
@@ -71,13 +74,20 @@ def create_construction(
             command.position,
             simulation.CONSTRUCTION_REQUIRED_VALUE,
             builder_ids=list(builder_ids),
+            construction_value=(
+                0.0
+                if existing_site is None
+                else (existing_site.construction_progress or 0.0)
+                * simulation.CONSTRUCTION_REQUIRED_VALUE
+            ),
+            cost_paid=existing_site is not None,
+            site_entity_id=None if existing_site is None else existing_site.entity_id,
         ),
     )
     has_active_construction = any(
-        incumbent_id is not None
-        and simulation.automations[incumbent_id].kind is AutomationKind.CONSTRUCTION
-        for builder_id in builder_ids
-        if (incumbent_id := simulation.assignments.get(builder_id)) is not None
+        incumbent.kind is AutomationKind.CONSTRUCTION
+        and set(builder_ids).intersection(incumbent.entity_ids)
+        for incumbent in simulation.live_automations
     )
     if command.queued and has_active_construction:
         simulation._activate(automation, builder_ids, assign_entities=False)
@@ -98,31 +108,57 @@ def validate_building_placement(
     position: Point,
     *,
     ignore_construction_id: str | None = None,
+    owner_id: str | None = None,
 ) -> ValidationFailure | None:
     if not position.x.is_integer() or not position.y.is_integer():
         return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_NOT_GRID_ALIGNED", "position")
+    if (
+        kind is EntityKind.RESOURCE_GENERATOR
+        and simulation.game_map.resource_sites is not None
+        and position not in simulation.game_map.resource_sites
+    ):
+        return ValidationFailure(ValidationPhase.SPATIAL, "RESOURCE_SITE_REQUIRED", "position")
     cells = footprint_cells(kind, position)
     if any(not simulation.game_map.contains_cell(cell) for cell in cells):
         return ValidationFailure(ValidationPhase.SPATIAL, "FOOTPRINT_OUTSIDE_MAP", "position")
     if any(not simulation.game_map.is_cell_passable(cell) for cell in cells):
         return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_TERRAIN_BLOCKED", "position")
-    if cells & simulation._building_cells():
-        return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_OVERLAP", "position")
-    for automation in simulation.live_automations:
-        if (
-            automation.kind is not AutomationKind.CONSTRUCTION
-            or automation.automation_id == ignore_construction_id
-        ):
-            continue
-        parameters = automation.parameters
+    ignored_site = None
+    if owner_id is not None:
+        existing = resumable_site(simulation, kind, position, owner_id)
+        ignored_site = None if existing is None else existing.entity_id
+    if ignore_construction_id is not None:
+        parameters = simulation.automations[ignore_construction_id].parameters
         assert isinstance(parameters, ConstructionParameters)
-        if cells & construction_cells(parameters):
-            return ValidationFailure(
-                ValidationPhase.SPATIAL,
-                "CONSTRUCTION_SITE_RESERVED",
-                "position",
-            )
+        ignored_site = parameters.site_entity_id
+    if any(
+        entity.entity_id != ignored_site and not entity.is_movable and cells & entity.occupied_cells
+        for entity in simulation.entities.values()
+    ):
+        return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_OVERLAP", "position")
     return None
+
+
+def resumable_site(
+    simulation: Simulation, kind: EntityKind, position: Point, owner_id: str
+) -> Entity | None:
+    claimed = {
+        automation.parameters.site_entity_id
+        for automation in simulation.live_automations
+        if isinstance(automation.parameters, ConstructionParameters)
+    }
+    return next(
+        (
+            entity
+            for entity in simulation.entities.values()
+            if entity.kind is kind
+            and entity.position == position
+            and entity.owner_id == owner_id
+            and not entity.is_complete
+            and entity.entity_id not in claimed
+        ),
+        None,
+    )
 
 
 def cancel_queued_construction(simulation: Simulation, builder_ids: tuple[str, ...]) -> None:
@@ -152,44 +188,16 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         and builder_id in simulation.entities
     ]
     if not active_builders:
+        if any(
+            simulation.suspended_assignments.get(builder_id) == automation.automation_id
+            for builder_id in automation.entity_ids
+        ):
+            return
         simulation._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
         simulation._release_automation(automation)
         start_next_construction(simulation)
         return
-    if not parameters.cost_paid:
-        cost = parameters.building_kind.profile.construction_cost
-        balance = simulation.resources.get(automation.owner_id, 0)
-        if balance < cost:
-            if automation.status is AutomationStatus.ACTIVE:
-                simulation._transition(
-                    automation, AutomationStatus.WAITING, "INSUFFICIENT_RESOURCES"
-                )
-            return
-        simulation.resources[automation.owner_id] = balance - cost
-        parameters.cost_paid = True
-        if automation.status is AutomationStatus.WAITING:
-            simulation._transition(automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE")
-    placement_failure = validate_building_placement(
-        simulation,
-        parameters.building_kind,
-        parameters.position,
-        ignore_construction_id=automation.automation_id,
-    )
-    if placement_failure is not None:
-        simulation._transition(automation, AutomationStatus.FAILED, placement_failure.code)
-        simulation._release_automation(automation)
-        start_next_construction(simulation)
-        return
     site_cells = construction_cells(parameters)
-    site_occupants = frozenset(
-        entity_id for cell in site_cells for entity_id in simulation.occupancy.occupants(cell)
-    )
-    if (
-        automation.status is AutomationStatus.WAITING
-        and automation.reason_code == "SITE_OCCUPIED"
-        and not site_occupants
-    ):
-        simulation._transition(automation, AutomationStatus.ACTIVE, "SITE_CLEARED")
     builders_in_range: list[str] = []
     route_available = False
     destinations = construction_interaction_points(simulation, parameters)
@@ -203,7 +211,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         ):
             builder.path.clear()
             builder.move_target = None
-            builder.state = UnitState.BUILDING
+            builder.state = UnitState.WAITING
             movement.reset_movement_liveness(builder)
             builders_in_range.append(builder_id)
             route_available = True
@@ -238,41 +246,98 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
             simulation._release_automation(automation)
             start_next_construction(simulation)
         return
+    if parameters.site_entity_id is None:
+        placement_failure = validate_building_placement(
+            simulation,
+            parameters.building_kind,
+            parameters.position,
+            ignore_construction_id=automation.automation_id,
+        )
+        if placement_failure is not None:
+            # Another real building may have covered this non-reserving blueprint.
+            simulation._transition(automation, AutomationStatus.FAILED, placement_failure.code)
+            simulation._release_automation(automation)
+            start_next_construction(simulation)
+            return
+        site_occupants = frozenset(
+            entity_id for cell in site_cells for entity_id in simulation.occupancy.occupants(cell)
+        )
+        if site_occupants:
+            wait_for_site(simulation, automation, "SITE_OCCUPIED")
+            return
+        if not parameters.cost_paid:
+            cost = parameters.building_kind.profile.construction_cost
+            balance = simulation.resources.get(automation.owner_id, 0)
+            if balance < cost:
+                wait_for_site(simulation, automation, "INSUFFICIENT_RESOURCES")
+                return
+            simulation.resources[automation.owner_id] = balance - cost
+            parameters.cost_paid = True
+        while True:
+            entity_id = f"{parameters.building_kind.value}_{simulation._next_entity_number:03d}"
+            simulation._next_entity_number += 1
+            if entity_id not in simulation.entities:
+                break
+        building = Entity(
+            entity_id,
+            parameters.building_kind,
+            automation.owner_id,
+            parameters.position,
+            max(
+                1,
+                round(
+                    parameters.building_kind.profile.max_health
+                    * parameters.construction_value
+                    / parameters.required_value
+                ),
+            ),
+            construction_progress=parameters.construction_value / parameters.required_value,
+        )
+        simulation.occupancy.place(entity_id, building.occupied_cells)
+        simulation.entities[entity_id] = building
+        parameters.site_entity_id = entity_id
+        simulation._invalidate_navigation_cache()
+    if automation.status is AutomationStatus.WAITING:
+        simulation._transition(automation, AutomationStatus.ACTIVE, "CONSTRUCTION_READY")
+    building = simulation.entities[parameters.site_entity_id]
+    for builder_id in builders_in_range:
+        simulation.entities[builder_id].state = UnitState.BUILDING
     work = sum(
         simulation.entities[builder_id].kind.profile.build_speed for builder_id in builders_in_range
+    )
+    previous_health = max(
+        1,
+        round(
+            building.kind.profile.max_health
+            * parameters.construction_value
+            / parameters.required_value
+        ),
     )
     parameters.construction_value = min(
         parameters.required_value,
         parameters.construction_value + work,
     )
+    building.construction_progress = parameters.construction_value / parameters.required_value
+    building.health = min(
+        building.kind.profile.max_health,
+        building.health
+        + round(building.kind.profile.max_health * building.construction_progress)
+        - previous_health,
+    )
     if parameters.construction_value < parameters.required_value:
         return
-    site_occupants = frozenset(
-        entity_id for cell in site_cells for entity_id in simulation.occupancy.occupants(cell)
-    )
-    if site_occupants:
-        if automation.status is AutomationStatus.ACTIVE:
-            simulation._transition(automation, AutomationStatus.WAITING, "SITE_OCCUPIED")
-        return
-    while True:
-        entity_id = f"{parameters.building_kind.value}_{simulation._next_entity_number:03d}"
-        simulation._next_entity_number += 1
-        if entity_id not in simulation.entities:
-            break
-    building = Entity(
-        entity_id,
-        parameters.building_kind,
-        automation.owner_id,
-        parameters.position,
-        parameters.building_kind.profile.max_health,
-    )
-    simulation.occupancy.place(entity_id, building.occupied_cells)
-    simulation.entities[entity_id] = building
-    simulation._invalidate_navigation_cache()
-    parameters.constructed_entity_id = entity_id
+    building.construction_progress = None
+    parameters.constructed_entity_id = building.entity_id
     simulation._transition(automation, AutomationStatus.COMPLETED, "CONSTRUCTION_COMPLETED")
     simulation._release_automation(automation)
     start_next_construction(simulation)
+
+
+def wait_for_site(simulation: Simulation, automation: Automation, reason: str) -> None:
+    if automation.status is AutomationStatus.WAITING and automation.reason_code != reason:
+        simulation._transition(automation, AutomationStatus.ACTIVE, "CONSTRUCTION_RECHECKED")
+    if automation.status is AutomationStatus.ACTIVE:
+        simulation._transition(automation, AutomationStatus.WAITING, reason)
 
 
 def construction_cells(parameters: ConstructionParameters) -> frozenset[Cell]:
@@ -316,32 +381,25 @@ def start_next_construction(simulation: Simulation) -> None:
     queued = sorted(
         (
             automation
-            for automation in simulation.automations.values()
+            for automation in simulation._live_automation_candidates
             if automation.kind is AutomationKind.CONSTRUCTION
             and automation.status is AutomationStatus.WAITING
             and automation.reason_code == "BUILDERS_QUEUED"
         ),
-        key=lambda automation: (automation.created_tick, automation.automation_id),
+        key=lambda automation: (
+            automation.created_tick,
+            int(automation.automation_id.removeprefix("automation_")),
+        ),
     )
     for automation in queued:
-        parameters = automation.parameters
-        assert isinstance(parameters, ConstructionParameters)
-        builder_ids = tuple(parameters.builder_ids)
-        if not builder_ids or any(
-            builder_id not in simulation.entities for builder_id in builder_ids
-        ):
+        builder_ids = tuple(automation.entity_ids)
+        if not builder_ids:
             simulation._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
             continue
-        if any(builder_id in simulation.assignments for builder_id in builder_ids):
-            continue
-        failure = validate_building_placement(
-            simulation,
-            parameters.building_kind,
-            parameters.position,
-            ignore_construction_id=automation.automation_id,
-        )
-        if failure is not None:
-            simulation._transition(automation, AutomationStatus.FAILED, failure.code)
+        if any(
+            builder_id in simulation.assignments or builder_id in simulation.suspended_assignments
+            for builder_id in builder_ids
+        ):
             continue
         for builder_id in builder_ids:
             simulation._assign(builder_id, automation)

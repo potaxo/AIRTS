@@ -24,6 +24,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    ReduceProductionCommand,
     RemoveEntityCommand,
     RenameRegionCommand,
     ResumeAutomationCommand,
@@ -40,6 +41,7 @@ from airts.world.map import EntityKind
     "command",
     [
         MoveCommand(("unit",), Point(3, 4)),
+        MoveCommand(("unit",), Point(3, 4), gathering=True),
         StopCommand(("unit",)),
         HoldPositionCommand(("unit",)),
         RemoveEntityCommand("unit", "DESTROYED"),
@@ -51,6 +53,7 @@ from airts.world.map import EntityKind
             gathering_point=True,
         ),
         CreateProductionCommand("factory", EntityKind.LIGHT_TANK, 3, Point(8, 8)),
+        ReduceProductionCommand("factory", EntityKind.SCOUT),
         CreateReinforcementCommand(("reserve",), "automation_001", 2),
         CreateRepairAndReturnCommand(("unit",), 0.4, 7),
         PauseAutomationCommand("automation_001"),
@@ -85,6 +88,11 @@ def test_command_schemas_round_trip(command: Command) -> None:
 @pytest.mark.parametrize(
     ("data", "message"),
     [
+        pytest.param(
+            {"type": "move", "entity_ids": ["unit"], "target": [3, 4], "gathering": 1},
+            "gathering must be a boolean",
+            id="malformed-move-gathering",
+        ),
         pytest.param(
             {"type": "unsupported", "automation_id": "x"},
             "unsupported command type",

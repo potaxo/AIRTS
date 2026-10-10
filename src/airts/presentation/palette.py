@@ -1,8 +1,22 @@
 """Shared terrain, entity, and projectile colors for both rendering backends."""
 
-from airts.world.map import EntityKind, Terrain
+from airts.world.map import EntityKind, GameMap, Terrain
 
 type Color = tuple[int, int, int]
+
+TEAM_COLORS: dict[int, Color] = {
+    1: (92, 220, 145),
+    2: (232, 91, 88),
+    3: (234, 203, 85),
+    4: (153, 135, 235),
+}
+
+
+def match_color(game_map: GameMap, owner_id: str) -> Color:
+    return TEAM_COLORS[
+        next(slot.team for slot in game_map.match_slots if slot.owner_id == owner_id)
+    ]
+
 
 TERRAIN_COLORS: dict[Terrain, Color] = {
     Terrain.GRASS: (64, 102, 60),

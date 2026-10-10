@@ -27,6 +27,7 @@ from airts.contracts.commands import (
     CommandResult,
     CreateProductionBatchCommand,
     CreateProductionCommand,
+    ReduceProductionCommand,
     ValidationFailure,
     ValidationPhase,
     error_reason,
@@ -57,17 +58,17 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
     if failure is not None:
         return simulation._reject_validation("create_production", failure)
     factory = simulation.entities[command.factory_id]
-    if factory.kind is not EntityKind.FACTORY:
+    if not factory.kind.production_kinds or not factory.is_complete:
         return simulation._reject_validation(
             "create_production",
             ValidationFailure(
                 ValidationPhase.CAPABILITY,
-                "ENTITY_NOT_FACTORY",
+                "ENTITY_NOT_FACTORY" if factory.is_complete else "FACTORY_UNDER_CONSTRUCTION",
                 "factory_id",
                 {"entity_id": command.factory_id, "kind": factory.kind.value},
             ),
         )
-    if command.unit_kind.profile.category is not EntityCategory.UNIT:
+    if command.unit_kind not in factory.kind.production_kinds:
         return simulation._reject_validation(
             "create_production",
             ValidationFailure(
@@ -209,12 +210,23 @@ def create_production_batch(
             "create_production_batch",
             ValidationFailure(ValidationPhase.SCHEMA, "EMPTY_PRODUCTION_SEQUENCE", "sequence"),
         )
+    failure = simulation._validate_entities((command.factory_id,), command.owner_id)
+    if failure is not None:
+        return simulation._reject_validation("create_production_batch", failure)
+    source = simulation.entities[command.factory_id]
     for kind, quantity in command.sequence:
         if kind.profile.category is not EntityCategory.UNIT or quantity <= 0:
             return simulation._reject_validation(
                 "create_production_batch",
                 ValidationFailure(
                     ValidationPhase.SCHEMA, "INVALID_PRODUCTION_SEQUENCE", "sequence"
+                ),
+            )
+        if kind not in source.kind.production_kinds:
+            return simulation._reject_validation(
+                "create_production_batch",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "UNSUPPORTED_PRODUCTION_KIND", "sequence"
                 ),
             )
     first_kind = command.sequence[0][0]
@@ -234,6 +246,74 @@ def create_production_batch(
         parameters = production_parameters(simulation.automations[result.automation_id or ""])
         parameters.sequence = command.sequence
     return result
+
+
+def reduce_production(simulation: Simulation, command: ReduceProductionCommand) -> CommandResult:
+    failure = simulation._validate_entities((command.factory_id,), command.owner_id)
+    if failure is not None:
+        return simulation._reject_validation("reduce_production", failure)
+    source = simulation.entities[command.factory_id]
+    if command.unit_kind not in source.kind.production_kinds or not source.is_complete:
+        return simulation._reject_validation(
+            "reduce_production",
+            ValidationFailure(
+                ValidationPhase.CAPABILITY, "UNSUPPORTED_PRODUCTION_KIND", "unit_kind"
+            ),
+        )
+    job = next(
+        (
+            item
+            for item in reversed(factory_production_jobs(simulation, command.factory_id))
+            if not (parameters := production_parameters(item)).continuous
+            and parameters.remaining_count(command.unit_kind) > 0
+        ),
+        None,
+    )
+    if job is None:
+        return simulation._reject_validation(
+            "reduce_production",
+            ValidationFailure(ValidationPhase.CAPABILITY, "NO_PENDING_PRODUCTION", "unit_kind"),
+        )
+    parameters = production_parameters(job)
+    if parameters.target_count - parameters.produced_count == 1:
+        simulation._transition(job, AutomationStatus.CANCELED, "PLAYER_REDUCED_PRODUCTION")
+        simulation._release_automation(job)
+        start_next_production(simulation, command.factory_id)
+    else:
+        parameters.target_count -= 1
+        if parameters.sequence:
+            sequence = list(parameters.sequence)
+            index = next(
+                index
+                for index in range(len(sequence) - 1, parameters.sequence_index - 1, -1)
+                if sequence[index][0] is command.unit_kind
+                and sequence[index][1]
+                > (parameters.sequence_produced if index == parameters.sequence_index else 0)
+            )
+            kind, quantity = sequence[index]
+            removing_current = (
+                index == parameters.sequence_index and quantity - parameters.sequence_produced == 1
+            )
+            if quantity == 1:
+                sequence.pop(index)
+            else:
+                sequence[index] = (kind, quantity - 1)
+                if removing_current:
+                    parameters.sequence_index += 1
+            if removing_current:
+                parameters.sequence_produced = 0
+                parameters.progress_ticks = 0
+                parameters.cost_paid = False
+            parameters.sequence = tuple(sequence)
+        job.modified_tick = simulation.tick
+    simulation.events.record(
+        simulation.tick,
+        EventType.AUTOMATION_MODIFIED,
+        job.automation_id,
+        reason="PLAYER_REDUCED_PRODUCTION",
+        parameters=parameters.to_dict(),
+    )
+    return simulation._accept("reduce_production", job.automation_id)
 
 
 def supersede_continuous_production(simulation: Simulation, factory_id: str) -> None:

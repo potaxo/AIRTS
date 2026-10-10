@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 from itertools import pairwise
 from time import perf_counter
+
+import pytest
 
 from airts.contracts.automations import AutomationStatus, DefendParameters
 from airts.contracts.commands import (
@@ -18,7 +22,8 @@ from airts.navigation.collision import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import EntityKind, EntitySpec, load_map_data
+from airts.world.skirmish import create_skirmish_map
 
 
 def _large_simulation(unit_count: int, *, with_repair_hub: bool = False) -> Simulation:
@@ -266,14 +271,16 @@ def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks(
         assert tick_elapsed < 2.0
 
 
+@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
 def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
     check_timing: bool,
+    gathering: bool,
 ) -> None:
     simulation = _large_simulation(1_000)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
 
     started = perf_counter()
-    result = simulation.execute(MoveCommand(selected, Point(70.5, 50.5)))
+    result = simulation.execute(MoveCommand(selected, Point(70.5, 50.5), gathering=gathering))
     elapsed = perf_counter() - started
 
     destinations = {simulation.entities[entity_id].move_target for entity_id in selected}
@@ -282,6 +289,39 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
     assert simulation.navigation_field_build_count <= 64
     if check_timing:
         assert elapsed < 2.0
+
+
+@pytest.mark.parametrize("unit_count", [2, 1000])
+def test_gathering_on_large_river_map_does_not_freeze_input(
+    check_timing: bool, unit_count: int, record_property: Callable[[str, object], None]
+) -> None:
+    game_map = create_skirmish_map()
+    units = tuple(
+        EntitySpec(
+            f"gather_{index:04d}",
+            EntityKind.SCOUT,
+            "player",
+            Point(50.5 + index % 40, 235.5 + index // 40),
+        )
+        for index in range(unit_count)
+    )
+    simulation = Simulation(replace(game_map, entities=game_map.entities + units))
+    selected = tuple(unit.entity_id for unit in units)
+    for index, target in enumerate((Point(80.5, 275.5), Point(90.5, 275.5), Point(110.5, 275.5))):
+        started = perf_counter()
+        result = simulation.execute(MoveCommand(selected, target, gathering=True))
+        elapsed = perf_counter() - started
+        record_property(f"gather_{index}_seconds", elapsed)
+        assert result.accepted, result.reason
+        goals = {key: simulation.entities[key].move_target for key in selected}
+        assert len(set(goals.values())) == unit_count
+        assert all(goal is not None for goal in goals.values())
+        assert simulation.navigation_field_build_count <= 64
+        if check_timing:
+            assert elapsed < (0.25 if unit_count == 2 else 0.75)
+    simulation.advance(10)
+    assert all(key in simulation.entities for key in selected)
+    assert any(simulation.entities[unit.entity_id].position != unit.position for unit in units)
 
 
 def test_thousand_unit_gathering_point_expands_and_remains_stable_in_realtime(
@@ -568,7 +608,8 @@ def test_thousand_unit_focus_click_targets_the_enemy_building_footprint_quickly(
         simulation.entities[entity_id].attack_target_id == "enemy_factory"
         for entity_id in entity_ids
     )
-    assert simulation.navigation_field_build_count == 1
+    # Every admitted attacker has a clear direct approach; no field is needed.
+    assert simulation.navigation_field_build_count == 0
     if check_timing:
         assert command_elapsed < 1.0
         assert tick_elapsed < 2.0

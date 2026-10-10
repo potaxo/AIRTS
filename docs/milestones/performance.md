@@ -22,7 +22,10 @@ threshold in response to a failing run. Simulation-tick budgets are separate fro
 Physical monitor/compositor cadence needs external measurement; neither offscreen GPU tests nor
 application FPS prove scan-out.
 
-Simulation remains deterministic, single-threaded CPU work at 10 Hz. The frontend has a 1,000 FPS
+Simulation remains deterministic, single-threaded CPU work at 10 Hz. Routing, collision and
+command validation remain serial CPU work; GPU drawing never feeds back into authoritative state.
+Large-map/army construction drains initialization/previous-scene garbage before live frames;
+automatic Python garbage collection remains enabled during play. The frontend has a 1,000 FPS
 ceiling and requests VSync off. Native OpenGL 3.3 uses `OPENGL | DOUBLEBUF | RESIZABLE`, never
 `SCALED` or silent software fallback. Context failures are diagnostic. Windows verification uses
 the native WGL backend. The app retains a WSLg/Wayland compatibility branch, but repository
@@ -33,10 +36,19 @@ Render Driver) cannot count as hardware evidence. Dependencies stay in [pyprojec
 OpenGL preserves every terrain/grid element, unit, building, selection, and inspected health bar.
 Large selections use tint/aggregate details and 1-32 representative routes, including the inspected
 route; visual detail reduction cannot hide units, drop ownership, or disable collision/simulation.
-Terrain uploads on transform changes; dynamic buffers retain capacity and rebuild at tick/relevant
-UI changes. Normal batches are terrain, entities, bounded lines, and UI composition. GPU shapes
-include projectiles, retained traces, and assembly glow. Font/interaction textures upload dirty
-regions; status refreshes in three-tick buckets and explicit interaction stays immediate.
+Terrain uploads once per map in world coordinates; units, buildings, representative paths,
+projectiles and traces also retain world-coordinate buffers between ticks. Zoom/pan/resize update
+GPU transform uniforms without rebuilding or uploading those buffers or the terrain cells/grid. Grid widths remain fixed in pixels. Software
+site maps cache one pixel per cell and scale a viewport-sized crop, never a full zoomed world.
+Dynamic buffers retain capacity and rebuild at tick/relevant selection or inspection changes. Normal batches are terrain, entities, bounded lines, and UI composition. GPU shapes
+include projectiles, retained traces, and assembly glow. Immutable retained traces reuse their
+packed geometry until expiry; active projectile feedback still updates every tick. Resource sites, private blueprints, placement previews, actual scaffold outlines/progress bars,
+spatial references and input drafts use cached GPU world primitives. Camera changes update their
+transform uniforms without rebuilding geometry or uploading textures. Concave region fills are
+triangulated on edit; line thickness, progress-bar height and text size stay fixed in pixels.
+Construction percentages and region names use a small cached text atlas, positioned by the GPU.
+Panel/font textures upload dirty regions; camera movement never dirties the full canvas.
+Status refreshes in three-tick buckets and explicit interaction stays immediate.
 
 GPU interpolation mixes previous/current fixed-tick centers without per-frame buffer rebuilds or
 feedback into authoritative state. It adds at most 100 ms visual latency and resets on load/reset.
@@ -65,6 +77,7 @@ remain in default validation. Selecting a test path alone does not override mark
 | [4K OpenGL](../../tests/performance/test_opengl_thousand_scout_100fps.py) | Same scout fixture; CPU submission plus hardware end-to-end 100-frame/ten-tick gates; real collision, >=750 moving scouts, pixel readback, per-frame GPU completion, >=100 Real FPS |
 | [Sustained battle](../../tests/performance/test_sustained_complex_battle_performance.py) | 500 vs 500, each 70/20/10 scout/light/heavy, 80 x 60 mixed terrain; friendly line defense plus enemy move; 30 ticks/300 native-4K hardware frames, ten interpolation samples/tick, six inspection changes; real projectiles, damage, collision, pixel readback, >=80 Real FPS required, 100 Real FPS optimization goal |
 | [Continuous production](../../tests/performance/test_crowd_congestion_performance.py) | 296 defenders + four factories ->304 defenders; 100 software frames at 1920 x 1080/ten ticks; stable unique stations, separation >=90% contact distance, no building intrusion, >=100 Real FPS |
+| [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 80 x 80 headless map, 60 ticks; unique bounded squads and per-decision command/candidate/forecast limits; timing variant requires complete tick p95 <100 ms and reports AI decisions/commands |
 
 Renderer startup, primitive counts, buffer reuse, release/error paths, and interpolation correctness
 live in [presentation integration tests](../../tests/integration/test_opengl_presentation.py).
@@ -83,6 +96,9 @@ and bridge-turn lookahead remain distinct regressions.
 move/patrol/repair/gathering/focus commands, gathering expansion/contraction, and 500-unit line,
 repair, delayed-route, choke, opposing-army, and determinism checks. Keep per-tick route budgets
 and the 6,000 collision-pair limit in the 500-unit choke; do not omit queued members to meet timing.
+The same suite checks cold and changed gathering targets for two and 1,000 scouts on the
+320 x 320 river map, including nearby rocks: command limits are 250 ms and 750 ms respectively.
+It records each target's command duration and preserves every selected member and movement intent.
 
 [Behavior regressions](../../tests/integration/test_large_force_behavior_regressions.py) preserve
 identity (no exact position exchanges), per-tick speed bounds, unobstructed front-rank continuity,

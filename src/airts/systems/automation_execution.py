@@ -280,7 +280,7 @@ def drive_defend(
         enemies = {
             key: e.position
             for key, e in simulation.entities.items()
-            if e.owner_id != automation.owner_id
+            if simulation.are_hostile(e.owner_id, automation.owner_id)
         }
         enemy_index = SpatialIndex(enemies)
         enemy_indexes[automation.owner_id] = enemies, enemy_index

@@ -15,7 +15,9 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python -m airts
 ```
 
-The first simulation startup compiles the serial CPU kernels and can take several seconds.
+The first simulation startup after kernel changes compiles the serial CPU kernels and can take
+several seconds. Later launches reuse Numba's on-disk compiled cache; compiler failures still
+propagate. Source-checkout caches live in ignored `__pycache__` directories.
 NumPy holds numeric buffers; Numba accelerates movement, route lookahead, and visibility.
 
 ## Run
@@ -27,6 +29,7 @@ before exporting files because export commands do not create parent directories:
 ```powershell
 New-Item -ItemType Directory -Force outputs | Out-Null
 .\.venv\Scripts\python -m airts --renderer software
+.\.venv\Scripts\python -m airts --legacy-map
 .\.venv\Scripts\python -m airts --map PATH
 .\.venv\Scripts\python -m airts --enemy-spawn-seconds 2.5 --enemy-cap 60
 .\.venv\Scripts\python -m airts --event-log outputs/events.jsonl
@@ -41,13 +44,22 @@ New-Item -ItemType Directory -Force outputs | Out-Null
 previously exported file. Replay verifies the recorded final snapshot and event stream, then opens
 that resulting simulation; it does not play back an animated timeline.
 
-For a new CLI game, enemy generation defaults to one unit/second, cap 100;
+Default startup shows a cover and opening setup for the fixed 320 x 320 symmetric river map.
+Click **Start game**, choose the four slot controllers and teams, then **Begin match**.
+Exactly one human and at least two opposing teams are required. Configuration is locked after
+starting; `F2` returns to the opening cover. Resource sites are visible red rings; build Resource
+Extractors on those sites. Placement snaps within three cells of a site's center. The central
+crossing has wide clear lanes beside its resource sites. Team colors identify allies and opponents.
+All units/buildings are visible; no fog overlay is enabled. The roster displays active, eliminated
+and out states; [Runtime](docs/milestones/runtime.md#skirmish-configuration-and-results) owns their rules.
+
+`--legacy-map` opens the original 64 x 64 sandbox directly. For legacy/custom sandbox games,
+enemy generation defaults to one unit/second, cap 100;
 `--enemy-spawn-seconds 0` disables it. Loaded saves/replays retain their recorded spawn settings;
 these CLI spawn options do not override them. `--max-frames N` closes after N rendered frames.
 
-CLI exports run after normal window exit and currently use the simulation created at startup.
-After an in-window load (`F9`) or reset (`F2`), use `F5` to save the displayed game; CLI exports
-still refer to the earlier simulation. Quicksave writes `airts-quicksave.json` in the working
+CLI exports run after normal window exit and use the currently displayed simulation, including
+in-window starts and loads. Quicksave writes `airts-quicksave.json` in the working
 directory and overwrites that file; keep it out of Git.
 
 Settings offers resolution presets and p95 frame/render/present-wait/simulation timings.
@@ -63,27 +75,38 @@ These measurements do not count physical monitor scan-out;
 | `2` | Add line vertices; right-click to finish the route |
 | `3` | Drag a rectangular patrol area |
 | `4` | Draw a freehand patrol area |
-| `A` | Create a patrol from the selected units and current target |
-| `D` | Create a defend automation from selected units and current target |
+| `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right; stop at map boundaries |
+| `T` | Create a patrol from the selected units and current target |
+| `Y` | Create a defend automation from selected units and current target |
 | `P` | Attach every selected factory loop to the active line or area defense; start a Loop on each factory first |
 | `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
-| `G` | Develop the economy with selected resource generators until 100 more resources |
-| `S` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/runtime.md#contact-yielding-and-hold-anchors)) |
+| `X` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/runtime.md#contact-yielding-and-hold-anchors)) |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
 | `Delete` | Delete one selected route or region and explicitly cancel automations using it |
 | `F5` / `F9` | Save or load `airts-quicksave.json` |
-| `F2` | Start over with the startup map, seed, and enemy spawn settings; in-window loads do not replace these settings |
+| `F2` | Return to opening configuration in a team match; reset the startup map/seed/spawn settings in a legacy sandbox |
 | `U` | Replace the inspected patrol/defend target or production loop's defense target with the active spatial target |
 | `Shift` + build click | Keep placement mode active and append the site to the selected builders' FIFO construction queue |
 | Right-click while placing | Close building placement without moving builders or changing queued construction |
 | `[` / `]` | Decrease or increase the inspected automation priority |
-| Right-click | Move, or attack an enemy under the cursor |
-| `Space` | Pause or resume simulation time |
+| Right-click | Move while preserving the current formation, or attack an enemy under the cursor |
+| Double right-click at the same destination | Gather selected units around ground or friendly entities, regardless of army size; enemy clicks still attack |
+| `Space` or top-left Pause/Resume | Pause or resume simulation time |
 | `Esc` | Return to selection mode and clear entity, spatial, placement, and inspection state |
 | Middle-drag | Pan the game canvas independently of window resolution |
 | Mouse wheel over left panel | Scroll active automations |
+| Mouse wheel over map | Zoom around the cursor, bounded between the full-map view and 32 pixels per cell |
 | Double-click friendly entity | Select every friendly entity of the same type inside the canvas |
+
+The right sidebar contains Selection information and controls. Factories offer scouts, tanks,
+and builders; command centers offer builders. Each production row has a unit name/remaining count,
+`+`, `-`, and `Loop`: `+` orders immediately on each selected source, `-` removes one unfinished
+finite order per source, and `Loop` preserves continuous production. Click the unit name to inspect
+its attributes and cost. Canceling a paid unit does not refund its cost.
+
+The left sidebar separates unit, production, and construction automations into tabs. Each row has
+`||` to pause / `>` to resume, `X` to cancel, and `...` to open details in the right sidebar.
 
 ## Windows package
 

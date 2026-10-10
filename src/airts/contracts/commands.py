@@ -93,6 +93,7 @@ class MoveCommand:
     entity_ids: tuple[str, ...]
     target: Point
     owner_id: str = "player"
+    gathering: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +167,15 @@ class CreateProductionBatchCommand:
     priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ReduceProductionCommand:
+    """Remove one unfinished finite unit, newest matching request first."""
+
+    factory_id: str
+    unit_kind: EntityKind
+    owner_id: str = "player"
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +304,7 @@ Command = (
     | CreateDefendCommand
     | CreateProductionCommand
     | CreateProductionBatchCommand
+    | ReduceProductionCommand
     | CreateConstructionCommand
     | CreateReinforcementCommand
     | CreateRepairAndReturnCommand
@@ -320,6 +331,13 @@ class CommandResult:
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, ReduceProductionCommand):
+        return {
+            "type": "reduce_production",
+            "factory_id": command.factory_id,
+            "unit_kind": command.unit_kind.value,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, CreateSpatialReferenceCommand):
         return {
             "type": "create_spatial_reference",
@@ -379,6 +397,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "entity_ids": list(command.entity_ids),
             "target": [command.target.x, command.target.y],
             "owner_id": command.owner_id,
+            **({"gathering": True} if command.gathering else {}),
         }
     if isinstance(command, AttackCommand):
         return {
@@ -553,7 +572,10 @@ def command_from_dict(raw_data: object) -> Command:
         )
     if command_type == "move":
         return MoveCommand(
-            _entity_ids(data.get("entity_ids")), _point(data.get("target"), "target"), owner_id
+            _entity_ids(data.get("entity_ids")),
+            _point(data.get("target"), "target"),
+            owner_id,
+            gathering=_boolean(data.get("gathering", False), "gathering"),
         )
     if command_type == "attack":
         return AttackCommand(
@@ -584,6 +606,12 @@ def command_from_dict(raw_data: object) -> Command:
             target,
             *common,
             gathering_point=_boolean(data.get("gathering_point", False), "gathering_point"),
+        )
+    if command_type == "reduce_production":
+        return ReduceProductionCommand(
+            _string(data.get("factory_id"), "factory_id"),
+            EntityKind(_string(data.get("unit_kind"), "unit_kind")),
+            owner_id,
         )
     if command_type == "create_production":
         try:

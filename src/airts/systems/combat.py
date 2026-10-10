@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import ceil, floor, isclose
+from math import ceil, floor, hypot, isclose
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import AutomationKind
@@ -36,6 +36,7 @@ def drive_combat(simulation: Simulation) -> None:
         key: point for owned in positions_by_owner.values() for key, point in owned.items()
     }
     nearest_enemies: dict[str, str] = {}
+    approach_cache: dict[tuple[str, float], tuple[Point, ...]] = {}
     for owner_id, owned in positions_by_owner.items():
         armed = []
         query_list = []
@@ -47,7 +48,7 @@ def drive_combat(simulation: Simulation) -> None:
             target = simulation.entities.get(entity.attack_target_id or "")
             if (
                 target is not None
-                and target.owner_id != owner_id
+                and simulation.are_hostile(target.owner_id, owner_id)
                 and _squared_distance(positions[key], positions[target.entity_id])
                 <= profile.attack_range * profile.attack_range
             ):
@@ -62,7 +63,7 @@ def drive_combat(simulation: Simulation) -> None:
             query_list.append((positions[key], profile.attack_range))
         armed_ids, queries = tuple(armed), tuple(query_list)
         for other_id in sorted(owner_indexes):
-            if other_id == owner_id:
+            if not simulation.are_hostile(other_id, owner_id):
                 continue
             candidates = owner_indexes[other_id].nearest_many(queries)
             for key, candidate in zip(armed_ids, candidates, strict=True):
@@ -91,7 +92,9 @@ def drive_combat(simulation: Simulation) -> None:
         if attacker.attack_cooldown > 0:
             attacker.attack_cooldown -= 1
         ordered_target = simulation.entities.get(attacker.attack_target_id or "")
-        if ordered_target is None or ordered_target.owner_id == attacker.owner_id:
+        if ordered_target is None or not simulation.are_hostile(
+            ordered_target.owner_id, attacker.owner_id
+        ):
             attacker.pursue_target = False
             ordered_target = None
             attacker.attack_target_id = None
@@ -135,7 +138,7 @@ def drive_combat(simulation: Simulation) -> None:
             }
             and simulation._routes.claim_combat_route()
         ):
-            chase_target(simulation, attacker, ordered_target)
+            chase_target(simulation, attacker, ordered_target, approach_cache)
         firing_target: Entity | None
         if (
             ordered_target is not None
@@ -191,7 +194,7 @@ def drive_projectiles(simulation: Simulation) -> None:
         if projectile is None:
             continue
         target = simulation.entities.get(projectile.target_entity_id)
-        if target is not None and target.owner_id != projectile.owner_id:
+        if target is not None and simulation.are_hostile(target.owner_id, projectile.owner_id):
             projectile.destination = target.selection_position
         destination = projectile.destination
         distance = projectile.position.distance_to(destination)
@@ -199,7 +202,7 @@ def drive_projectiles(simulation: Simulation) -> None:
         if distance <= maximum_step or isclose(distance, maximum_step):
             projectile.position = destination
             projectile.trajectory.append(destination)
-            if target is None or target.owner_id == projectile.owner_id:
+            if target is None or not simulation.are_hostile(target.owner_id, projectile.owner_id):
                 finish_projectile(simulation, projectile)
             else:
                 impact_projectile(simulation, projectile, target)
@@ -269,17 +272,21 @@ def _squared_distance(first: Point, second: Point) -> float:
     return offset_x * offset_x + offset_y * offset_y
 
 
-def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> None:
+def chase_target(
+    simulation: Simulation,
+    attacker: Entity,
+    target: Entity,
+    approach_cache: dict[tuple[str, float], tuple[Point, ...]] | None = None,
+) -> None:
     """Route an ordered attacker to a valid interaction point."""
 
-    goals = _firing_approach_points(simulation, attacker, target)
-    try:
-        point, path = simulation._routes.shared_path_to_any(
-            attacker.position,
-            goals,
-            simulation._building_cells(),
-        )
-    except PathfindingError:
+    key = (target.entity_id, attacker.kind.profile.attack_range)
+    goals = approach_cache.get(key) if approach_cache is not None else None
+    if goals is None:
+        goals = _firing_approach_points(simulation, attacker, target)
+        if approach_cache is not None:
+            approach_cache[key] = goals
+    if not goals:
         return
     slot = sum((index + 1) * ord(char) for index, char in enumerate(attacker.entity_id)) % len(
         goals
@@ -295,6 +302,15 @@ def chase_target(simulation: Simulation, attacker: Entity, target: Entity) -> No
             (point,),
             sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
         )
+    else:
+        try:
+            point, path = simulation._routes.shared_path_to_any(
+                attacker.position,
+                goals,
+                simulation._building_cells(),
+            )
+        except PathfindingError:
+            return
     movement.start_path(simulation, attacker, point, path, "combat", UnitState.ATTACKING)
 
 
@@ -317,6 +333,6 @@ def _firing_approach_points(
         if simulation.game_map.contains_cell((x, y))
         and simulation.game_map.is_cell_passable((x, y))
         and (x, y) not in target_cells
-        and inner_radius <= Point(x + 0.5, y + 0.5).distance_to(center) <= outer_radius
+        and inner_radius <= hypot(x + 0.5 - center.x, y + 0.5 - center.y) <= outer_radius
     )
     return points or simulation._interaction_points(target)

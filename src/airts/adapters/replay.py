@@ -10,7 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v10"
+REPLAY_SCHEMA = "airts-replay-v11"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v4"
 
 
 class ReplayError(ValueError):
@@ -40,7 +41,7 @@ class ReplayData:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": REPLAY_SCHEMA,
+            "schema": MATCH_REPLAY_SCHEMA if self.game_map.match_slots else REPLAY_SCHEMA,
             "airts_version": "0.1.0",
             "map": self.game_map.to_dict(),
             "random_seed": self.random_seed,
@@ -91,16 +92,29 @@ def load_replay(path: str | Path) -> ReplayData:
 
 def load_replay_data(raw_data: object) -> ReplayData:
     document = _mapping(raw_data, "replay document")
-    if document.get("schema") != REPLAY_SCHEMA:
+    if document.get("schema") in {
+        "airts-match-replay-v1",
+        "airts-match-replay-v2",
+        "airts-match-replay-v3",
+    }:
+        raise ReplayError(
+            "legacy match replay uses an older opponent policy or elimination rules; "
+            "replay with its original AIRTS version"
+        )
+    if document.get("schema") not in {REPLAY_SCHEMA, MATCH_REPLAY_SCHEMA}:
         raise ReplayError(f"unsupported replay schema: {document.get('schema')}")
     try:
         game_map = load_map_data(document.get("map"))
     except MapValidationError as error:
         raise ReplayError(f"invalid replay map: {error}") from error
+    if bool(game_map.match_slots) != (document.get("schema") == MATCH_REPLAY_SCHEMA):
+        raise ReplayError("match maps require the match replay schema")
     random_seed = _integer(document.get("random_seed"), "random_seed")
     ambient_enemy_spawns = _boolean(
         document.get("ambient_enemy_spawns", False), "ambient_enemy_spawns"
     )
+    if game_map.match_slots and ambient_enemy_spawns:
+        raise ReplayError("team matches cannot use ambient enemy spawning")
     enemy_spawn_interval_ticks = _integer(
         document.get(
             "enemy_spawn_interval_ticks",

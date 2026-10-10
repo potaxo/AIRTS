@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from heapq import heappop, heappush
 from math import floor, inf
 
 import numpy as np
 
 from airts.contracts.spatial import Point
-from airts.world._numeric import BoolArray, FloatArray, compile_numeric
+from airts.world._numeric import BoolArray, FloatArray, IntArray, compile_numeric
 from airts.world.map import Cell, GameMap
 
 
@@ -23,6 +22,15 @@ class PathResult:
     cells: tuple[Cell, ...]
     waypoints: tuple[Point, ...]
     cost: float
+
+
+@dataclass(slots=True)
+class _SearchField:
+    costs: FloatArray
+    following: IntArray
+    heap: IntArray
+    positions: IntArray
+    size: int
 
 
 @dataclass(slots=True)
@@ -68,21 +76,36 @@ class RoutingService:
         self.field_build_count = 0
         self._costs = tuple(t.movement_cost for row in game_map.terrain for t in row)
         self._cost_grid = np.asarray(self._costs).reshape((game_map.height, game_map.width))
+        self._terrain_mask = np.isinf(self._cost_grid)
         self._obstacle_masks: OrderedDict[frozenset[Cell], BoolArray] = OrderedDict()
-        width, height = game_map.width, game_map.height
-        self._neighbors = tuple(
-            tuple(
-                ny * width + nx
-                for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1))
-                if 0 <= nx < width and 0 <= ny < height
-            )
-            for y in range(height)
-            for x in range(width)
-        )
         _clear_segment(self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5)
-        self._fields: OrderedDict[
-            tuple[tuple[int, ...], frozenset[Cell]], tuple[list[float], list[int]]
-        ] = OrderedDict()
+        # Numba distinguishes an omitted default from an explicit cost threshold.
+        # Warm both signatures before the first command, including weighted branches.
+        _clear_segment(self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5, inf)
+        # Compile before input processing; a first move must not trigger JIT work.
+        _expand_field(
+            np.ones((1, 1), dtype=np.float64),
+            np.zeros((1, 1), dtype=np.bool_),
+            np.zeros(1),
+            np.full(1, -1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            1,
+            0,
+        )
+        _reachable_cells(np.zeros((1, 1), dtype=np.bool_), 0, 0)
+        _visible_waypoints(
+            self._cost_grid,
+            self.obstacle_mask(frozenset()),
+            np.zeros((1, 2)),
+            np.zeros((0, 2)),
+            np.zeros(2, dtype=np.int64),
+        )
+        self._fields: OrderedDict[tuple[tuple[int, ...], frozenset[Cell]], _SearchField] = (
+            OrderedDict()
+        )
+        self._centers: dict[Cell, Point] = {}
+        self._cells: dict[int, Cell] = {}
 
     @property
     def cached_field_count(self) -> int:
@@ -102,12 +125,59 @@ class RoutingService:
             float(end.y),
         )
 
+    def passable_segment(self, start: Point, end: Point, blocked: frozenset[Cell]) -> bool:
+        return _clear_segment(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            float(start.x),
+            float(start.y),
+            float(end.x),
+            float(end.y),
+            inf,
+        )
+
+    def visible_waypoints(
+        self, starts: list[Point], paths: list[list[Point]], blocked: frozenset[Cell]
+    ) -> IntArray:
+        """The same sixteen-waypoint lookahead, with one compiled call per batch."""
+        offsets = np.zeros(len(paths) + 1, dtype=np.int64)
+        for index, path in enumerate(paths):
+            offsets[index + 1] = offsets[index] + min(len(path) - 1, 16)
+        points = np.fromiter(
+            (
+                coordinate
+                for path in paths
+                for point in path[1:17]
+                for coordinate in (point.x, point.y)
+            ),
+            dtype=np.float64,
+            count=int(offsets[-1]) * 2,
+        ).reshape((-1, 2))
+        return _visible_waypoints(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            np.asarray([(point.x, point.y) for point in starts], dtype=np.float64),
+            points,
+            offsets,
+        )
+
+    def nearest_cell(self, point: Point, blocked: frozenset[Cell]) -> Cell:
+        distances = ((np.arange(self.game_map.width) + 0.5 - point.x) ** 2)[None, :] + (
+            (np.arange(self.game_map.height) + 0.5 - point.y) ** 2
+        )[:, None]
+        distances[self.obstacle_mask(blocked)] = inf
+        index = int(np.argmin(distances))
+        if not np.isfinite(distances.flat[index]):
+            raise ValueError("gathering point has no passable space")
+        return index % self.game_map.width, index // self.game_map.width
+
+    def reachable_cells(self, anchor: Cell, blocked: frozenset[Cell]) -> BoolArray:
+        return _reachable_cells(self.obstacle_mask(blocked), *anchor)
+
     def obstacle_mask(self, blocked: frozenset[Cell]) -> BoolArray:
         mask = self._obstacle_masks.get(blocked)
         if mask is None:
-            mask = np.isinf(np.asarray(self._costs)).reshape(
-                (self.game_map.height, self.game_map.width)
-            )
+            mask = self._terrain_mask.copy()
             for x, y in blocked:
                 if self.game_map.contains_cell((x, y)):
                     mask[y, x] = True
@@ -164,52 +234,145 @@ class RoutingService:
             if len(self._fields) > self.maximum_fields:
                 self._fields.popitem(last=False)
         self._fields.move_to_end(key)
-        costs, following = field
+        costs, following = field.costs, field.following
         index = start_cell[1] * game_map.width + start_cell[0]
-        cost = costs[index]
+        if field.positions[index] != -2:
+            field.size = _expand_field(
+                self._cost_grid,
+                self.obstacle_mask(blocked),
+                costs,
+                following,
+                field.heap,
+                field.positions,
+                field.size,
+                index,
+            )
+        cost = float(costs[index])
         if cost == inf:
             raise PathfindingError("NO_PATH")
         indices = [index]
         while following[index] != -1:
-            index = following[index]
+            index = int(following[index])
             indices.append(index)
         goal = points[index]
-        cells = tuple((i % game_map.width, i // game_map.width) for i in indices)
+        cell_cache = self._cells
+        cells = tuple(
+            cell_cache[i]
+            if i in cell_cache
+            else cell_cache.setdefault(i, (i % game_map.width, i // game_map.width))
+            for i in indices
+        )
         # Cell centers keep every turn inside a passable cell. Continuous steering may
         # shorten these segments only after checking the intervening terrain.
-        waypoints = tuple(Point(x + 0.5, y + 0.5) for x, y in cells[1:-1])
+        centers = self._centers
+        waypoints = tuple(
+            centers[cell]
+            if cell in centers
+            else centers.setdefault(cell, Point(cell[0] + 0.5, cell[1] + 0.5))
+            for cell in cells[1:-1]
+        )
         if start != goal:
             waypoints += (goal,)
         return goal, PathResult(cells, waypoints, cost)
 
-    def _build_field(
-        self, goals: tuple[int, ...], blocked: frozenset[Cell]
-    ) -> tuple[list[float], list[int]]:
-        costs = [inf] * len(self._costs)
-        following = [-1] * len(costs)
-        blocked_indices = {
-            y * self.game_map.width + x for x, y in blocked if self.game_map.contains_cell((x, y))
-        }
-        frontier: list[tuple[float, int]] = []
-        for index in goals:
-            costs[index] = 0.0
-            heappush(frontier, (0.0, index))
-        while frontier:
-            distance, current = heappop(frontier)
-            if distance != costs[current]:
-                continue
-            candidate = distance + self._costs[current]
-            for neighbor in self._neighbors[current]:
-                if (
-                    neighbor not in blocked_indices
-                    and self._costs[neighbor] != inf
-                    and candidate < costs[neighbor]
-                ):
-                    costs[neighbor] = candidate
-                    following[neighbor] = current
-                    heappush(frontier, (candidate, neighbor))
+    def _build_field(self, goals: tuple[int, ...], blocked: frozenset[Cell]) -> _SearchField:
+        count = self.game_map.width * self.game_map.height
+        costs = np.full(count, inf)
+        positions = np.full(count, -1, dtype=np.int64)
+        heap = np.empty(count, dtype=np.int64)
+        for offset, index in enumerate(goals):
+            costs[index], positions[index], heap[offset] = 0.0, offset, index
+        field = _SearchField(costs, np.full(count, -1, dtype=np.int64), heap, positions, len(goals))
         self.field_build_count += 1
-        return costs, following
+        return field
+
+
+@compile_numeric
+def _expand_field(
+    terrain_costs: FloatArray,
+    blocked: BoolArray,
+    costs: FloatArray,
+    following: IntArray,
+    heap: IntArray,
+    positions: IntArray,
+    size: int,
+    stop: int,
+) -> int:
+    """Resume exact Dijkstra until the requested start is settled, then retain its frontier.
+
+    An indexed heap avoids tuple allocations and stale duplicate entries. Comparison
+    remains (cost, cell index); every neighbor of the stopping cell is relaxed before
+    suspension, so later requests and cache eviction cannot affect chosen routes.
+    """
+    height, width = terrain_costs.shape
+    while size:
+        current = heap[0]
+        size -= 1
+        if size:
+            last = heap[size]
+            offset = 0
+            while offset * 2 + 1 < size:
+                child = offset * 2 + 1
+                if child + 1 < size:
+                    left, right = heap[child], heap[child + 1]
+                    if costs[right] < costs[left] or (costs[right] == costs[left] and right < left):
+                        child += 1
+                candidate_index = heap[child]
+                if costs[last] < costs[candidate_index] or (
+                    costs[last] == costs[candidate_index] and last < candidate_index
+                ):
+                    break
+                heap[offset] = candidate_index
+                positions[candidate_index] = offset
+                offset = child
+            heap[offset], positions[last] = last, offset
+        positions[current] = -2
+        x, y = current % width, current // width
+        candidate = costs[current] + terrain_costs[y, x]
+        for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
+            if not 0 <= nx < width or not 0 <= ny < height or blocked[ny, nx]:
+                continue
+            neighbor = ny * width + nx
+            if candidate < costs[neighbor]:
+                costs[neighbor] = candidate
+                following[neighbor] = current
+                offset = positions[neighbor]
+                if offset == -1:
+                    offset = size
+                    size += 1
+                while offset:
+                    parent = (offset - 1) // 2
+                    parent_index = heap[parent]
+                    if costs[parent_index] < candidate or (
+                        costs[parent_index] == candidate and parent_index < neighbor
+                    ):
+                        break
+                    heap[offset], positions[parent_index] = parent_index, offset
+                    offset = parent
+                heap[offset], positions[neighbor] = neighbor, offset
+        if current == stop:
+            break
+    return size
+
+
+@compile_numeric
+def _reachable_cells(blocked: BoolArray, ax: int, ay: int) -> BoolArray:
+    height, width = blocked.shape
+    reached = np.zeros((height, width), dtype=np.bool_)
+    queue = np.empty(width * height, dtype=np.int64)
+    queue[0] = ay * width + ax
+    reached[ay, ax] = True
+    head, tail = 0, 1
+    while head < tail:
+        current = queue[head]
+        head += 1
+        x, y = current % width, current // width
+        for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
+            if 0 <= nx < width and 0 <= ny < height and not blocked[ny, nx] and not reached[ny, nx]:
+                reached[ny, nx] = True
+                queue[tail] = ny * width + nx
+                tail += 1
+    return reached
 
 
 def passable_segment_cells(
@@ -255,14 +418,20 @@ def passable_segment_cells(
 
 @compile_numeric
 def _clear_segment(
-    costs: FloatArray, blocked: BoolArray, ax: float, ay: float, bx: float, by: float
+    costs: FloatArray,
+    blocked: BoolArray,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    maximum_cost: float = 1.0,
 ) -> bool:
     """Exact DDA lookahead without allocating a cell list on every movement tick."""
     height, width = costs.shape
     if not (0 <= ax < width and 0 <= ay < height and 0 <= bx < width and 0 <= by < height):
         return False
     x, y, ex, ey = floor(ax), floor(ay), floor(bx), floor(by)
-    if blocked[y, x] or costs[y, x] > 1.0:
+    if blocked[y, x] or costs[y, x] > maximum_cost:
         return False
     dx, dy = bx - ax, by - ay
     sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
@@ -285,6 +454,25 @@ def _clear_segment(
         else:
             y += sy
             ty += step_y
-        if blocked[y, x] or costs[y, x] > 1.0:
+        if blocked[y, x] or costs[y, x] > maximum_cost:
             return False
     return True
+
+
+@compile_numeric
+def _visible_waypoints(
+    costs: FloatArray,
+    blocked: BoolArray,
+    starts: FloatArray,
+    points: FloatArray,
+    offsets: IntArray,
+) -> IntArray:
+    result = np.zeros(len(starts), dtype=np.int64)
+    for index in range(len(starts)):
+        ax, ay = starts[index]
+        for candidate in range(offsets[index + 1] - 1, offsets[index] - 1, -1):
+            bx, by = points[candidate]
+            if _clear_segment(costs, blocked, ax, ay, bx, by):
+                result[index] = candidate - offsets[index] + 1
+                break
+    return result

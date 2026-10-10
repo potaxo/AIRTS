@@ -102,6 +102,69 @@ def test_multi_goal_route_chooses_reachable_goal_independent_of_input_order(
     assert router.shared_path(start, start).waypoints == ()
 
 
+@pytest.mark.parametrize("goal_count", [1, 2])
+@pytest.mark.parametrize("with_wall", [False, True], ids=["open", "blocked"])
+def test_compiled_fields_preserve_exact_reverse_dijkstra_routes(
+    goal_count: int, with_wall: bool
+) -> None:
+    """Cost ties must retain the pre-optimization path, not merely its length."""
+    rng = Random(83)
+    game_map = load_map_data(
+        {
+            "id": "field_order",
+            "name": "Field order",
+            "width": 8,
+            "height": 8,
+            "terrain": {
+                "rows": [
+                    [rng.choice(("grass", "road", "forest")) for _ in range(8)] for _ in range(8)
+                ]
+            },
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.5, 0.5]}],
+        }
+    )
+    goals = (Point(7.5, 7.5), Point(0.5, 7.5))[:goal_count]
+    blocked = frozenset((4, y) for y in range(8)) if with_wall else frozenset()
+    costs = [float("inf")] * 64
+    following = [-1] * 64
+    queue = []
+    for goal in sorted(goals, key=lambda p: (p.y, p.x)):
+        index = int(goal.y) * 8 + int(goal.x)
+        costs[index] = 0.0
+        heappush(queue, (0.0, index))
+    while queue:
+        distance, current = heappop(queue)
+        if distance != costs[current]:
+            continue
+        x, y = current % 8, current // 8
+        candidate = distance + game_map.terrain_at_cell((x, y)).movement_cost
+        for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
+            if not game_map.contains_cell((nx, ny)) or (nx, ny) in blocked:
+                continue
+            neighbor = ny * 8 + nx
+            if candidate < costs[neighbor]:
+                costs[neighbor] = candidate
+                following[neighbor] = current
+                heappush(queue, (candidate, neighbor))
+    router = RoutingService(game_map)
+    for index in range(64):
+        start = Point(index % 8 + 0.5, index // 8 + 0.5)
+        if game_map.cell_for(start) in blocked:
+            continue
+        if costs[index] == float("inf"):
+            with pytest.raises(PathfindingError, match="NO_PATH"):
+                router.shared_path_to_any(start, goals, blocked)
+            continue
+        expected = [index]
+        current = index
+        while following[current] != -1:
+            current = following[current]
+            expected.append(current)
+        _, path = router.shared_path_to_any(start, goals, blocked)
+        assert path.cells == tuple((i % 8, i // 8) for i in expected)
+        assert path.cost == costs[index]
+
+
 @pytest.mark.parametrize(
     "start,end", [(Point(0.5, 0.5), Point(2.5, 2.5)), (Point(2.5, 2.5), Point(0.5, 0.5))]
 )
@@ -149,3 +212,49 @@ def test_segment_stops_at_integer_boundary_endpoints(
     assert cells[0] == game_map.cell_for(start)
     assert cells[-1] == game_map.cell_for(end)
     assert all(game_map.contains_cell(cell) for cell in cells)
+
+
+def test_shared_field_stops_nearby_and_resumes_without_changing_routes(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1))
+    goal = Point(10.5, 10.5)
+    router.shared_path(goal, goal)
+    field = next(iter(router._fields.values()))
+    assert sum(field.positions == -2) == 1
+    assert field.size > 0
+    starts = (Point(9.5, 10.5), Point(0.5, 0.5), Point(4.5, 8.5))
+    for start in starts:
+        expected = RoutingService(make_map(1)).shared_path(start, goal)
+        assert router.shared_path(start, goal) == expected
+    assert router.field_build_count == 1
+    router.clear()
+    for start in starts[::-1]:
+        expected = RoutingService(make_map(1)).shared_path(start, goal)
+        assert router.shared_path(start, goal) == expected
+
+
+def test_batched_lookahead_matches_individual_checks_on_weighted_corners(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    game_map = make_map(1)
+    router = RoutingService(game_map)
+    starts = [Point(0.5, 0.5), Point(10.5, 9.5)]
+    paths = [
+        [Point(0.5, 0.5), Point(1.5, 0.5), Point(2.5, 2.5), Point(10.5, 10.5)],
+        [Point(10.5, 9.5), Point(9.5, 9.5), Point(4.5, 3.5)],
+    ]
+    blocked = frozenset({(1, 0), (5, 5)})
+    expected = []
+    for start, path in zip(starts, paths, strict=True):
+        expected.append(
+            next(
+                (
+                    i
+                    for i in range(min(len(path) - 1, 16), 0, -1)
+                    if router.clear_segment(start, path[i], blocked)
+                ),
+                0,
+            )
+        )
+    assert router.visible_waypoints(starts, paths, blocked).tolist() == expected

@@ -10,23 +10,27 @@ import pytest
 from tests.integration.scenarios import builder_factory_simulation, interaction_simulation
 
 from airts.contracts.automations import (
+    AutomationKind,
+    AutomationStatus,
     DefendParameters,
-    EconomyParameters,
 )
 from airts.contracts.commands import (
     CancelAutomationCommand,
+    CreateConstructionCommand,
     CreateDefendCommand,
     CreateProductionCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
+from airts.navigation.collision import collision_radius
 from airts.presentation.app import AirtsApp
 from airts.presentation.rendering import RendererBackend
 from airts.simulation import Simulation
+from airts.systems.movement import position_clear
 from airts.world.entities import Projectile
 from airts.world.map import EntityKind, load_map_data
 
 
-def test_economy_button_applies_to_every_selected_resource_generator() -> None:
+def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:
     game_map = load_map_data(
         {
             "id": "multi_generator_ui",
@@ -41,23 +45,24 @@ def test_economy_button_applies_to_every_selected_resource_generator() -> None:
         }
     )
     app = AirtsApp(Simulation(game_map))
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 22)
+    app._small_font = pygame.font.Font(None, 18)
     app.selected_entities = {"generator_1", "generator_2"}
     app._selection_changed()
-    button = pygame.Rect(10, 10, 80, 30)
-    app._command_buttons = [(button, "economy")]
-
-    app._handle_command_click(button.center)
-
-    automation = app.simulation.automations[app.selected_automation_id or ""]
-    parameters = automation.parameters
-    assert isinstance(parameters, EconomyParameters)
-    assert parameters.generator_ids == ["generator_1", "generator_2"]
+    app._draw_context_panel(pygame.Surface(app.window_size))
+    assert all(action != "economy" for _, action in app._command_buttons)
+    app._handle_key(pygame.K_g)
+    assert not app.simulation.automations
+    before = app.simulation.resources["player"]
+    app.simulation.advance(10)
+    assert app.simulation.resources["player"] == before + 2000
 
 
 def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
     simulation = builder_factory_simulation()
     created_ids = []
-    for _ in range(8):
+    for _ in range(30):
         result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
         assert result.accepted
         assert result.automation_id is not None
@@ -69,7 +74,8 @@ def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
     surface = pygame.Surface(app.WINDOW_SIZE)
 
     app._draw_panel(surface)
-    app.automation_scroll = 2
+    maximum = len(app._automation_panel_rows()) - app._automation_visible_rows
+    app.automation_scroll = maximum
     canceled = simulation.execute(CancelAutomationCommand(created_ids[-1]))
     assert canceled.accepted
     app._draw_panel(surface)
@@ -78,17 +84,18 @@ def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
     visible_ids = [
         automation_id for _, action, automation_id in app._automation_buttons if action == "inspect"
     ]
-    assert app.automation_scroll == 1
+    assert app.automation_scroll == maximum - 1
     assert len(visible_ids) == app._automation_visible_rows
     assert visible_ids == [
-        item.automation_id for item in panel_rows[1 : 1 + app._automation_visible_rows]
+        item.automation_id
+        for item in panel_rows[maximum - 1 : maximum - 1 + app._automation_visible_rows]
     ]
     pygame.font.quit()
 
 
 def test_automation_panel_exposes_a_prominent_clickable_scrollbar() -> None:
     simulation = builder_factory_simulation()
-    for _ in range(8):
+    for _ in range(30):
         result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
         assert result.accepted
     app = AirtsApp(simulation)
@@ -121,6 +128,189 @@ def test_automation_panel_exposes_a_prominent_clickable_scrollbar() -> None:
     pygame.font.quit()
 
 
+@pytest.mark.parametrize("size", [(1280, 720), AirtsApp.WINDOW_SIZE, (3840, 2160)])
+@pytest.mark.parametrize("producer_kind", [EntityKind.FACTORY, EntityKind.COMMAND_CENTER])
+def test_compact_production_rows_inspect_cost_without_starting_production(
+    size: tuple[int, int],
+    producer_kind: EntityKind,
+) -> None:
+    game_map = builder_factory_simulation().game_map.to_dict()
+    entities = game_map["entities"]
+    assert isinstance(entities, list)
+    entities[0]["kind"] = producer_kind.value
+    app = AirtsApp(Simulation(load_map_data(game_map)))
+    app.resize_layout(size)
+    app.selected_entities = {"factory"}
+    app._selection_changed()
+    pygame.font.init()
+    app._font = pygame.font.Font(None, round(24 * app.ui_scale))
+    app._small_font = pygame.font.Font(None, round(19 * app.ui_scale))
+    surface = pygame.Surface(app.window_size)
+    try:
+        with patch.object(app, "_text", wraps=app._text) as text:
+            app._draw_interface(surface)
+        assert all(
+            call.args[2][0] >= app.right_panel_rect.x
+            for call in text.call_args_list
+            if call.args[1] == "Selection"
+        )
+        assert all(action != "start_queue" for _, action in app._command_buttons)
+        for kind in producer_kind.production_kinds:
+            buttons = [
+                rect
+                for rect, action in app._command_buttons
+                if action
+                in {
+                    f"unit_details:{kind.value}",
+                    f"queue:{kind.value}",
+                    f"reduce:{kind.value}",
+                    f"loop:{kind.value}",
+                }
+            ]
+            assert len(buttons) == 4
+            assert len({rect.y for rect in buttons}) == 1
+            assert all(app.right_panel_rect.contains(rect) for rect in buttons)
+            assert all(
+                not left.colliderect(right)
+                for index, left in enumerate(buttons)
+                for right in buttons[index + 1 :]
+            )
+        inspected_kind = producer_kind.production_kinds[-1]
+        inspect = next(
+            rect
+            for rect, action in app._command_buttons
+            if action == f"unit_details:{inspected_kind.value}"
+        )
+        app._handle_panel_click(inspect.center)
+        assert not app.simulation.automations
+        with patch.object(app, "_small_text", wraps=app._small_text) as text:
+            app._draw_interface(surface)
+        assert any(
+            f"Cost {inspected_kind.profile.production_cost}" in call.args[1]
+            for call in text.call_args_list
+        )
+        plus = next(
+            rect
+            for rect, action in app._command_buttons
+            if action == f"queue:{inspected_kind.value}"
+        )
+        app._handle_panel_click(plus.center)
+        assert len(app.simulation.production_queue("factory")) == 1
+    finally:
+        pygame.font.quit()
+
+
+def test_automation_categories_keep_controls_on_one_line_and_show_details_on_demand() -> None:
+    simulation = builder_factory_simulation()
+    production = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    construction = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(4, 14))
+    )
+    defense = simulation.execute(
+        CreateDefendCommand(("scout",), rectangle_region(Point(10, 10), Point(16, 16)))
+    )
+    assert production.accepted and construction.accepted and defense.accepted
+    app = AirtsApp(simulation)
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface(app.window_size)
+    try:
+        for group, command, expected in (
+            (AutomationKind.PRODUCTION, "production", production.automation_id),
+            (AutomationKind.CONSTRUCTION, "construction", construction.automation_id),
+            (None, "units", defense.automation_id),
+        ):
+            app._draw_interface(surface)
+            tab = next(
+                rect
+                for rect, action in app._command_buttons
+                if action == f"automation_group:{command}"
+            )
+            app._handle_panel_click(tab.center)
+            app._draw_interface(surface)
+            assert app.automation_group is group
+            assert [item.automation_id for item in app._automation_panel_rows()] == [expected]
+            assert len(app._automation_buttons) == 3
+            assert len({rect.y for rect, _, _ in app._automation_buttons}) == 1
+            details = next(
+                rect for rect, action, _ in app._automation_buttons if action == "inspect"
+            )
+            app._handle_panel_click(details.center)
+            assert app.automation_details_open
+            assert app.selected_automation_id == expected
+            app._draw_interface(surface)
+            toggle = next(rect for rect, action, _ in app._automation_buttons if action == "pause")
+            app._handle_panel_click(toggle.center)
+            assert simulation.automations[expected or ""].status is AutomationStatus.PAUSED
+            app._draw_interface(surface)
+            resume = next(rect for rect, action, _ in app._automation_buttons if action == "resume")
+            app._handle_panel_click(resume.center)
+            assert simulation.automations[expected or ""].status is AutomationStatus.ACTIVE
+    finally:
+        pygame.font.quit()
+
+
+def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() -> None:
+    app = AirtsApp(interaction_simulation(), renderer_backend=RendererBackend.SOFTWARE)
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    screen = pygame.Surface(app.window_size)
+    app._draw_interface(screen)
+    pause = next(rect for rect, action in app._command_buttons if action == "pause_game")
+    ticks = []
+    times = iter(index * 0.2 for index in range(100))
+    with (
+        patch("airts.presentation.app.pygame.display.init"),
+        patch("airts.presentation.app.pygame.display.set_mode", return_value=screen),
+        patch("airts.presentation.app.pygame.display.set_caption"),
+        patch("airts.presentation.app.pygame.display.flip"),
+        patch("airts.presentation.app.pygame.event.clear"),
+        patch("airts.presentation.app.pygame.time.Clock", return_value=Mock()),
+        patch("airts.presentation.app.perf_counter", side_effect=lambda: next(times)),
+        patch(
+            "airts.presentation.app.pygame.event.get",
+            side_effect=(
+                (pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=pause.center),),
+                (),
+                (pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE),),
+            ),
+        ),
+        patch.object(app, "_draw", side_effect=lambda _: ticks.append(app.simulation.tick)),
+    ):
+        app.run(max_frames=3)
+    assert ticks[:2] == [0, 0]
+    assert 1 <= ticks[2] <= 2
+    assert not app.paused
+
+
+def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.selected_entities = {"factory"}
+    app._selection_changed()
+    assert app.simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1)).accepted
+    pygame.font.init()
+    app._font = pygame.font.Font(None, 24)
+    app._small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface(app.window_size, pygame.SRCALPHA)
+    try:
+        app._draw_opengl_overlay(surface)
+        uploaded = surface.copy()
+        previous = app._opengl_overlay_key()
+        app.simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+        regions = app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key())
+        assert regions is not None
+        app._draw_opengl_partial_overlay(surface, regions)
+        for region in regions:
+            uploaded.blit(surface, region, region)
+        full = pygame.Surface(app.window_size, pygame.SRCALPHA)
+        app._draw_opengl_overlay(full)
+        assert pygame.image.tobytes(uploaded, "RGBA") == pygame.image.tobytes(full, "RGBA")
+    finally:
+        pygame.font.quit()
+
+
 def test_resizing_reflows_panels_and_scales_canvas_coordinates() -> None:
     app = AirtsApp(builder_factory_simulation())
     original_tile_size = app.tile_size
@@ -136,9 +326,15 @@ def test_resizing_reflows_panels_and_scales_canvas_coordinates() -> None:
     restored = app._map_point(screen_point)
     assert restored.distance_to(point) <= 1 / app.tile_size
 
+    # The full-map view is centered and cannot be dragged beyond the map.
+    app.pan_camera(120, -80)
+    assert app.camera_offset == Point(0, 0)
+    app.zoom_camera(5, app.canvas_rect.center)
+    screen_point = app.screen_point(point)
     app.pan_camera(120, -80)
     panned_point = app.screen_point(point)
-    assert panned_point == (screen_point[0] + 120, screen_point[1] - 80)
+    assert panned_point[0] == screen_point[0] + 120
+    assert abs(app.map_origin[1] + app.map_pixel_size[1] - app.canvas_rect.bottom) <= 1
     assert app._map_point(panned_point).distance_to(point) <= 1 / app.tile_size
 
 
@@ -188,6 +384,89 @@ def test_double_click_entity_selects_all_visible_friendly_entities_of_that_kind(
 
     assert app.selected_entities == {"builder", "builder_2"}
     assert app.inspected_kind is EntityKind.BUILDER
+
+
+@pytest.mark.parametrize(
+    ("delay_ms", "offset_pixels", "change_selection", "gathering"),
+    [
+        pytest.param(200, 0, False, True, id="same-target"),
+        pytest.param(400, 4, False, True, id="small-pointer-jitter"),
+        pytest.param(401, 0, False, False, id="too-slow"),
+        pytest.param(200, 20, False, False, id="different-target"),
+        pytest.param(200, 0, True, False, id="different-selection"),
+    ],
+)
+def test_right_click_preserves_formation_and_double_click_gathers(
+    delay_ms: int, offset_pixels: int, change_selection: bool, gathering: bool
+) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.selected_entities = {"builder", "builder_2"}
+    target = Point(15.5, 10.5)
+    screen = app.screen_point(target)
+    origin_x, origin_y = app.map_origin
+    local = (screen[0] - origin_x, screen[1] - origin_y)
+    with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1000 + delay_ms)):
+        app._handle_mouse_down(3, local)
+        first = app.simulation.command_history[-1]["command"]
+        assert isinstance(first, dict)
+        assert first["type"] == "move"
+        assert not first.get("gathering", False)
+        if change_selection:
+            app.selected_entities = {"builder"}
+            app._selection_changed()
+        app._handle_mouse_down(3, (local[0] + offset_pixels, local[1]))
+    second = app.simulation.command_history[-1]["command"]
+    assert isinstance(second, dict)
+    assert second["type"] == "move"
+    assert second.get("gathering", False) is gathering
+    if gathering:
+        assert second["target"] == first["target"]
+
+
+def test_double_right_click_on_enemy_keeps_attack_behavior() -> None:
+    app = AirtsApp(interaction_simulation())
+    app.selected_entities = {"unit", "tank"}
+    screen = app.screen_point(app.simulation.entities["enemy"].position)
+    origin_x, origin_y = app.map_origin
+    local = (screen[0] - origin_x, screen[1] - origin_y)
+    for _ in range(2):
+        app._handle_mouse_down(3, local)
+        command = app.simulation.command_history[-1]["command"]
+        assert isinstance(command, dict)
+        assert command["type"] == "attack"
+        assert command["target_entity_id"] == "enemy"
+        assert app._last_move_click is None
+
+
+@pytest.mark.parametrize("friendly_id", ["unit", "factory"], ids=["unit", "building"])
+def test_right_click_on_friendly_is_not_stolen_by_a_nearby_enemy(friendly_id: str) -> None:
+    app = AirtsApp(interaction_simulation())
+    app.selected_entities = {"tank"}
+    target = app.simulation.entities[friendly_id].selection_position
+    enemy = app.simulation.entities["enemy"]
+    enemy.position = Point(target.x + 2, target.y)
+    screen = app.screen_point(target)
+    origin_x, origin_y = app.map_origin
+    local = (screen[0] - origin_x, screen[1] - origin_y)
+    with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
+        app._handle_mouse_down(3, local)
+        first = app.simulation.command_history[-1]["command"]
+        assert isinstance(first, dict)
+        assert first["type"] == "move"
+        app._handle_mouse_down(3, local)
+        second = app.simulation.command_history[-1]["command"]
+        assert isinstance(second, dict)
+        assert second["type"] == "move"
+        assert second["gathering"] is True
+    entity = app.simulation.entities["tank"]
+    assert entity.move_target is not None
+    assert position_clear(
+        entity.move_target,
+        collision_radius(entity.kind),
+        app.simulation.game_map.width,
+        app.simulation.game_map.height,
+        app.simulation._building_cells(),
+    )
 
 
 def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
