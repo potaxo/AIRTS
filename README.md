@@ -79,7 +79,7 @@ These measurements do not count physical monitor scan-out;
 | `T` | Create a patrol from the selected units and current target |
 | `Y` | Create a defend automation from selected units and current target |
 | `P` | Attach every selected factory loop to the active line or area defense; start a Loop on each factory first |
-| `R` | Send only selected units below 30% health to repair, then resume work or return to their previous position |
+| `R` | Send only selected units below 50% health to repair, then resume work or return to their previous position |
 | `X` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/runtime.md#contact-yielding-and-hold-anchors)) |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
@@ -90,7 +90,7 @@ These measurements do not count physical monitor scan-out;
 | `Shift` + build click | Keep placement mode active and append the site to the selected builders' FIFO construction queue |
 | Right-click while placing | Close building placement without moving builders or changing queued construction |
 | `[` / `]` | Decrease or increase the inspected automation priority |
-| Right-click | Move while preserving the current formation, or attack an enemy under the cursor |
+| Right-click | Move preserving formation; armed members pursue a clicked enemy until destroyed; selected Builders repair a clicked damaged friendly building |
 | Double right-click at the same destination | Gather selected units around ground or friendly entities, regardless of army size; enemy clicks still attack |
 | `Space` or top-left Pause/Resume | Pause or resume simulation time |
 | `Esc` | Return to selection mode and clear entity, spatial, placement, and inspection state |
@@ -104,6 +104,12 @@ and builders; command centers offer builders. Each production row has a unit nam
 `+`, `-`, and `Loop`: `+` orders immediately on each selected source, `-` removes one unfinished
 finite order per source, and `Loop` preserves continuous production. Click the unit name to inspect
 its attributes and cost. Canceling a paid unit does not refund its cost.
+
+Selecting a building shows its construction price. Builders offer Matter Synthesizers alongside
+factories, repair hubs and extractors; Synthesizers require no resource site. Selected attackers
+show faint red target lines that update each simulation tick, sampled like movement paths for large
+selections. Selecting a repair hub shows its repair radius; it automatically heals one friendly
+mobile unit at a time inside that circle.
 
 The left sidebar separates unit, production, and construction automations into tabs. Each row has
 `||` to pause / `>` to resume, `X` to cancel, and `...` to open details in the right sidebar.

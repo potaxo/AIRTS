@@ -63,6 +63,9 @@ class EntityProfile:
     construction_cost: int = 0
     build_speed: float = 0.0
     build_range: float = 0.0
+    repair_range: float = 0.0
+    repair_rate: int = 0
+    income_per_second: int = 0
 
     @property
     def movable(self) -> bool:
@@ -79,6 +82,7 @@ class EntityKind(StrEnum):
     COMMAND_CENTER = "command_center"
     RESOURCE_GENERATOR = "resource_generator"
     RESOURCE_EXTRACTOR = "resource_generator"  # Preserve existing map/save/command tags.
+    MATTER_SYNTHESIZER = "matter_synthesizer"
 
     @property
     def profile(self) -> EntityProfile:
@@ -120,16 +124,27 @@ _ENTITY_PROFILES = {
         75,
         build_speed=5.0,
         build_range=2.5,
+        repair_range=2.5,
+        repair_rate=5,
     ),
     EntityKind.FACTORY: EntityProfile(
         EntityCategory.BUILDING, 500, 5.0, (4, 4), construction_cost=400
     ),
     EntityKind.REPAIR_HUB: EntityProfile(
-        EntityCategory.BUILDING, 350, 4.0, (3, 3), construction_cost=250
+        EntityCategory.BUILDING,
+        350,
+        4.0,
+        (3, 3),
+        construction_cost=250,
+        repair_range=6.0,
+        repair_rate=5,
     ),
     EntityKind.COMMAND_CENTER: EntityProfile(EntityCategory.BUILDING, 700, 7.0, (5, 5)),
     EntityKind.RESOURCE_GENERATOR: EntityProfile(
-        EntityCategory.BUILDING, 250, 3.0, (2, 2), construction_cost=200
+        EntityCategory.BUILDING, 250, 3.0, (2, 2), construction_cost=200, income_per_second=25
+    ),
+    EntityKind.MATTER_SYNTHESIZER: EntityProfile(
+        EntityCategory.BUILDING, 400, 4.0, (3, 3), construction_cost=1200, income_per_second=5
     ),
 }
 

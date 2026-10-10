@@ -22,6 +22,7 @@ from airts.contracts.commands import (
 from airts.contracts.events import EventType
 from airts.systems import automation_execution, construction, movement, production
 from airts.world.entities import UnitState
+from airts.world.map import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -277,6 +278,8 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
     for entity_id in entity_ids:
         automation_id = simulation.assignments.pop(entity_id, None)
         entity = simulation.entities[entity_id]
+        if entity.kind is EntityKind.BUILDER:
+            entity.repair_target_id = None
         entity.clear_recovery_request()
         entity.hold_anchor = None
         entity.defend_arrived = False

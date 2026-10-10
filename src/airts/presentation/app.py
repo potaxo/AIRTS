@@ -37,6 +37,7 @@ from airts.contracts.commands import (
     PauseAutomationCommand,
     ReduceProductionCommand,
     RenameRegionCommand,
+    RepairBuildingCommand,
     ResumeAutomationCommand,
     SetSelectionCommand,
     StopCommand,
@@ -762,9 +763,29 @@ class AirtsApp:
                 and last_move_click[1].distance_to(point) * self.tile_size
                 <= self.DOUBLE_CLICK_PIXELS
             )
-            command: AttackCommand | MoveCommand
+            hit = self.simulation.entities[hits[0][1]] if hits else None
+            repair_builders = tuple(
+                key
+                for key in entity_ids
+                if self.simulation.entities[key].kind is EntityKind.BUILDER
+            )
+            command: AttackCommand | MoveCommand | RepairBuildingCommand
             if enemy_id is not None:
-                command = AttackCommand(entity_ids, enemy_id)
+                armed = tuple(
+                    key
+                    for key in entity_ids
+                    if self.simulation.entities[key].kind.profile.attack_damage > 0
+                )
+                command = AttackCommand(armed or entity_ids, enemy_id)
+            elif (
+                repair_builders
+                and hit is not None
+                and hit.owner_id == "player"
+                and hit.category is EntityCategory.BUILDING
+                and hit.is_complete
+                and hit.health < hit.kind.profile.max_health
+            ):
+                command = RepairBuildingCommand(repair_builders, hit.entity_id)
             elif gathering:
                 assert last_move_click is not None
                 point = last_move_click[1]
@@ -1139,7 +1160,7 @@ class AirtsApp:
             for entity_id in sorted(self.selected_entities)
             if self.simulation.entities[entity_id].is_movable
         )
-        result = self.simulation.execute(CreateRepairAndReturnCommand(units))
+        result = self.simulation.execute(CreateRepairAndReturnCommand(units, health_threshold=0.5))
         self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
         if result.accepted:
             self.selected_automation_id = result.automation_id
@@ -1744,7 +1765,11 @@ class AirtsApp:
         selected = sorted(
             entity_id
             for entity_id in self.selected_entities
-            if entity_id in self.simulation.entities and self.simulation.entities[entity_id].path
+            if entity_id in self.simulation.entities
+            and (
+                self.simulation.entities[entity_id].path
+                or self.simulation.entities[entity_id].pursue_target
+            )
         )
         if len(selected) <= self.MAX_SELECTED_PATHS:
             representatives = selected
@@ -1757,7 +1782,10 @@ class AirtsApp:
         if (
             inspected is not None
             and inspected in self.simulation.entities
-            and self.simulation.entities[inspected].path
+            and (
+                self.simulation.entities[inspected].path
+                or self.simulation.entities[inspected].pursue_target
+            )
             and inspected not in representatives
         ):
             if len(representatives) == self.MAX_SELECTED_PATHS:
@@ -2117,6 +2145,14 @@ class AirtsApp:
             detail_title += f" x{count}"
         self._text(screen, detail_title, (x, y), (244, 216, 118))
         y += 34
+        if detail_kind.profile.category is EntityCategory.BUILDING:
+            price = (
+                f"Cost {profile.construction_cost}"
+                if profile.construction_cost
+                else "Starting building"
+            )
+            self._small_text(screen, price, (x, y), (180, 198, 214))
+            y += 28
         if profile.movable and detail_kind is not EntityKind.BUILDER:
             self._small_text(
                 screen,
@@ -2133,14 +2169,25 @@ class AirtsApp:
                 (105, 222, 172),
             )
             y += 22
-            for kind in (EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR):
+            for kind in (
+                EntityKind.FACTORY,
+                EntityKind.REPAIR_HUB,
+                EntityKind.RESOURCE_GENERATOR,
+                EntityKind.MATTER_SYNTHESIZER,
+            ):
                 rectangle = pygame.Rect(x, y, panel.width - 32, 30)
                 label = (
                     "Resource Extractor"
                     if kind is EntityKind.RESOURCE_GENERATOR
                     else kind.value.replace("_", " ").title()
                 )
-                self._button(screen, rectangle, f"Build {label}")
+                self._button(
+                    screen,
+                    rectangle,
+                    self._fit_small_text(
+                        f"{label} ({kind.profile.construction_cost})", rectangle.width - 8
+                    ),
+                )
                 self._command_buttons.append((rectangle, f"build:{kind.value}"))
                 y += 38
         elif detail_kind.production_kinds:
@@ -2187,9 +2234,20 @@ class AirtsApp:
                 y += height + round(8 * self.ui_scale)
             if self.production_detail_kind in detail_kind.production_kinds:
                 y = self._draw_unit_details(screen, self.production_detail_kind, x, y + 12)
-        elif detail_kind is EntityKind.RESOURCE_GENERATOR:
+        elif profile.income_per_second:
+            income = profile.income_per_second
+            if (
+                detail_kind is EntityKind.RESOURCE_GENERATOR
+                and not self.simulation.game_map.match_slots
+            ):
+                income = 1000
+            self._small_text(screen, f"Income {income}/s when complete", (x, y), (180, 198, 214))
+        elif detail_kind is EntityKind.REPAIR_HUB:
             self._small_text(
-                screen, "Produces resources automatically when complete.", (x, y), (180, 198, 214)
+                screen,
+                f"Repair range {profile.repair_range:g} | One unit at a time",
+                (x, y),
+                (105, 222, 172),
             )
 
     def _draw_unit_details(self, screen: pygame.Surface, kind: EntityKind, x: int, y: int) -> int:

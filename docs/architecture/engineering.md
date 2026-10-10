@@ -44,6 +44,7 @@ src/airts/
 |   |-- automation_execution.py Patrol/defend/reinforcement/repair and formation coordination
 |   |-- movement.py             Shared group-path planning and movement execution
 |   |-- combat.py               Pursuit, firing, projectile impacts and damage
+|   |-- repair.py               Direct builder repair and automatic single-target repair hubs
 |   |-- production.py           Factory queues, spawning and linked automation work
 |   |-- construction.py         Placement, builder queues and construction progress
 |   |-- opponent_ai.py          Bounded economy planning, combat forecasts and squad decisions

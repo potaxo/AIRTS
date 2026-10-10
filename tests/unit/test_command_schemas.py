@@ -27,6 +27,7 @@ from airts.contracts.commands import (
     ReduceProductionCommand,
     RemoveEntityCommand,
     RenameRegionCommand,
+    RepairBuildingCommand,
     ResumeAutomationCommand,
     SetSelectionCommand,
     StopCommand,
@@ -60,6 +61,7 @@ from airts.world.map import EntityKind
         ResumeAutomationCommand("automation_001"),
         CancelAutomationCommand("automation_001"),
         AttackCommand(("unit",), "enemy"),
+        RepairBuildingCommand(("builder",), "factory"),
         CreateConstructionCommand(
             "builder",
             EntityKind.FACTORY,

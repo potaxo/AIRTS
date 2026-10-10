@@ -116,6 +116,13 @@ class AttackCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairBuildingCommand:
+    entity_ids: tuple[str, ...]
+    target_entity_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class RemoveEntityCommand:
     """Authoritative system input for deterministic entity removal and replay."""
 
@@ -299,6 +306,7 @@ Command = (
     | StopCommand
     | HoldPositionCommand
     | AttackCommand
+    | RepairBuildingCommand
     | RemoveEntityCommand
     | CreatePatrolCommand
     | CreateDefendCommand
@@ -399,9 +407,9 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "owner_id": command.owner_id,
             **({"gathering": True} if command.gathering else {}),
         }
-    if isinstance(command, AttackCommand):
+    if isinstance(command, AttackCommand | RepairBuildingCommand):
         return {
-            "type": "attack",
+            "type": "attack" if isinstance(command, AttackCommand) else "repair_building",
             "entity_ids": list(command.entity_ids),
             "target_entity_id": command.target_entity_id,
             "owner_id": command.owner_id,
@@ -577,8 +585,9 @@ def command_from_dict(raw_data: object) -> Command:
             owner_id,
             gathering=_boolean(data.get("gathering", False), "gathering"),
         )
-    if command_type == "attack":
-        return AttackCommand(
+    if command_type in {"attack", "repair_building"}:
+        command_class = AttackCommand if command_type == "attack" else RepairBuildingCommand
+        return command_class(
             _entity_ids(data.get("entity_ids")),
             _string(data.get("target_entity_id"), "target_entity_id"),
             owner_id,

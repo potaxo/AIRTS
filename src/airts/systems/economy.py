@@ -44,10 +44,12 @@ def generate_income(simulation: Simulation) -> None:
         return
     generators: dict[str, int] = {}
     for entity in simulation.entities.values():
-        if entity.kind is EntityKind.RESOURCE_GENERATOR and entity.is_complete:
-            generators[entity.owner_id] = generators.get(entity.owner_id, 0) + 1
-    for owner_id, count in sorted(generators.items()):
-        amount = (25 if simulation.game_map.match_slots else 1000) * count
+        if entity.kind.profile.income_per_second and entity.is_complete:
+            income = entity.kind.profile.income_per_second
+            if entity.kind is EntityKind.RESOURCE_GENERATOR and not simulation.game_map.match_slots:
+                income = 1000
+            generators[entity.owner_id] = generators.get(entity.owner_id, 0) + income
+    for owner_id, amount in sorted(generators.items()):
         simulation.resources[owner_id] = simulation.resources.get(owner_id, 0) + amount
         simulation.events.record(
             simulation.tick,

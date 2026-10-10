@@ -58,6 +58,14 @@ class SceneView(Protocol):
     def screen_point(self, point: Point) -> tuple[int, int]: ...
 
 
+def order_feedback(view: SceneView, entity: Entity) -> tuple[tuple[Point, ...], Color]:
+    """Use current authoritative endpoints; no targeting or routing work in rendering."""
+    target = view.simulation.entities.get(entity.attack_target_id or "")
+    if entity.pursue_target and target is not None:
+        return (entity.selection_position, target.selection_position), (155, 92, 92)
+    return view.simplified_path(entity), (225, 225, 225)
+
+
 class SoftwareRenderer:
     """Draw domain state while owning all terrain, sprite and path caches."""
 
@@ -74,7 +82,7 @@ class SoftwareRenderer:
         self._large_unit_health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
         self._large_unit_inspected_ring: tuple[tuple[int, int], int] | None = None
         self._path_render_key: tuple[object, ...] | None = None
-        self._path_render_points: tuple[tuple[tuple[int, int], ...], ...] = ()
+        self._path_render_points: tuple[tuple[Color, tuple[tuple[int, int], ...]], ...] = ()
 
     def reset_map(self) -> None:
         """Discard terrain surfaces after the application loads a different world."""
@@ -147,8 +155,8 @@ class SoftwareRenderer:
 
     def draw_entities(self, view: SceneView, screen: pygame.Surface) -> None:
         colors = ENTITY_COLORS
-        for points in self._representative_path_points(view):
-            pygame.draw.lines(screen, (225, 225, 225), False, points, 1)
+        for color, points in self._representative_path_points(view):
+            pygame.draw.lines(screen, color, False, points, 1)
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
         selected_entities = view.selected_entities
@@ -208,6 +216,8 @@ class SoftwareRenderer:
         interaction_range = (
             inspected.kind.profile.build_range
             if inspected is not None and inspected.kind is EntityKind.BUILDER
+            else inspected.kind.profile.repair_range
+            if inspected is not None and inspected.kind is EntityKind.REPAIR_HUB
             else inspected.kind.profile.attack_range
             if inspected is not None
             else 0.0
@@ -367,7 +377,7 @@ class SoftwareRenderer:
 
     def _representative_path_points(
         self, view: SceneView
-    ) -> tuple[tuple[tuple[int, int], ...], ...]:
+    ) -> tuple[tuple[Color, tuple[tuple[int, int], ...]], ...]:
         key: tuple[object, ...] = (
             id(view.simulation),
             view.simulation.tick,
@@ -380,18 +390,19 @@ class SoftwareRenderer:
         if key != self._path_render_key:
             origin_x, origin_y = view.map_origin
             tile_size = view.tile_size
-            paths: list[tuple[tuple[int, int], ...]] = []
+            paths: list[tuple[Color, tuple[tuple[int, int], ...]]] = []
             for entity_id in view.representative_path_entity_ids():
                 entity = view.simulation.entities[entity_id]
+                world_points, color = order_feedback(view, entity)
                 points = tuple(
                     (
                         origin_x + round(point.x * tile_size),
                         origin_y + round(point.y * tile_size),
                     )
-                    for point in view.simplified_path(entity)
+                    for point in world_points
                 )
                 if len(points) >= 2:
-                    paths.append(points)
+                    paths.append((color, points))
             self._path_render_key = key
             self._path_render_points = tuple(paths)
         return self._path_render_points

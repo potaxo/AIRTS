@@ -43,7 +43,12 @@ def create_construction(
             "create_construction",
             ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_BUILDER", "builder_id"),
         )
-    allowed = {EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR}
+    allowed = {
+        EntityKind.FACTORY,
+        EntityKind.REPAIR_HUB,
+        EntityKind.RESOURCE_GENERATOR,
+        EntityKind.MATTER_SYNTHESIZER,
+    }
     if command.building_kind not in allowed:
         return simulation._reject_validation(
             "create_construction",
@@ -397,7 +402,9 @@ def start_next_construction(simulation: Simulation) -> None:
             simulation._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
             continue
         if any(
-            builder_id in simulation.assignments or builder_id in simulation.suspended_assignments
+            builder_id in simulation.assignments
+            or builder_id in simulation.suspended_assignments
+            or simulation.entities[builder_id].repair_target_id is not None
             for builder_id in builder_ids
         ):
             continue

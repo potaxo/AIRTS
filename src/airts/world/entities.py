@@ -37,6 +37,7 @@ class Entity:
     path_cost: float = 0.0
     attack_target_id: str | None = None
     pursue_target: bool = False
+    repair_target_id: str | None = None
     attack_cooldown: int = 0
     last_attacker_id: str | None = None
     last_attacked_tick: int | None = None
@@ -108,6 +109,7 @@ class Entity:
             "path_cost": self.path_cost,
             "attack_target_id": self.attack_target_id,
             "pursue_target": self.pursue_target,
+            "repair_target_id": self.repair_target_id,
             "attack_cooldown": self.attack_cooldown,
             "last_attacker_id": self.last_attacker_id,
             "last_attacked_tick": self.last_attacked_tick,

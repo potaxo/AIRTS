@@ -128,7 +128,15 @@ def drive_combat(simulation: Simulation) -> None:
         if (
             attacker.pursue_target
             and ordered_target is not None
-            and not attacker.path
+            and (
+                not attacker.path
+                or (
+                    attacker.route_ticks >= simulation.TICKS_PER_SECOND
+                    and attacker.move_target is not None
+                    and _squared_distance(attacker.move_target, positions[ordered_target.entity_id])
+                    > attack_range_squared
+                )
+            )
             and ordered_target_distance_squared is not None
             and ordered_target_distance_squared > attack_range_squared
             and simulation.game_map.cell_for(attacker.position)

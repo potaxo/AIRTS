@@ -159,6 +159,13 @@ def load_simulation_data(raw_data: object) -> Simulation:
     _validate_construction_sites(simulation)
     simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
+    if any(
+        entity.kind is EntityKind.BUILDER
+        and entity.repair_target_id is not None
+        and (entity.entity_id in simulation.assignments or entity.hold_anchor is not None)
+        for entity in simulation.entities.values()
+    ):
+        raise PersistenceError("builder repair conflicts with another controlling order")
     simulation.suspended_assignments = _load_suspended_assignments(
         state.get("suspended_assignments", {}), simulation
     )
@@ -470,7 +477,13 @@ def _load_entities(
             else _number(progress_raw, "entity.construction_progress", minimum=0)
         )
         if construction_progress is not None and (
-            kind not in {EntityKind.FACTORY, EntityKind.REPAIR_HUB, EntityKind.RESOURCE_GENERATOR}
+            kind
+            not in {
+                EntityKind.FACTORY,
+                EntityKind.REPAIR_HUB,
+                EntityKind.RESOURCE_GENERATOR,
+                EntityKind.MATTER_SYNTHESIZER,
+            }
             or not 0 <= construction_progress < 1
             or state is not UnitState.IDLE
         ):
@@ -667,6 +680,9 @@ def _load_entities(
             path=path,
             path_cost=path_cost,
             attack_target_id=attack_target_id,
+            repair_target_id=_nullable_string(
+                entity.get("repair_target_id"), "entity.repair_target_id"
+            ),
             pursue_target=pursue_target,
             attack_cooldown=_integer(
                 entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
@@ -689,6 +705,24 @@ def _load_entities(
             construction_progress=construction_progress,
         )
     for loaded_entity in entities.values():
+        if loaded_entity.repair_target_id is not None:
+            target = entities.get(loaded_entity.repair_target_id)
+            if (
+                target is None
+                or target.owner_id != loaded_entity.owner_id
+                or not loaded_entity.is_complete
+                or not target.is_complete
+                or (
+                    loaded_entity.kind is EntityKind.BUILDER
+                    and (
+                        target.category is not EntityCategory.BUILDING
+                        or loaded_entity.pursue_target
+                    )
+                )
+                or (loaded_entity.kind is EntityKind.REPAIR_HUB and not target.is_movable)
+                or loaded_entity.kind not in {EntityKind.BUILDER, EntityKind.REPAIR_HUB}
+            ):
+                raise PersistenceError("entity has an invalid repair target")
         if (
             loaded_entity.attack_target_id is not None
             and loaded_entity.attack_target_id not in entities
@@ -1168,8 +1202,7 @@ def _load_automation_parameters(
     if kind is AutomationKind.ECONOMY:
         generator_ids = _string_list(data.get("generator_ids"), "economy.generator_ids")
         if generator_ids != entity_ids or any(
-            simulation.entities[item].kind is not EntityKind.RESOURCE_GENERATOR
-            for item in generator_ids
+            not simulation.entities[item].kind.profile.income_per_second for item in generator_ids
         ):
             raise PersistenceError("economy generators must match resource-generator entities")
         return EconomyParameters(

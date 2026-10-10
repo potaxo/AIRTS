@@ -42,6 +42,7 @@ from airts.contracts.commands import (
     ReduceProductionCommand,
     RemoveEntityCommand,
     RenameRegionCommand,
+    RepairBuildingCommand,
     ResumeAutomationCommand,
     SetSelectionCommand,
     StopCommand,
@@ -72,6 +73,7 @@ from airts.systems import construction as construction_system
 from airts.systems import economy as economy_system
 from airts.systems import movement as movement_system
 from airts.systems import production as production_system
+from airts.systems import repair as repair_system
 from airts.systems import skirmish as skirmish_system
 from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
@@ -327,6 +329,8 @@ class Simulation:
             return command_handlers.modify_automation(self, command)
         if isinstance(command, AttackCommand):
             return command_handlers.attack(self, command)
+        if isinstance(command, RepairBuildingCommand):
+            return repair_system.repair_building(self, command)
         if isinstance(command, MoveCommand):
             return command_handlers.move(self, command)
         if isinstance(command, StopCommand):
@@ -382,8 +386,10 @@ class Simulation:
             if self.game_map.match_slots:
                 opponent_ai.drive_opponents(self)
             self._drive_automations()
+            repair_system.drive_builders(self)
             movement_system.move_entities(self)
             combat_system.drive_projectiles(self)
+            repair_system.drive_hubs(self)
             combat_system.drive_combat(self)
             self._update_visibility()
             if self.game_map.match_slots:
@@ -495,8 +501,20 @@ class Simulation:
             )
         for entity in self.entities.values():
             if entity.attack_target_id == entity_id:
+                if entity.pursue_target:
+                    entity.path.clear()
+                    entity.move_target = None
+                    entity.state = self._state_for_assignment(entity.entity_id)
+                    movement_system.reset_movement_liveness(entity)
                 entity.attack_target_id = None
                 entity.pursue_target = False
+            if entity.repair_target_id == entity_id:
+                entity.repair_target_id = None
+                if entity.kind is EntityKind.BUILDER:
+                    entity.path.clear()
+                    entity.move_target = None
+                    entity.state = UnitState.IDLE
+                    movement_system.reset_movement_liveness(entity)
             if entity.last_attacker_id == entity_id:
                 entity.last_attacker_id = None
                 entity.last_attacked_tick = None

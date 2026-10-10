@@ -7,12 +7,17 @@ from unittest.mock import Mock, call, patch
 
 import pygame
 import pytest
-from tests.integration.scenarios import builder_factory_simulation, interaction_simulation
+from tests.integration.scenarios import (
+    builder_factory_simulation,
+    interaction_simulation,
+    runtime_map,
+)
 
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     DefendParameters,
+    RepairParameters,
 )
 from airts.contracts.commands import (
     CancelAutomationCommand,
@@ -28,6 +33,28 @@ from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world.entities import Projectile
 from airts.world.map import EntityKind, load_map_data
+
+
+@pytest.mark.parametrize("health", [49, 50, 51], ids=["below-half", "exactly-half", "above-half"])
+def test_repair_shortcut_only_sends_selected_units_below_half_health(health: int) -> None:
+    simulation = Simulation(runtime_map())
+    app = AirtsApp(simulation)
+    simulation.entities["unit_02"].health = health
+    simulation.entities["unit_01"].health = 1  # An unselected wounded unit stays untouched.
+    app.selected_entities = {"unit_02", "factory"}
+
+    app._handle_key(pygame.K_r)
+
+    assert "unit_01" not in simulation.assignments
+    assert "factory" not in simulation.assignments
+    if health < 50:
+        automation = simulation.automations[simulation.assignments["unit_02"]]
+        assert automation.entity_ids == ["unit_02"]
+        assert isinstance(automation.parameters, RepairParameters)
+        assert automation.parameters.health_threshold == 0.5
+    else:
+        assert "unit_02" not in simulation.assignments
+        assert not simulation.live_automations
 
 
 def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:

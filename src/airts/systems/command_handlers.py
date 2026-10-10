@@ -51,7 +51,6 @@ from airts.systems import (
     spatial_commands,
 )
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -604,7 +603,7 @@ def create_economy(simulation: Simulation, command: CreateEconomyCommand) -> Com
     if failure is not None:
         return simulation._reject_validation("create_economy", failure)
     if any(
-        simulation.entities[entity_id].kind is not EntityKind.RESOURCE_GENERATOR
+        not simulation.entities[entity_id].kind.profile.income_per_second
         for entity_id in command.generator_ids
     ):
         return simulation._reject_validation(

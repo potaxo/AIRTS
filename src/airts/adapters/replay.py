@@ -10,8 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v11"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v4"
+REPLAY_SCHEMA = "airts-replay-v12"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v5"
 
 
 class ReplayError(ValueError):
@@ -96,9 +96,11 @@ def load_replay_data(raw_data: object) -> ReplayData:
         "airts-match-replay-v1",
         "airts-match-replay-v2",
         "airts-match-replay-v3",
+        "airts-match-replay-v4",
     }:
         raise ReplayError(
-            "legacy match replay uses an older opponent policy or elimination rules; "
+            "legacy match replay uses an older opponent policy or elimination rules, "
+            "or older combat/repair rules; "
             "replay with its original AIRTS version"
         )
     if document.get("schema") not in {REPLAY_SCHEMA, MATCH_REPLAY_SCHEMA}:

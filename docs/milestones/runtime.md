@@ -56,12 +56,16 @@ request order, cache eviction and load cannot change routes. Immutable cell cent
 across extracted paths to reduce allocations. Gathering uses compiled connected-component masks
 and preserves the same nearest-anchor and station ordering. Combat checks its existing direct
 approach before requesting a field; its chosen path and route allowance are unchanged.
+Direct attacks retain their ordered enemy until destruction or another accepted control order.
+Moving targets can refresh a stale firing destination after one second of route travel, within
+the existing combat route budget; paths need not finish before pursuit adapts. Destroying a target
+clears its pursuit movement. Mixed UI selections dispatch attacks only to armed members.
 Attackers sharing a target and range reuse its firing ring within the same combat pass;
 positions do not change during that pass, and the snapshot never survives into another tick.
 Direct move commands default to preserving the current formation for every army size; an explicit
 `gathering` flag instead allocates separated reachable slots around the destination. Missing flags
-in saved command histories and v10 replays retain the default behavior. Existing movement state and
-replay trajectories remain compatible, so no save/replay schema migration is needed.
+in saved command histories retain the default behavior. Gathering defaults do not require save
+migration; pursuit and repair changes require the current replay schemas described below.
 Direct gathering searches expanding circles for the same nearest-slot prefix as the complete
 planner, reuses connected reachability, and constructs static clearance obstacles once per
 allocation. Partial slot lists do not enter the full formation cache. Friendly entity hits take
@@ -278,8 +282,19 @@ their assigned defense area. Only an actual pursuit can interrupt that travel; e
 pursuit stops at weapon range.
 Projectiles retain their last target destination: a removed target leaves the shot/trace alive
 until arrival, with no damage to bystanders. Repair is explicitly requested, selects units strictly
-below the default 30% health threshold, prefers repair hubs, and restores suspended work or returns
+below the command's health threshold (API default 30%; the UI shortcut is owned by
+[README controls](../../README.md#controls)), prefers repair hubs, and restores suspended work or returns
 to the previous position. Low health alone does not replace the current automation.
+
+Completed repair hubs automatically heal friendly mobile units within their center-based repair
+radius. Each hub retains one target until full health, departure or destruction, then chooses the
+nearest wounded friendly unit with stable ID ties. This includes builders and shares capacity with
+repair-and-return requests; those requests cannot bypass the range or heal a second unit concurrently.
+Factory/command-center repair-and-return destinations retain their existing explicit service.
+Builders accept direct `repair_building` commands for damaged, completed owned buildings, approach
+within their footprint-based repair range, and repair until full health. Direct replacement or
+automation assignment cancels this work; pending construction waits until direct repair ends.
+Repairs cost no resources; profiles own rates and ranges.
 
 ## Economy, production, and construction
 
@@ -292,8 +307,12 @@ The original example and custom maps without sites retain sandbox placement and 
 [skirmish.py](../../src/airts/world/skirmish.py) owns the new fixed map geometry.
 
 Each owner has an integer resource balance. Generators add periodic income even without an
-automation; [economy.py](../../src/airts/systems/economy.py) owns the amount and interval.
-Only completed extractors earn income. There is no resource-production action or economy hotkey
+automation; [economy.py](../../src/airts/systems/economy.py) owns the interval and sandbox extractor
+override, while [map.py](../../src/airts/world/map.py) owns profile income and prices.
+Matter Synthesizers can be built on ordinary valid terrain without a resource site. Their high
+price and low output make them a supplementary economy when sites are exhausted: six times the
+extractor price for one fifth of its match income, with a four-minute payback after completion.
+Only completed income buildings earn resources. There is no resource-production action or economy hotkey
 in the UI. The historical economy command remains a balance-target tracker for existing callers
 and supported saves; it does not enable or accelerate income.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
@@ -321,7 +340,7 @@ use the same bounded recovery contract rather than being frozen or silently scat
 and attaches existing/future units to a linked defense. Polygons gather; polylines spread along the
 line. Factories remain independent owners of costs, queues, and progress.
 
-Builders construct factories, repair hubs, and generators, not command centers. Entity profiles
+Builders construct factories, repair hubs, extractors, and Matter Synthesizers, not command centers. Entity profiles
 own costs, build speeds, and build ranges. Placement validates capability, ownership, bounds,
 terrain and real building footprints. Remote orders are owner-only blueprints: they do not occupy
 space, reserve resource sites, block movement or become combat targets. Blueprints may overlap.
@@ -392,16 +411,16 @@ capable member wins immediately, regardless of enemy residual armies. No viable 
 draw. A recorded result stops simulation advancement and is displayed with an option to return
 to opening configuration. A command center keeps its owner viable because it can produce a builder.
 
-Team matches use `airts-match-save-v4` and `airts-match-replay-v4`, carrying site/controller/team
+Team matches use `airts-match-save-v4` and `airts-match-replay-v5`, carrying site/controller/team
 map data, results, physical construction and opponent memory. Squad membership, phases, targets,
 destinations, command/retry ticks and budget pauses are authoritative and validated on load.
 Match saves v1/v2 migrate with empty opponent memory; surviving units regroup under the new policy
 on its next decision. Saves v3 retain opponent memory. Saves v1-v3 first validate their recorded
 result under the old factory/builder rule, then recompute it with command-center production; an
 older concluded match can resume if a surviving command center makes both teams viable. Existing
-event history remains intact. Match replays v1-v3 require their original AIRTS version and are
-explicitly rejected because older opponent or elimination rules can change their outcome. Sandbox
-save/replay schemas are unchanged. New save continuation and replay share the same decisions.
+event history remains intact. Match replays v1-v4 require their original AIRTS version and are
+explicitly rejected because combat, repair, opponent or elimination rules can change their outcome.
+New save continuation and replay share the same decisions.
 
 [persistence.py](../../src/airts/adapters/persistence.py) and
 [replay.py](../../src/airts/adapters/replay.py) own versioned JSON schemas and rejection of malformed
@@ -450,11 +469,13 @@ Their contact recovery state starts fresh. v10 preserves recorded anchors, conta
 defense arrival state. All four older versions initialize the new request tick/released phase to
 null/false; their progress retains the previous path semantics. v7/v8 traffic reservations are
 validated and discarded and their obsolete congestion/progress state is reset. Saving again writes
-v12 (or match v2); other older save schemas remain unsupported. Migration continues under the corrected behavior
+v12 (or match v4); other older save schemas remain unsupported. Migration continues under the corrected behavior
 and does not promise the previous implementation's future trajectories.
 
-Replays use v11 (or match v2) and explicitly reject earlier schemas: their expected
-trajectories/events belong to the previous construction/movement behavior. There is no automatic replay
+The additive entity `repair_target_id` field records builder work and hub service ownership;
+supported older saves default it to null and continue with current repair/pursuit behavior.
+Replays use v12 (or match v5) and explicitly reject earlier schemas: their expected
+trajectories/events belong to the previous construction/movement/combat/repair behavior. There is no automatic replay
 migration. New replay verification still compares snapshot and ordered events; save continuation
 tests additionally compare complete exported authoritative state.
 

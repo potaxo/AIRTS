@@ -19,7 +19,7 @@ from airts.presentation.palette import (
     Color,
     match_color,
 )
-from airts.presentation.rendering import SceneView
+from airts.presentation.rendering import SceneView, order_feedback
 from airts.simulation import Simulation
 from airts.world.entities import ProjectileTrace
 from airts.world.map import EntityCategory, EntityKind
@@ -401,6 +401,8 @@ class OpenGLFrameBuilder:
         interaction_range = (
             inspected.kind.profile.build_range
             if inspected is not None and inspected.kind is EntityKind.BUILDER
+            else inspected.kind.profile.repair_range
+            if inspected is not None and inspected.kind is EntityKind.REPAIR_HUB
             else inspected.kind.profile.attack_range
             if inspected is not None
             else 0.0
@@ -486,10 +488,10 @@ class OpenGLFrameBuilder:
         values = array("f")
         origin_x, origin_y = origin
         path_count = 0
-        color = _float_color((225, 225, 225))
         for entity_id in app.representative_path_entity_ids():
             entity = app.simulation.entities[entity_id]
-            points = app.simplified_path(entity)
+            points, rgb = order_feedback(app, entity)
+            color = _float_color(rgb)
             if len(points) < 2:
                 continue
             for first, second in zip(points, points[1:], strict=False):

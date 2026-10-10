@@ -36,6 +36,7 @@ ENTITY_COLORS: dict[EntityKind, Color] = {
     EntityKind.REPAIR_HUB: (110, 178, 151),
     EntityKind.COMMAND_CENTER: (155, 129, 190),
     EntityKind.RESOURCE_GENERATOR: (198, 168, 88),
+    EntityKind.MATTER_SYNTHESIZER: (160, 125, 210),
 }
 
 PROJECTILE_COLORS: dict[EntityKind, Color] = {

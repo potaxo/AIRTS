@@ -29,6 +29,7 @@ from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import movement
 from airts.world.entities import UnitState
+from airts.world.map import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -88,8 +89,7 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
         if phase is RepairPhase.TRAVELING:
             if entity.path or entity.move_target is not None:
                 continue
-            health_ratio = entity.health / entity.kind.profile.max_health
-            if health_ratio > parameters.health_threshold:
+            if entity.health >= entity.kind.profile.max_health:
                 parameters.phases[entity_id] = RepairPhase.RETURNING
                 continue
             building = simulation.entities.get(parameters.destinations[entity_id])
@@ -101,7 +101,11 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 simulation.game_map.cell_for(point)
                 for point in simulation._interaction_points(building)
             }
-            if simulation.game_map.cell_for(entity.position) in interaction_cells:
+            if simulation.game_map.cell_for(entity.position) in interaction_cells or (
+                building.kind is EntityKind.REPAIR_HUB
+                and entity.position.distance_to(building.selection_position)
+                <= building.kind.profile.repair_range
+            ):
                 parameters.phases[entity_id] = RepairPhase.REPAIRING
                 entity.state = UnitState.REPAIRING
                 continue
@@ -118,6 +122,18 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
         elif phase is RepairPhase.REPAIRING:
             if entity.path:
                 continue
+            building = simulation.entities.get(parameters.destinations[entity_id])
+            if building is None:
+                simulation._transition(automation, AutomationStatus.FAILED, "REPAIR_SOURCE_REMOVED")
+                simulation._release_automation(automation, clear_suspended=True)
+                return
+            if (
+                building.kind is EntityKind.REPAIR_HUB
+                and entity.position.distance_to(building.selection_position)
+                > building.kind.profile.repair_range
+            ):
+                parameters.phases[entity_id] = RepairPhase.TRAVELING
+                continue
             if entity.health < entity.kind.profile.max_health:
                 if entity.state is not UnitState.REPAIRING:
                     entity.state = UnitState.REPAIRING
@@ -128,10 +144,11 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                         automation_id=automation.automation_id,
                         destination_id=parameters.destinations[entity_id],
                     )
-                entity.health = min(
-                    entity.kind.profile.max_health,
-                    entity.health + parameters.repair_rate,
-                )
+                if building.kind is not EntityKind.REPAIR_HUB:
+                    entity.health = min(
+                        entity.kind.profile.max_health,
+                        entity.health + parameters.repair_rate,
+                    )
             if entity.health >= entity.kind.profile.max_health:
                 parameters.phases[entity_id] = RepairPhase.RETURNING
                 simulation.events.record(
@@ -182,6 +199,7 @@ def initialize_runtime_entity(
     simulation: Simulation, automation: Automation, entity_id: str
 ) -> None:
     entity = simulation.entities[entity_id]
+    entity.repair_target_id = None
     entity.clear_recovery_request()
     entity.path.clear()
     entity.hold_anchor = None
