@@ -10,6 +10,7 @@ import pytest
 from tests.integration.scenarios import (
     builder_factory_simulation,
     economy_combat_simulation,
+    gated_attack_simulation,
     growing_factory_simulation,
     hold_contact_simulation,
     injected_overlap_simulation,
@@ -49,6 +50,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    RemoveEntityCommand,
     SetSelectionCommand,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
@@ -57,6 +59,28 @@ from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map import EntityKind, GameMap, load_example_map
+
+
+def test_blocked_attack_continues_after_save_load_and_gate_removal(tmp_path: Path) -> None:
+    simulation, blocked, reachable = gated_attack_simulation()
+    assert simulation.execute(AttackCommand(blocked + reachable, "target")).accepted
+    simulation.advance(8)
+    path = tmp_path / "blocked-attack.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    assert restored.export_state() == simulation.export_state()
+    for current in (simulation, restored):
+        current._routes.clear()
+        assert current.execute(RemoveEntityCommand("gate")).accepted
+        current.advance(30)
+    assert restored.export_state() == simulation.export_state()
+    dispatched = {
+        event.subject_id
+        for event in simulation.events.events
+        if event.event_type.value == "path_computed"
+    }
+    assert set(blocked + reachable) <= dispatched
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
 def test_displaced_hold_round_trips_and_replays_before_anchor_recovery(tmp_path: Path) -> None:

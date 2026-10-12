@@ -159,13 +159,18 @@ def load_simulation_data(raw_data: object) -> Simulation:
     _validate_construction_sites(simulation)
     simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
-    if any(
-        entity.kind is EntityKind.BUILDER
-        and entity.repair_target_id is not None
-        and (entity.entity_id in simulation.assignments or entity.hold_anchor is not None)
-        for entity in simulation.entities.values()
-    ):
-        raise PersistenceError("builder repair conflicts with another controlling order")
+    for entity in simulation.entities.values():
+        if entity.kind is not EntityKind.BUILDER or entity.repair_target_id is None:
+            continue
+        assigned = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
+        if entity.hold_anchor is not None or (
+            assigned is not None
+            and (
+                assigned.kind is not AutomationKind.PATROL
+                or assigned.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
+            )
+        ):
+            raise PersistenceError("builder repair conflicts with another controlling order")
     simulation.suspended_assignments = _load_suspended_assignments(
         state.get("suspended_assignments", {}), simulation
     )

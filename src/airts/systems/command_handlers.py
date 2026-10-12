@@ -404,7 +404,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
             gathering_point=command.gathering_point,
         )
         if expanded:
-            reachable = simulation._gathering_reachable_cache[command.target]
+            reachable = simulation._gathering_reachable(command.target)
             if any(
                 not reachable[
                     simulation.game_map.cell_for(simulation.entities[entity_id].position)[1],

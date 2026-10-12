@@ -35,6 +35,7 @@ _INITIAL_LINE_BUFFER_BYTES = 256 * 1024
 
 _GPU_RESOURCE_ATTRIBUTES = (
     "_overlay_texture",
+    "_terrain_texture",
     "_overlay_vertex_array",
     "_line_vertex_array",
     "_shape_vertex_array",
@@ -112,6 +113,8 @@ class OpenGLFrame:
     shape_count: int
     line_vertex_count: int
     terrain_buffer: bytes
+    terrain_pixels: bytes
+    terrain_size: tuple[int, int]
     terrain_origin: tuple[int, int]
     terrain_tile_size: float
     shape_buffer: bytes
@@ -152,6 +155,7 @@ class OpenGLFrameBuilder:
     def __init__(self) -> None:
         self._terrain_key: tuple[object, ...] | None = None
         self._terrain_buffer = b""
+        self._terrain_pixels = b""
         self._terrain_count = 0
         self._terrain_shape_count = 0
         self._frame_key: tuple[object, ...] | None = None
@@ -176,6 +180,7 @@ class OpenGLFrameBuilder:
             self._terrain_key = terrain_key
             (
                 self._terrain_buffer,
+                self._terrain_pixels,
                 self._terrain_count,
                 self._terrain_shape_count,
             ) = self._build_terrain(
@@ -236,6 +241,8 @@ class OpenGLFrameBuilder:
             shape_count=shape_count,
             line_vertex_count=line_vertex_count,
             terrain_buffer=self._terrain_buffer,
+            terrain_pixels=self._terrain_pixels,
+            terrain_size=(simulation.game_map.width, simulation.game_map.height),
             terrain_origin=origin,
             terrain_tile_size=tile_size,
             shape_buffer=shape_buffer,
@@ -246,22 +253,23 @@ class OpenGLFrameBuilder:
     @staticmethod
     def _build_terrain(
         simulation: Simulation,
-    ) -> tuple[bytes, int, int]:
+    ) -> tuple[bytes, bytes, int, int]:
         values = array("f")
-        count = 0
-        for y, row in enumerate(simulation.game_map.terrain):
-            for x, terrain in enumerate(row):
-                _append_shape(
-                    values,
-                    center=(x + 0.5, y + 0.5),
-                    half_size=(0.5, 0.5),
-                    color=_float_color(TERRAIN_COLORS[terrain]),
-                    circle=False,
-                )
-                values[-6] = -3.0  # Terrain cell: half-pixel coverage at every zoom.
-                count += 1
         map_width = simulation.game_map.width
         map_height = simulation.game_map.height
+        palette = {terrain: bytes(color) for terrain, color in TERRAIN_COLORS.items()}
+        pixels = b"".join(
+            palette[terrain] for row in simulation.game_map.terrain for terrain in row
+        )
+        _append_shape(
+            values,
+            center=(map_width / 2, map_height / 2),
+            half_size=(map_width / 2, map_height / 2),
+            color=(1.0, 1.0, 1.0, 1.0),
+            circle=False,
+        )
+        values[-6] = -4.0  # One texel per exact cell; GPU clips the world rectangle.
+        count = map_width * map_height
         grid_color = _float_color((44, 65, 49))
         for cell in range(0, simulation.game_map.width + 1, 8):
             _append_shape(
@@ -281,7 +289,7 @@ class OpenGLFrameBuilder:
                 circle=False,
             )
             values[-6] = -2.0  # Horizontal grid.
-        return values.tobytes(), count, len(values) // SHAPE_FLOATS
+        return values.tobytes(), pixels, count, len(values) // SHAPE_FLOATS
 
     @staticmethod
     def _build_entities(
@@ -623,6 +631,7 @@ class OpenGLRenderer:
         self._overlay_regions: tuple[pygame.Rect, ...] = ()
         self._overlay_surface: pygame.Surface | None = None
         self._overlay_texture: Any = None
+        self._terrain_texture: Any = None
         self._overlay_vertex_array: Any = None
         self._line_vertex_array: Any = None
         self._shape_vertex_array: Any = None
@@ -800,6 +809,9 @@ class OpenGLRenderer:
             if frame.terrain_shape_count:
                 self._shape_program["terrain_origin"].value = frame.terrain_origin
                 self._shape_program["terrain_tile_size"].value = frame.terrain_tile_size
+                self._shape_program["terrain_texture"].value = 1
+                self._shape_program["terrain_size"].value = frame.terrain_size
+                self._terrain_texture.use(location=1)
                 self._terrain_vertex_array.render(
                     mode=self._module.TRIANGLE_STRIP,
                     vertices=4,
@@ -867,6 +879,14 @@ class OpenGLRenderer:
     def _upload_frame(self, frame: OpenGLFrame) -> None:
         if frame.terrain_buffer is not self._uploaded_terrain:
             _replace_buffer(self._terrain_buffer, frame.terrain_buffer)
+            texture = self._context.texture(
+                frame.terrain_size, 3, data=frame.terrain_pixels, alignment=1
+            )
+            previous_texture = self._terrain_texture
+            self._terrain_texture = texture
+            if previous_texture is not None:
+                previous_texture.release()
+            texture.filter = self._module.NEAREST, self._module.NEAREST
             self._uploaded_terrain = frame.terrain_buffer
         if frame is self._uploaded_frame:
             return
@@ -1071,6 +1091,7 @@ in vec4 in_color;
 in vec2 in_shape_outline;
 in vec4 in_outline_color;
 out vec2 local_position;
+out vec2 world_position;
 flat out vec2 half_size;
 flat out vec4 fill_color;
 flat out float circle_shape;
@@ -1096,6 +1117,7 @@ void main() {
         1.0 - pixel_position.y * 2.0 / viewport_size.y
     );
     gl_Position = vec4(normalized, 0.0, 1.0);
+    world_position = (pixel_position - terrain_origin) / terrain_tile_size;
     local_position = in_corner;
     half_size = size;
     fill_color = in_color;
@@ -1108,6 +1130,9 @@ void main() {
 _SHAPE_FRAGMENT_SHADER = """
 #version 330
 in vec2 local_position;
+in vec2 world_position;
+uniform sampler2D terrain_texture;
+uniform ivec2 terrain_size;
 flat in vec2 half_size;
 flat in vec4 fill_color;
 flat in float circle_shape;
@@ -1129,10 +1154,15 @@ void main() {
         ? smoothstep(-antialias_width, antialias_width, signed_distance - outline_width)
         : outer_alpha;
     float outline_band = max(0.0, outer_alpha - inner_alpha);
-    float fill_alpha = fill_color.a * inner_alpha;
+    vec4 color = fill_color;
+    if (circle_shape < -3.5) {
+        ivec2 cell = clamp(ivec2(floor(world_position)), ivec2(0), terrain_size - ivec2(1));
+        color = vec4(texelFetch(terrain_texture, cell, 0).rgb, 1.0);
+    }
+    float fill_alpha = color.a * inner_alpha;
     float outline_alpha = outline_color.a * outline_band;
     float combined_alpha = fill_alpha + outline_alpha;
-    vec3 premultiplied_color = fill_color.rgb * fill_alpha
+    vec3 premultiplied_color = color.rgb * fill_alpha
         + outline_color.rgb * outline_alpha;
     fragment_color = vec4(
         premultiplied_color / max(combined_alpha, 0.001),

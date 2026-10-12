@@ -54,6 +54,10 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
         entity.clear_recovery_request()
         entity.path.clear()
         entity.move_target = None
+        if automation.kind is AutomationKind.PATROL:
+            entity.attack_target_id = None
+            entity.pursue_target = False
+            entity.repair_target_id = None
         entity.state = UnitState.IDLE
         movement.reset_movement_liveness(entity)
     return simulation._accept("pause_automation", automation_id)
@@ -339,6 +343,9 @@ def release_automation(
             entity.path.clear()
             entity.move_target = None
             entity.pursue_target = False
+            if automation.kind is AutomationKind.PATROL:
+                entity.attack_target_id = None
+                entity.repair_target_id = None
             entity.state = UnitState.IDLE
             movement.reset_movement_liveness(entity)
         if clear_suspended:

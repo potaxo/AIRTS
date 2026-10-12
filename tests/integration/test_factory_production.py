@@ -157,7 +157,9 @@ def test_continuous_factory_production_assigns_units_to_compact_area_defense() -
         for entity_id in parameters.produced_entity_ids
         if simulation.entities[entity_id].path
     ]
-    assert len(dispatched) == Simulation.GATHERING_PATH_BUDGET
+    assert len(dispatched) == min(
+        len(parameters.produced_entity_ids), Simulation.GATHERING_PATH_BUDGET
+    )
     assert (
         simulation.navigation_field_build_count - field_builds <= Simulation.GATHERING_PATH_BUDGET
     )

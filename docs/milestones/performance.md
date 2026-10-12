@@ -36,7 +36,11 @@ Render Driver) cannot count as hardware evidence. Dependencies stay in [pyprojec
 OpenGL preserves every terrain/grid element, unit, building, selection, and inspected health bar.
 Large selections use tint/aggregate details and 1-32 representative routes, including the inspected
 route; visual detail reduction cannot hide units, drop ownership, or disable collision/simulation.
-Terrain uploads once per map in world coordinates; units, buildings, representative paths,
+Terrain uploads once per map as an RGB texture with one exact palette texel per cell and a single
+world rectangle. Native GPU clipping bounds raster work to the visible viewport; cell interiors
+use exact nearest texels, avoiding per-cell antialias seams. All eight-cell grid lines remain world
+primitives with fixed pixel widths. Camera changes reuse the texture and world buffers;
+units, buildings, representative paths,
 projectiles and traces also retain world-coordinate buffers between ticks. Zoom/pan/resize update
 GPU transform uniforms without rebuilding or uploading those buffers or the terrain cells/grid. Grid widths remain fixed in pixels. Software
 site maps cache one pixel per cell and scale a viewport-sized crop, never a full zoomed world.
@@ -79,6 +83,10 @@ remain in default validation. Selecting a test path alone does not override mark
 | [Continuous production](../../tests/performance/test_crowd_congestion_performance.py) | 296 defenders + four factories ->304 defenders; 100 software frames at 1920 x 1080/ten ticks; stable unique stations, separation >=90% contact distance, no building intrusion, >=100 Real FPS |
 | [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 80 x 80 headless map, 60 ticks; unique bounded squads and per-decision command/candidate/forecast limits; timing variant requires complete tick p95 <100 ms and reports AI decisions/commands |
 
+The native-4K large-map camera case in the OpenGL test above retains all 320 x 320 terrain colors,
+checks cell-center readback at three zoom levels, and requires 100 synchronized frames at >=100
+Real FPS with camera changes. It measures rendering separately from army throughput.
+
 Renderer startup, primitive counts, buffer reuse, release/error paths, and interpolation correctness
 live in [presentation integration tests](../../tests/integration/test_opengl_presentation.py).
 
@@ -92,7 +100,10 @@ test's tick limit and overlap tolerance. Capacity-specific counts do not
 replace the independent 1,000-unit performance gates. Tiny patrols, stationary hostile anchors,
 and bridge-turn lookahead remain distinct regressions.
 
-[Large-army scenarios](../../tests/performance/test_large_army_performance.py) retain 1,000-unit
+[Large-army scenarios](../../tests/performance/test_large_army_performance.py) additionally require
+all 1,000 units in the open gathering-dispatch fixture to receive routes within 32 ticks, retaining
+ownership, collision processing and the global 32-route-per-tick allowance. This is dispatch
+latency, not a promise that units arrive within that time. They retain 1,000-unit
 move/patrol/repair/gathering/focus commands, gathering expansion/contraction, and 500-unit line,
 repair, delayed-route, choke, opposing-army, and determinism checks. Keep per-tick route budgets
 and the 6,000 collision-pair limit in the 500-unit choke; do not omit queued members to meet timing.

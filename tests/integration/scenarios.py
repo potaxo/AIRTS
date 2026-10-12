@@ -11,6 +11,43 @@ from airts.simulation import Simulation
 from airts.world.map import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
 
 
+def gated_attack_simulation(
+    blocked_count: int = 16, reachable_count: int = 1
+) -> tuple[Simulation, tuple[str, ...], tuple[str, ...]]:
+    blocked = tuple(f"blocked_{index:03d}" for index in range(blocked_count))
+    reachable = tuple(f"reachable_{index:03d}" for index in range(reachable_count))
+    entities = [
+        {"id": key, "kind": "scout", "position": [2.5 + index, 1.5]}
+        for index, key in enumerate(blocked)
+    ] + [
+        {"id": key, "kind": "scout", "position": [24.5 + index % 3, 1.5 + index // 3]}
+        for index, key in enumerate(reachable)
+    ]
+    return (
+        Simulation(
+            load_map_data(
+                {
+                    "id": "gated_attack",
+                    "name": "Gated attack",
+                    "width": 40,
+                    "height": 20,
+                    "terrain": {
+                        "default": "grass",
+                        "rectangles": [[20, 0, 1, 8, "water"], [20, 12, 1, 8, "water"]],
+                    },
+                    "entities": entities
+                    + [
+                        {"id": "gate", "kind": "factory", "position": [20, 8]},
+                        {"id": "target", "kind": "factory", "owner": "enemy", "position": [32, 8]},
+                    ],
+                }
+            )
+        ),
+        blocked,
+        reachable,
+    )
+
+
 def injected_overlap_simulation(
     unit_count: int = 100,
     spacing_ratio: float = 0.5,

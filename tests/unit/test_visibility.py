@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from airts.contracts.commands import MoveCommand
 from airts.contracts.spatial import Point
 from airts.simulation import Simulation
+from airts.world import visibility as visibility_module
 from airts.world.map import load_map_data
 from airts.world.visibility import VisibilityState
 
@@ -76,3 +79,48 @@ def test_large_visibility_union_matches_cell_center_geometry_across_word_boundar
             )
         }
         assert simulation.visibility.for_player(owner).visible == expected
+
+
+def test_grouped_visibility_reuses_static_unions_but_refreshes_observation_and_ownership() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "static_visibility",
+                "name": "Static visibility",
+                "width": 140,
+                "height": 30,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": f"u{i}", "kind": "scout", "position": [2.5 + i % 65, 2.5 + i // 65]}
+                    for i in range(130)
+                ],
+            }
+        )
+    )
+    visibility = simulation.visibility
+    expected = set(visibility.for_player("player").visible)
+    with patch.object(
+        visibility_module, "_visibility_words", wraps=visibility_module._visibility_words
+    ) as calculate:
+        visibility.update(simulation.entities, 1)
+        visibility.update(simulation.entities, 2)
+        assert calculate.call_count == 0
+        assert visibility.for_player("player").visible == expected
+        assert set(visibility.for_player("player").last_observed_tick.values()) == {2}
+        # A source changing owner must invalidate both unions, even at the same position.
+        entity = simulation.entities["u0"]
+        entity.owner_id = "enemy"
+        visibility.update(simulation.entities, 3)
+        assert calculate.call_count == 2
+        enemy = visibility.for_player("enemy")
+        assert simulation.game_map.cell_for(entity.position) in enemy.visible
+        entity.owner_id = "player"
+        visibility.update(simulation.entities, 4)
+        assert not enemy.visible and enemy.explored
+        assert visibility.for_player("player").visible == expected
+    # Crossing back to the small-source implementation must discard derived grouped data.
+    reduced = dict(list(simulation.entities.items())[:128])
+    visibility.update(reduced, 5)
+    visibility.update(simulation.entities, 6)
+    assert visibility.for_player("player").visible == expected
+    assert set(visibility.for_player("player").last_observed_tick.values()) == {6}

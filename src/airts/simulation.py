@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from gc import collect as collect_garbage
 from math import ceil, floor, sqrt
 
@@ -82,6 +85,12 @@ from airts.world.opponents import OpponentState
 from airts.world.visibility import VisibilitySystem
 
 
+@dataclass(frozen=True, slots=True)
+class _GatheringSlots:
+    radius: float
+    points: tuple[Point, ...]
+
+
 class Simulation:
     LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
     LARGE_SCENE_GC_CELL_THRESHOLD = 256 * 256
@@ -92,15 +101,18 @@ class Simulation:
     MIN_PROGRESS_DISTANCE = 0.02
     DEFEND_RESPONSE_RADIUS = 4.0
     DEFEND_PURSUIT_RADIUS = 7.0
+    PATROL_PURSUIT_RADIUS = 7.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
     DEFEND_FORMATION_TOLERANCE = 1.0
     DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS = 10
     DEFAULT_ENEMY_SPAWN_CAP = 100
-    GATHERING_PATH_BUDGET = 4
     AUTOMATION_ROUTE_BUDGET = 16
     TOTAL_AUTOMATION_ROUTE_BUDGET = 32
+    GATHERING_PATH_BUDGET = TOTAL_AUTOMATION_ROUTE_BUDGET
     COMBAT_PATH_BUDGET = 16
+    GATHERING_CACHE_TARGET_LIMIT = 16
+    GATHERING_CACHE_SLOT_LIMIT = 16_384
     PRODUCTION_BUILD_TICKS = 5
     CONSTRUCTION_BUILD_TICKS = 20
     CONSTRUCTION_REQUIRED_VALUE = 100.0
@@ -119,6 +131,7 @@ class Simulation:
         if enemy_spawn_cap < 0:
             raise ValueError("enemy_spawn_cap cannot be negative")
         self.game_map = game_map
+        self._owner_teams = {slot.owner_id: slot.team for slot in game_map.match_slots}
         if game_map.match_slots and ambient_enemy_spawns:
             raise ValueError("ambient enemy spawning is unavailable in team matches")
         self.match_result: int | None = None
@@ -172,6 +185,10 @@ class Simulation:
         self.projectiles: dict[str, Projectile] = {}
         self.projectile_traces: list[ProjectileTrace] = []
         self._command_history: list[dict[str, object]] = []
+        self._removal_batch: set[str] | None = None
+        self._removal_formations: dict[tuple[str, SpatialTarget], None] = {}
+        self._removal_restart_construction = False
+        self._movement_workspace = movement_system.MovementWorkspace(self.entities)
         self._movement_blocked: set[str] = set()
         self._movement_step_attempt_count = 0
         self._collision_pair_check_count = 0
@@ -186,8 +203,10 @@ class Simulation:
             automation_budget=self.TOTAL_AUTOMATION_ROUTE_BUDGET,
             combat_budget=self.COMBAT_PATH_BUDGET,
         )
-        self._gathering_slot_cache: dict[tuple[SpatialTarget, float], tuple[Point, ...]] = {}
-        self._gathering_reachable_cache: dict[SpatialTarget, BoolArray] = {}
+        self._gathering_slot_cache: OrderedDict[tuple[SpatialTarget, float], _GatheringSlots] = (
+            OrderedDict()
+        )
+        self._gathering_reachable_cache: OrderedDict[SpatialTarget, BoolArray] = OrderedDict()
         warm_collision_kernel()
         warm_spatial_index()
         self._update_visibility()
@@ -305,7 +324,7 @@ class Simulation:
             return False
         if not self.game_map.match_slots:
             return True
-        teams = {slot.owner_id: slot.team for slot in self.game_map.match_slots}
+        teams = self._owner_teams
         return not (
             first_owner in teams
             and second_owner in teams
@@ -406,20 +425,21 @@ class Simulation:
             offset = self.tick % len(automation_ids)
             automation_ids = automation_ids[offset:] + automation_ids[:offset]
         # Positions and owners are fixed during this pass. Production/construction
-        # can add entities between defenses, so discard snapshots on membership growth.
-        enemy_indexes: dict[str, tuple[dict[str, Point], SpatialIndex]] = {}
+        # can add entities between patrols/defenses, so discard snapshots on membership growth.
+        queries = automation_execution.AutomationQueries()
         entity_count = len(self.entities)
         for automation_id in automation_ids:
             automation = self.automations[automation_id]
             if automation.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
                 continue
-            if automation.kind is AutomationKind.PATROL:
-                automation_execution.drive_patrol(self, automation)
-            elif automation.kind is AutomationKind.DEFEND:
+            if automation.kind in {AutomationKind.PATROL, AutomationKind.DEFEND}:
                 if len(self.entities) != entity_count:
-                    enemy_indexes.clear()
+                    queries = automation_execution.AutomationQueries()
                     entity_count = len(self.entities)
-                automation_execution.drive_defend(self, automation, enemy_indexes)
+            if automation.kind is AutomationKind.PATROL:
+                automation_execution.drive_patrol(self, automation, queries)
+            elif automation.kind is AutomationKind.DEFEND:
+                automation_execution.drive_defend(self, automation, queries)
             elif automation.kind is AutomationKind.PRODUCTION:
                 production_system.drive_production(self, automation)
             elif automation.kind is AutomationKind.REINFORCEMENT:
@@ -428,6 +448,7 @@ class Simulation:
                 economy_system.drive_economy(self, automation)
             elif automation.kind is AutomationKind.CONSTRUCTION:
                 construction_system.drive_construction(self, automation)
+                queries = automation_execution.AutomationQueries()
             else:
                 automation_execution.drive_repair(self, automation)
 
@@ -463,7 +484,7 @@ class Simulation:
             suspended.remove_entity(entity_id)
             automation_execution.refresh_gathering_formation(self, suspended)
             automation_control.handle_automation_without_entities(self, suspended)
-        for automation in tuple(self.automations.values()):
+        for automation in self._live_automation_candidates:
             if (
                 automation.kind is AutomationKind.CONSTRUCTION
                 and not automation.status.terminal
@@ -499,25 +520,10 @@ class Simulation:
                 self.selection.route_ids,
                 self.selection.region_ids,
             )
-        for entity in self.entities.values():
-            if entity.attack_target_id == entity_id:
-                if entity.pursue_target:
-                    entity.path.clear()
-                    entity.move_target = None
-                    entity.state = self._state_for_assignment(entity.entity_id)
-                    movement_system.reset_movement_liveness(entity)
-                entity.attack_target_id = None
-                entity.pursue_target = False
-            if entity.repair_target_id == entity_id:
-                entity.repair_target_id = None
-                if entity.kind is EntityKind.BUILDER:
-                    entity.path.clear()
-                    entity.move_target = None
-                    entity.state = UnitState.IDLE
-                    movement_system.reset_movement_liveness(entity)
-            if entity.last_attacker_id == entity_id:
-                entity.last_attacker_id = None
-                entity.last_attacked_tick = None
+        if self._removal_batch is None:
+            self._clear_removed_references({entity_id})
+        else:
+            self._removal_batch.add(entity_id)
         self._movement_blocked.discard(entity_id)
         self.events.record(
             self.tick,
@@ -528,8 +534,53 @@ class Simulation:
             reason=command.reason,
         )
         if removed_entity.kind is EntityKind.BUILDER or not removed_entity.is_complete:
-            construction_system.start_next_construction(self)
+            if self._removal_batch is None:
+                construction_system.start_next_construction(self)
+            else:
+                self._removal_restart_construction = True
         return self._accept("remove_entity")
+
+    @contextmanager
+    def _batch_entity_removals(self) -> Iterator[None]:
+        """Resolve deaths immediately; coordinate survivors once at the phase boundary."""
+        assert self._removal_batch is None
+        removed_ids: set[str] = set()
+        self._removal_batch = removed_ids
+        try:
+            yield
+        finally:
+            self._removal_batch = None
+            formations = tuple(self._removal_formations)
+            self._removal_formations.clear()
+            restart = self._removal_restart_construction
+            self._removal_restart_construction = False
+            if removed_ids:
+                self._clear_removed_references(removed_ids)
+            for owner, target in formations:
+                automation_execution.coordinate_shared_defend_stations(self, target, owner)
+            if restart:
+                construction_system.start_next_construction(self)
+
+    def _clear_removed_references(self, removed_ids: set[str]) -> None:
+        for entity in self.entities.values():
+            if entity.attack_target_id in removed_ids:
+                if entity.pursue_target:
+                    entity.path.clear()
+                    entity.move_target = None
+                    entity.state = self._state_for_assignment(entity.entity_id)
+                    movement_system.reset_movement_liveness(entity)
+                entity.attack_target_id = None
+                entity.pursue_target = False
+            if entity.repair_target_id in removed_ids:
+                entity.repair_target_id = None
+                if entity.kind is EntityKind.BUILDER:
+                    entity.path.clear()
+                    entity.move_target = None
+                    entity.state = UnitState.IDLE
+                    movement_system.reset_movement_liveness(entity)
+            if entity.last_attacker_id in removed_ids:
+                entity.last_attacker_id = None
+                entity.last_attacked_tick = None
 
     def snapshot(self) -> dict[str, object]:
         return self._domain_state() | {
@@ -662,7 +713,6 @@ class Simulation:
             len(entity_ids),
             maximum_radius,
             require_count=False,
-            bounded=gathering,
         )
         available = slots
         if len(available) != len(entity_ids):
@@ -680,30 +730,19 @@ class Simulation:
         unit_radius: float,
         *,
         require_count: bool = True,
-        bounded: bool = False,
     ) -> tuple[Point, ...]:
         if count <= 0:
             return ()
         key = (target, unit_radius)
-        cached = self._gathering_slot_cache.get(key)
-        if cached is None:
+        entry = self._gathering_slot_cache.get(key)
+        if entry is not None:
+            self._gathering_slot_cache.move_to_end(key)
+        cached = entry.points if entry is not None else ()
+        if len(cached) < count:
             center = target_center(target)
             blocked = self._building_cells()
             static_obstacles = self._terrain_obstacles | blocked
-            reachable = self._gathering_reachable_cache.get(target)
-            if reachable is None:
-                anchor = self._routes.nearest_cell(center, blocked)
-                reachable = next(
-                    (
-                        region
-                        for region in self._gathering_reachable_cache.values()
-                        if region[anchor[1], anchor[0]]
-                    ),
-                    None,
-                )
-                if reachable is None:
-                    reachable = self._routes.reachable_cells(anchor, blocked)
-                self._gathering_reachable_cache[target] = reachable
+            reachable = self._gathering_reachable(target)
             # Leave a unit-width aisle between settled neighbors.
             spacing = unit_radius * 4 + 0.12
             row_height = spacing * sqrt(3) / 2
@@ -712,11 +751,12 @@ class Simulation:
                 for x in (0, self.game_map.width)
                 for y in (0, self.game_map.height)
             )
-            search_radius = min(map_radius, spacing * sqrt(count)) if bounded else map_radius
-            # A disk containing enough slots has the same nearest prefix as the
-            # complete map. Cache only complete lists for later formation growth.
+            previous_radius = entry.radius if entry is not None else -1.0
+            search_radius = min(map_radius, max(spacing * sqrt(count), previous_radius * 2))
+            # Each disk is complete within its radius. Expanding only the missing
+            # annulus preserves the full-map nearest prefix and established slots.
             while True:
-                points = []
+                points = list(cached)
                 for row in range(
                     floor(max(-center.y, -search_radius) / row_height),
                     min(
@@ -736,7 +776,7 @@ class Simulation:
                         point = Point(center.x + column * spacing + offset, station_y)
                         if (
                             self.game_map.contains(point)
-                            and (not bounded or point.distance_to(center) <= search_radius)
+                            and previous_radius < point.distance_to(center) <= search_radius
                             and reachable[floor(point.y), floor(point.x)]
                             and movement_system.position_clear(
                                 point,
@@ -748,15 +788,45 @@ class Simulation:
                         ):
                             points.append(point)
                 cached = tuple(sorted(points, key=lambda p: (p.distance_to(center), p.y, p.x)))
-                if search_radius == map_radius:
-                    self._gathering_slot_cache[key] = cached
+                if len(cached) >= count or search_radius == map_radius:
                     break
-                if len(cached) >= count:
-                    break
+                previous_radius = search_radius
                 search_radius = min(map_radius, search_radius * 2)
+            if len(cached) <= self.GATHERING_CACHE_SLOT_LIMIT:
+                self._gathering_slot_cache[key] = _GatheringSlots(search_radius, cached)
+                self._gathering_slot_cache.move_to_end(key)
+                while (
+                    len(self._gathering_slot_cache) > self.GATHERING_CACHE_TARGET_LIMIT
+                    or sum(len(item.points) for item in self._gathering_slot_cache.values())
+                    > self.GATHERING_CACHE_SLOT_LIMIT
+                ):
+                    self._gathering_slot_cache.popitem(last=False)
+            else:
+                self._gathering_slot_cache.pop(key, None)
         if require_count and count > len(cached):
             raise ValueError("gathering point has insufficient map space")
         return cached[:count]
+
+    def _gathering_reachable(self, target: SpatialTarget) -> BoolArray:
+        reachable = self._gathering_reachable_cache.get(target)
+        if reachable is None:
+            blocked = self._building_cells()
+            anchor = self._routes.nearest_cell(target_center(target), blocked)
+            reachable = next(
+                (
+                    region
+                    for region in self._gathering_reachable_cache.values()
+                    if region[anchor[1], anchor[0]]
+                ),
+                None,
+            )
+            if reachable is None:
+                reachable = self._routes.reachable_cells(anchor, blocked)
+            self._gathering_reachable_cache[target] = reachable
+            if len(self._gathering_reachable_cache) > self.GATHERING_CACHE_TARGET_LIMIT:
+                self._gathering_reachable_cache.popitem(last=False)
+        self._gathering_reachable_cache.move_to_end(target)
+        return reachable
 
     def _cancel(self, automation_id: str, owner_id: str) -> CommandResult:
         return automation_control.cancel(self, automation_id, owner_id)

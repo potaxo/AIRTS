@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from tests.integration.scenarios import (
     economy_combat_simulation,
+    gated_attack_simulation,
     interaction_simulation,
 )
 
@@ -14,6 +16,7 @@ from airts.adapters.persistence import load_simulation, save_simulation
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
+    defend_parameters,
 )
 from airts.contracts.commands import (
     AttackCommand,
@@ -28,8 +31,42 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget
 from airts.navigation.collision import collision_radius
 from airts.simulation import Simulation
-from airts.world.entities import Projectile
+from airts.systems import automation_execution
+from airts.world.entities import Projectile, UnitState
 from airts.world.map import EntityKind, load_map_data
+
+
+def test_unreachable_attackers_leave_route_allowance_for_reachable_members() -> None:
+    simulation, blocked, reachable = gated_attack_simulation()
+    starts = {key: simulation.entities[key].position for key in blocked + reachable}
+    assert simulation.execute(AttackCommand(blocked + reachable, "target")).accepted
+    for _ in range(12):
+        simulation.advance()
+        assert simulation._routes.combat_route_count <= Simulation.COMBAT_PATH_BUDGET
+    assert all(simulation.entities[key].position == starts[key] for key in blocked)
+    assert all(simulation.entities[key].state is UnitState.WAITING for key in blocked)
+    assert simulation.entities[reachable[0]].position != starts[reachable[0]]
+    failures = simulation.events.query(event_types=frozenset({EventType.PATHFINDING_FAILED}))
+    assert {event.subject_id for event in failures} == set(blocked)
+    assert len(failures) == len(blocked)
+    assert simulation.execute(RemoveEntityCommand("gate")).accepted
+    simulation.advance(4)
+    assert all(simulation.entities[key].position != starts[key] for key in blocked)
+
+
+def test_combat_route_admission_rotates_and_dispatches_every_pending_member() -> None:
+    simulation, _, reachable = gated_attack_simulation(0, 48)
+    assert simulation.execute(AttackCommand(reachable[::-1], "target")).accepted
+    for _ in range(4):
+        simulation._routes.clear()
+        simulation.advance()
+        assert simulation._routes.combat_route_count <= Simulation.COMBAT_PATH_BUDGET
+    dispatched = {
+        event.subject_id
+        for event in simulation.events.query(event_types=frozenset({EventType.PATH_COMPUTED}))
+        if event.details["source"] == "combat"
+    }
+    assert dispatched == set(reachable)
 
 
 def test_economy_automation_collects_generator_income_to_target() -> None:
@@ -305,7 +342,7 @@ def test_explicit_attack_moves_then_holds_at_weapon_range_and_fires(kind: Entity
     ),
     ids=["move", "patrol", "defend"],
 )
-def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range(
+def test_move_patrol_and_defend_units_all_fire_in_range(
     command: MoveCommand | CreatePatrolCommand | CreateDefendCommand,
 ) -> None:
     simulation = Simulation(
@@ -341,7 +378,11 @@ def test_move_patrol_and_defend_units_all_fire_opportunistically_in_range(
         event_types=frozenset({EventType.PROJECTILE_LAUNCHED}),
         subject_id="unit",
     )
-    assert simulation.entities["unit"].path
+    if isinstance(command, CreatePatrolCommand):
+        assert simulation.entities["unit"].pursue_target
+        assert not simulation.entities["unit"].path
+    else:
+        assert simulation.entities["unit"].path
 
 
 @pytest.mark.parametrize(
@@ -441,3 +482,70 @@ def test_defenders_keep_their_route_when_firing_at_an_enemy_far_from_their_stati
     assert simulation.events.query(
         event_types=frozenset({EventType.PROJECTILE_LAUNCHED}), subject_id="defender"
     )
+
+
+def test_simultaneous_casualties_coordinate_survivors_once_and_continue_after_load(
+    tmp_path: Path,
+) -> None:
+    world = load_map_data(
+        {
+            "id": "batch_casualties",
+            "name": "Batch casualties",
+            "width": 40,
+            "height": 30,
+            "terrain": {"default": "grass"},
+            "entities": [
+                {"id": f"unit_{i}", "kind": "scout", "position": [2.5 + i, 2.5]} for i in range(8)
+            ],
+        }
+    )
+    simulation = Simulation(world)
+    ids = tuple(simulation.entities)
+    result = simulation.execute(
+        CreateDefendCommand(ids, PointTarget(Point(20.5, 20.5)), gathering_point=True)
+    )
+    assert result.accepted
+    survivor = simulation.entities[ids[-1]]
+    survivor.attack_target_id, survivor.pursue_target = ids[0], True
+    survivor.last_attacker_id, survivor.last_attacked_tick = ids[1], simulation.tick
+    for index, key in enumerate(ids[:4]):
+        point = simulation.entities[key].position
+        simulation.projectiles[str(index)] = Projectile(
+            str(index), "enemy", key, "enemy", EntityKind.SCOUT, point, point, 1000, 1000
+        )
+    with patch.object(
+        automation_execution,
+        "coordinate_shared_defend_stations",
+        wraps=automation_execution.coordinate_shared_defend_stations,
+    ) as coordinate:
+        simulation.advance()
+    assert coordinate.call_count == 1
+    assert set(simulation.entities) == set(ids[4:])
+    assert survivor.attack_target_id is None and not survivor.pursue_target
+    assert survivor.last_attacker_id is None and survivor.last_attacked_tick is None
+    removed = [
+        event for event in simulation.events.events if event.event_type is EventType.ENTITY_REMOVED
+    ]
+    assert [event.subject_id for event in removed] == list(ids[:4])
+    stations = defend_parameters(simulation.automations[result.automation_id or ""]).stations
+    assert set(stations) == set(ids[4:]) and len(set(stations.values())) == 4
+    assert simulation._removal_batch is None and not simulation._removal_formations
+    path = tmp_path / "casualties.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    simulation.advance(20)
+    restored.advance(20)
+    assert restored.snapshot() == simulation.snapshot()
+    assert [event.to_dict() for event in restored.events.events] == [
+        event.to_dict() for event in simulation.events.events
+    ]
+    # A direct removal remains complete before its command returns.
+    with patch.object(
+        automation_execution,
+        "coordinate_shared_defend_stations",
+        wraps=automation_execution.coordinate_shared_defend_stations,
+    ) as coordinate:
+        assert simulation.execute(RemoveEntityCommand(ids[4])).accepted
+    assert coordinate.call_count == 1
+    final_stations = defend_parameters(simulation.automations[result.automation_id or ""]).stations
+    assert set(final_stations) == set(ids[5:])

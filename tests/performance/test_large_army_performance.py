@@ -14,10 +14,17 @@ from airts.contracts.commands import (
     CreateDefendCommand,
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
+    ModifyAutomationCommand,
     MoveCommand,
 )
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, rectangle_region
+from airts.contracts.spatial import (
+    Point,
+    PointTarget,
+    PolygonRegion,
+    PolylineTarget,
+    rectangle_region,
+)
 from airts.navigation.collision import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
@@ -292,8 +299,12 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
 
 
 @pytest.mark.parametrize("unit_count", [2, 1000])
+@pytest.mark.parametrize("control", ["move", "defend", "patrol"])
 def test_gathering_on_large_river_map_does_not_freeze_input(
-    check_timing: bool, unit_count: int, record_property: Callable[[str, object], None]
+    check_timing: bool,
+    unit_count: int,
+    control: str,
+    record_property: Callable[[str, object], None],
 ) -> None:
     game_map = create_skirmish_map()
     units = tuple(
@@ -307,15 +318,33 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
     )
     simulation = Simulation(replace(game_map, entities=game_map.entities + units))
     selected = tuple(unit.entity_id for unit in units)
+    automation_id: str | None = None
     for index, target in enumerate((Point(80.5, 275.5), Point(90.5, 275.5), Point(110.5, 275.5))):
+        area = rectangle_region(
+            Point(target.x - 1, target.y - 1), Point(target.x + 1, target.y + 1)
+        )
         started = perf_counter()
-        result = simulation.execute(MoveCommand(selected, target, gathering=True))
+        if control == "move":
+            result = simulation.execute(MoveCommand(selected, target, gathering=True))
+        elif automation_id is not None:
+            result = simulation.execute(ModifyAutomationCommand(automation_id, target=area))
+        elif control == "defend":
+            result = simulation.execute(CreateDefendCommand(selected, area, gathering_point=True))
+        else:
+            result = simulation.execute(CreatePatrolCommand(selected, area))
         elapsed = perf_counter() - started
         record_property(f"gather_{index}_seconds", elapsed)
         assert result.accepted, result.reason
-        goals = {key: simulation.entities[key].move_target for key in selected}
-        assert len(set(goals.values())) == unit_count
-        assert all(goal is not None for goal in goals.values())
+        if control == "move":
+            goals = {key: simulation.entities[key].move_target for key in selected}
+            assert len(set(goals.values())) == unit_count
+            assert all(goal is not None for goal in goals.values())
+        else:
+            automation_id = result.automation_id
+            automation = simulation.automations[automation_id or ""]
+            assert set(automation.entity_ids) == set(selected)
+            if isinstance(automation.parameters, DefendParameters):
+                assert len(set(automation.parameters.stations.values())) == unit_count
         assert simulation.navigation_field_build_count <= 64
         if check_timing:
             assert elapsed < (0.25 if unit_count == 2 else 0.75)
@@ -631,3 +660,44 @@ def test_two_large_head_on_armies_pass_without_a_global_freeze(check_timing: boo
     assert sum(simulation.entities[entity_id].position.x < 40 for entity_id in westbound) >= 75
     if check_timing:
         assert elapsed < 6.0
+
+
+def test_thousand_unit_gathering_dispatches_the_entire_army_within_global_allowance() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "gathering_dispatch",
+                "name": "Gathering dispatch",
+                "width": 160,
+                "height": 120,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"unit_{i:04d}",
+                        "kind": "scout",
+                        "position": [5.5 + i % 40, 5.5 + i // 40],
+                    }
+                    for i in range(1000)
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    created = simulation.execute(
+        CreateDefendCommand(ids, PointTarget(Point(100.5, 75.5)), gathering_point=True)
+    )
+    assert created.accepted
+    dispatched: set[str | None] = set()
+    event_count = len(simulation.events.events)
+    for _ in range(32):
+        simulation.advance()
+        assert simulation._routes.automation_route_count <= Simulation.TOTAL_AUTOMATION_ROUTE_BUDGET
+        dispatched.update(
+            event.subject_id
+            for event in simulation.events.events[event_count:]
+            if event.event_type is EventType.PATH_COMPUTED
+        )
+        event_count = len(simulation.events.events)
+    assert dispatched == set(ids)
+    assert set(simulation.assignments.values()) == {created.automation_id}
+    assert simulation.collision_pair_check_count > 0

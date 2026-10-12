@@ -168,6 +168,7 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         TRIANGLE_STRIP=4,
         LINES=5,
         LINEAR=6,
+        NEAREST=7,
     )
     context = MagicMock()
     context.info = {
@@ -187,7 +188,8 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     vertex_arrays = [MagicMock() for _ in range(8)]
     context.vertex_array.side_effect = vertex_arrays
     texture = MagicMock()
-    context.texture.return_value = texture
+    terrain_texture = MagicMock()
+    context.texture.side_effect = (terrain_texture, texture)
     renderer = OpenGLRenderer(module, context)
     simulation, eastbound, westbound = head_on_scout_simulation()
     entity_ids = eastbound + westbound
@@ -247,6 +249,8 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     renderer.release()
 
     texture.release.assert_called_once_with()
+    terrain_texture.release.assert_called_once_with()
+    assert context.texture.call_count == 2
     assert all(resource.release.called for resource in (*vertex_arrays, *buffers, *programs))
 
 
@@ -479,6 +483,7 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
         TRIANGLE_STRIP=4,
         LINES=5,
         LINEAR=6,
+        NEAREST=7,
     )
     context = MagicMock()
     programs = [MagicMock() for _ in range(7)]

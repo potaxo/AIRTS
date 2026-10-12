@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from math import hypot
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
@@ -9,6 +11,7 @@ from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     DefendParameters,
+    PatrolParameters,
     RepairPhase,
     assign_formation_slots,
     build_defend_stations,
@@ -23,16 +26,77 @@ from airts.contracts.automations import (
     patrol_parameters as _patrol_parameters,
 )
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point, PointTarget, SpatialTarget
+from airts.contracts.spatial import Point, PointTarget, SpatialTarget, distance_to_target
 from airts.navigation.collision import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import movement
-from airts.world.entities import UnitState
-from airts.world.map import EntityKind
+from airts.world.entities import Entity, UnitState
+from airts.world.map import EntityCategory, EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+@dataclass(slots=True)
+class AutomationQueries:
+    """Derived queries shared only within one position-stable automation pass."""
+
+    enemy_indexes: dict[str, tuple[dict[str, Point], SpatialIndex]] = field(default_factory=dict)
+    patrol_enemies: dict[str, dict[str, Point]] = field(default_factory=dict)
+    damaged_buildings: dict[str, dict[str, Point]] = field(default_factory=dict)
+    source_indexes: dict[tuple[str, bool], SpatialIndex] = field(default_factory=dict)
+    patrol_indexes: dict[tuple[str, SpatialTarget, bool], tuple[dict[str, Point], SpatialIndex]] = (
+        field(default_factory=dict)
+    )
+
+    def patrol_index(
+        self, simulation: Simulation, owner: str, target: SpatialTarget, *, repair: bool = False
+    ) -> tuple[dict[str, Point], SpatialIndex]:
+        key = owner, target, repair
+        cached = self.patrol_indexes.get(key)
+        if cached is not None:
+            return cached
+        snapshots = self.damaged_buildings if repair else self.patrol_enemies
+        points = snapshots.get(owner)
+        if points is None:
+            points = {
+                key: entity.selection_position
+                for key, entity in simulation.entities.items()
+                if (
+                    entity.owner_id == owner
+                    and entity.category is EntityCategory.BUILDING
+                    and entity.is_complete
+                    and entity.health < entity.kind.profile.max_health
+                    if repair
+                    else simulation.are_hostile(entity.owner_id, owner)
+                )
+            }
+            snapshots[owner] = points
+            self.source_indexes[owner, repair] = SpatialIndex(points)
+        if isinstance(target, PointTarget):
+            center = target.point
+            radius = target.radius
+        else:
+            left = min(point.x for point in target.points)
+            right = max(point.x for point in target.points)
+            top = min(point.y for point in target.points)
+            bottom = max(point.y for point in target.points)
+            center = Point((left + right) / 2, (top + bottom) / 2)
+            radius = hypot(right - left, bottom - top) / 2
+        # The enclosing disk is conservative for filled polygons and route segments.
+        # Keep the exact geometry test and a small outward rounding allowance.
+        candidates = self.source_indexes[owner, repair].nearby(
+            center, radius + simulation.PATROL_PURSUIT_RADIUS + 1e-9
+        )
+        eligible = {
+            key: points[key]
+            for key in candidates
+            if distance_to_target(points[key], target) <= simulation.PATROL_PURSUIT_RADIUS
+        }
+        cached = eligible, SpatialIndex(eligible)
+        self.patrol_indexes[key] = cached
+        return cached
 
 
 def scheduled_entity_ids(simulation: Simulation, automation: Automation) -> tuple[str, ...]:
@@ -230,14 +294,141 @@ def initialize_runtime_entity(
         entity.state = UnitState.IDLE
 
 
-def drive_patrol(simulation: Simulation, automation: Automation) -> None:
+def _interrupt_patrol(entity: Entity, parameters: PatrolParameters) -> None:
+    # Dispatch advances the cursor. Rewind once to resume the interrupted leg.
+    if entity.path or entity.move_target is not None:
+        parameters.waypoint_indices[entity.entity_id] = (
+            parameters.waypoint_indices[entity.entity_id] - 1
+        ) % len(parameters.waypoints)
+    entity.clear_recovery_request()
+    entity.path.clear()
+    entity.move_target = None
+    entity.attack_target_id = None
+    movement.reset_movement_liveness(entity)
+
+
+def drive_patrol(
+    simulation: Simulation,
+    automation: Automation,
+    queries: AutomationQueries,
+) -> None:
     parameters = _patrol_parameters(automation)
     ordered = sorted(automation.entity_ids)
     indices = {key: index for index, key in enumerate(ordered)}
+    _, enemy_index = queries.patrol_index(simulation, automation.owner_id, parameters.target)
+    enemies = queries.patrol_enemies[automation.owner_id]
+    responding = tuple(
+        key
+        for key in ordered
+        if simulation.entities[key].kind.profile.attack_damage > 0
+        and not simulation.entities[key].pursue_target
+    )
+    targets = dict(
+        zip(
+            responding,
+            enemy_index.nearest_many(
+                tuple(
+                    (simulation.entities[key].position, simulation.entities[key].vision_range)
+                    for key in responding
+                )
+            ),
+            strict=True,
+        )
+    )
+    builders = tuple(key for key in ordered if simulation.entities[key].kind is EntityKind.BUILDER)
+    if builders:
+        damaged, repair_index = queries.patrol_index(
+            simulation, automation.owner_id, parameters.target, repair=True
+        )
+    else:
+        damaged, repair_index = {}, SpatialIndex({})
+    repair_targets = dict(
+        zip(
+            builders,
+            repair_index.nearest_many(
+                tuple(
+                    (simulation.entities[key].position, simulation.entities[key].vision_range)
+                    for key in builders
+                )
+            ),
+            strict=True,
+        )
+    )
+    # Responses must run for every member, even after the routing budget is exhausted.
+    for key in ordered:
+        if simulation.assignments.get(key) != automation.automation_id:
+            continue
+        entity = simulation.entities[key]
+        if entity.kind is EntityKind.BUILDER:
+            current = simulation.entities.get(entity.repair_target_id or "")
+            if current is not None and current.entity_id in damaged:
+                continue
+            if entity.repair_target_id is not None:
+                entity.repair_target_id = None
+                entity.path.clear()
+                entity.move_target = None
+                movement.reset_movement_liveness(entity)
+            target_id = repair_targets.get(key)
+            if target_id is not None:
+                _interrupt_patrol(entity, parameters)
+                entity.repair_target_id = target_id
+                entity.state = UnitState.REPAIRING
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.REPAIR_STARTED,
+                    target_id,
+                    automation_id=automation.automation_id,
+                    destination_id=key,
+                )
+                continue
+        elif entity.kind.profile.attack_damage > 0:
+            current = simulation.entities.get(entity.attack_target_id or "")
+            if entity.pursue_target:
+                if (
+                    current is not None
+                    and current.entity_id in enemies
+                    and distance_to_target(current.selection_position, parameters.target)
+                    <= simulation.PATROL_PURSUIT_RADIUS
+                ):
+                    continue
+                entity.pursue_target = False
+                entity.attack_target_id = None
+                entity.path.clear()
+                entity.move_target = None
+                movement.reset_movement_liveness(entity)
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.PATROL_RETURNED,
+                    key,
+                    automation_id=automation.automation_id,
+                )
+                # Resume the route before considering another engagement.
+                entity.state = UnitState.PATROLLING
+                continue
+            target_id = targets.get(key)
+            if target_id is not None:
+                _interrupt_patrol(entity, parameters)
+                entity.attack_target_id = target_id
+                entity.pursue_target = True
+                entity.state = UnitState.ATTACKING
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.PATROL_ENGAGED,
+                    key,
+                    automation_id=automation.automation_id,
+                    target_id=target_id,
+                )
+                continue
+        entity.state = UnitState.PATROLLING
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
     for key in scheduled_entity_ids(simulation, automation):
         entity = simulation.entities[key]
-        if entity.path or simulation.assignments.get(key) != automation.automation_id:
+        if (
+            entity.path
+            or entity.pursue_target
+            or entity.repair_target_id is not None
+            or simulation.assignments.get(key) != automation.automation_id
+        ):
             continue
         if not allowance.claim():
             break
@@ -264,7 +455,7 @@ def drive_patrol(simulation: Simulation, automation: Automation) -> None:
 def drive_defend(
     simulation: Simulation,
     automation: Automation,
-    enemy_indexes: dict[str, tuple[dict[str, Point], SpatialIndex]],
+    queries: AutomationQueries,
 ) -> None:
     parameters = _defend_parameters(automation)
     allowance = simulation._routes.automation_allowance(
@@ -293,6 +484,7 @@ def drive_defend(
             key=lambda p: (p.distance_to(center), p.y, p.x),
             default=None,
         )
+    enemy_indexes = queries.enemy_indexes
     snapshot = enemy_indexes.get(automation.owner_id)
     if snapshot is None:
         enemies = {
@@ -348,6 +540,7 @@ def drive_defend(
     )
     # Dispatch front ranks first so early arrivals do not seal off deeper stations.
     ordered = sorted(automation.entity_ids, key=lambda key: (station_distances[key], key))
+    destinations: dict[str, Point] = {}
     for key in ordered:
         if simulation.assignments.get(key) != automation.automation_id:
             continue
@@ -407,20 +600,31 @@ def drive_defend(
             continue
         if not allowance.claim():
             continue
+        destinations[key] = station
+    if destinations:
         try:
             paths = movement.plan_group_paths(
-                simulation, (key,), {key: station}, shared_goal=anchor
+                simulation, tuple(destinations), destinations, shared_goal=anchor
             )
         except PathfindingError as error:
             simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
             return
-        movement.start_path(
-            simulation, entity, station, paths[key], automation.automation_id, UnitState.DEFENDING
-        )
+        for key, station in destinations.items():
+            movement.start_path(
+                simulation,
+                simulation.entities[key],
+                station,
+                paths[key],
+                automation.automation_id,
+                UnitState.DEFENDING,
+            )
 
 
 def refresh_gathering_formation(simulation: Simulation, automation: Automation) -> None:
     if isinstance(automation.parameters, DefendParameters):
+        if simulation._removal_batch is not None:
+            simulation._removal_formations[automation.owner_id, automation.parameters.target] = None
+            return
         coordinate_shared_defend_stations(
             simulation, automation.parameters.target, automation.owner_id
         )
@@ -431,7 +635,7 @@ def coordinate_shared_defend_stations(
 ) -> None:
     automations = [
         a
-        for a in simulation.automations.values()
+        for a in simulation._live_automation_candidates
         if isinstance(a.parameters, DefendParameters)
         and a.parameters.target == target
         and a.owner_id == owner_id

@@ -1,12 +1,14 @@
 """Physical guarantees of the replacement controller."""
 
 from collections.abc import Callable
+from math import ceil, floor, sqrt
 
 import pytest
 from tests.integration.scenarios import hold_contact_simulation
 
 from airts.contracts.automations import DefendParameters
 from airts.contracts.commands import (
+    CancelAutomationCommand,
     CreateDefendCommand,
     HoldPositionCommand,
     MoveCommand,
@@ -19,6 +21,7 @@ from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_map_data
+from airts.world.skirmish import create_skirmish_map
 
 
 def test_move_from_injected_overlapping_selection_allocates_compatible_destinations() -> None:
@@ -153,23 +156,78 @@ def test_bounded_gathering_matches_complete_slots_and_reports_capacity(
         )
     )
     spatial_target = PointTarget(target)
-    local = simulation._gathering_slots(
-        spatial_target, count, 0.3, require_count=False, bounded=True
-    )
-    complete = simulation._gathering_slots(spatial_target, count, 0.3, require_count=False)
-    assert local == complete
+    blocked = simulation._terrain_obstacles | simulation._building_cells()
+    anchor = simulation._routes.nearest_cell(target, simulation._building_cells())
+    reachable = simulation._routes.reachable_cells(anchor, simulation._building_cells())
+    spacing = 0.3 * 4 + 0.12
+    row_height = spacing * sqrt(3) / 2
+    complete = []
+    for row in range(floor(-target.y / row_height), ceil((24 - target.y) / row_height)):
+        offset = (row % 2) * spacing / 2
+        for column in range(
+            floor((-target.x - offset) / spacing), ceil((48 - target.x - offset) / spacing)
+        ):
+            point = Point(target.x + column * spacing + offset, target.y + row * row_height)
+            if (
+                simulation.game_map.contains(point)
+                and reachable[floor(point.y), floor(point.x)]
+                and position_clear(point, 0.3, 48, 24, blocked)
+            ):
+                complete.append(point)
+    expected = tuple(sorted(complete, key=lambda p: (p.distance_to(target), p.y, p.x)))
+    # Growth, eviction and cold reconstruction must all choose the same exhaustive prefix.
+    simulation._gathering_slots(spatial_target, 1, 0.3, require_count=False)
+    local = simulation._gathering_slots(spatial_target, count, 0.3, require_count=False)
+    assert local == expected[:count]
+    simulation._gathering_slot_cache.clear()
+    assert simulation._gathering_slots(spatial_target, count, 0.3, require_count=False) == local
     if len(local) < count:
         with pytest.raises(ValueError, match="insufficient map space"):
-            simulation._gathering_slots(spatial_target, count, 0.3, bounded=True)
+            simulation._gathering_slots(spatial_target, count, 0.3)
     # A different center in the same component can share reachability; it must not
     # retain a separate map-sized copy on every right click.
     next_target = PointTarget(Point(target.x + 0.1, target.y + 0.1))
-    simulation._gathering_slots(next_target, 1, 0.3, bounded=True)
+    simulation._gathering_slots(next_target, 1, 0.3)
     if target != Point(24, 12):
         assert (
             simulation._gathering_reachable_cache[next_target]
             is simulation._gathering_reachable_cache[spatial_target]
         )
+
+
+def test_retired_gathering_targets_bound_cache_and_reconstruct_identical_stations() -> None:
+    simulation = Simulation(create_skirmish_map())
+    ids = tuple(
+        key
+        for key, entity in simulation.entities.items()
+        if entity.owner_id == "player" and entity.is_movable
+    )
+    first_target = PointTarget(Point(80.5, 275.5))
+    first = simulation.execute(CreateDefendCommand(ids, first_target, gathering_point=True))
+    assert first.accepted
+    first_parameters = simulation.automations[first.automation_id or ""].parameters
+    assert isinstance(first_parameters, DefendParameters)
+    stations = dict(first_parameters.stations)
+    assert simulation.execute(CancelAutomationCommand(first.automation_id or "")).accepted
+    for offset in range(Simulation.GATHERING_CACHE_TARGET_LIMIT + 3):
+        target = PointTarget(Point(90.5 + offset, 275.5))
+        result = simulation.execute(CreateDefendCommand(ids, target, gathering_point=True))
+        assert result.accepted
+        assert simulation.execute(CancelAutomationCommand(result.automation_id or "")).accepted
+        assert len(simulation._gathering_slot_cache) <= Simulation.GATHERING_CACHE_TARGET_LIMIT
+        assert len(simulation._gathering_reachable_cache) <= Simulation.GATHERING_CACHE_TARGET_LIMIT
+        assert (
+            sum(len(entry.points) for entry in simulation._gathering_slot_cache.values())
+            <= Simulation.GATHERING_CACHE_SLOT_LIMIT
+        )
+    assert not any(automation.entity_ids for automation in simulation.live_automations)
+    # No whole-map candidate list survives for these tiny, cancelled tasks.
+    assert sum(len(entry.points) for entry in simulation._gathering_slot_cache.values()) < 256
+    repeated = simulation.execute(CreateDefendCommand(ids, first_target, gathering_point=True))
+    assert repeated.accepted
+    parameters = simulation.automations[repeated.automation_id or ""].parameters
+    assert isinstance(parameters, DefendParameters)
+    assert parameters.stations == stations
 
 
 def _advance_with_clearance(simulation: Simulation, ticks: int = 1) -> None:

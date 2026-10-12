@@ -91,6 +91,22 @@ class PolygonRegion:
 SpatialTarget = PointTarget | PolylineTarget | PolygonRegion
 
 
+def distance_to_target(point: Point, target: SpatialTarget) -> float:
+    """Distance outside a point's disk, a route, or a polygon's filled area."""
+
+    if isinstance(target, PointTarget):
+        return max(0.0, point.distance_to(target.point) - target.radius)
+    if isinstance(target, PolygonRegion) and target.contains(point):
+        return 0.0
+    ends = target.points[1:]
+    if isinstance(target, PolygonRegion):
+        ends += target.points[:1]
+    return min(
+        distance_to_segment(point, start, end)
+        for start, end in zip(target.points, ends, strict=False)
+    )
+
+
 def rectangle_region(start: Point, end: Point) -> PolygonRegion:
     if start.x == end.x or start.y == end.y:
         raise ValueError("a rectangle must have non-zero width and height")

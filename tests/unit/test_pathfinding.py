@@ -54,6 +54,13 @@ def test_weighted_routes_match_independent_forward_search() -> None:
                     heappush(queue, (candidate, neighbor))
         a, b = Point(start[0] + 0.5, start[1] + 0.5), Point(end[0] + 0.5, end[1] + 0.5)
         segment = passable_segment_cells(game_map, a, b)
+        direct = router.segment_path(a, b, frozenset(), maximum_cost=float("inf"))
+        assert (direct.cells if direct is not None else None) == segment
+        if direct is not None:
+            assert direct.cost == sum(
+                game_map.terrain_at_cell(c).movement_cost for c in segment[1:]
+            )
+        assert router.can_reach_any(a, (b,), frozenset()) == (end in costs)
         assert router.clear_segment(a, b, frozenset()) == (
             segment is not None
             and all(game_map.terrain_at_cell(c).movement_cost <= 1 for c in segment)
@@ -70,6 +77,51 @@ def test_weighted_routes_match_independent_forward_search() -> None:
             for a, b in zip(result.cells, result.cells[1:], strict=False)
         )
         assert result.waypoints[-1] == b
+
+
+def test_connectivity_tracks_obstacles_and_does_not_depend_on_cached_searches(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1), maximum_fields=1)
+    start, goal = Point(1.5, 1.5), Point(10.5, 10.5)
+    wall = frozenset((5, y) for y in range(12))
+    assert not router.can_reach_any(start, (goal,), wall)
+    assert router.can_reach_any(start, (goal,), wall - {(5, 6)})
+    assert router.can_reach_any(start, (goal, start), wall)
+    assert not router.can_reach_any(start, (Point(5.5, 5.5),), wall)
+    assert not router.can_reach_any(Point(5.5, 5.5), (goal,), wall)
+    router.clear()
+    assert not router.can_reach_any(start, (goal,), wall)
+    assert router.field_build_count == 0
+
+
+def test_branch_cost_continues_python_compensated_sum_without_changing_rounding() -> None:
+    game_map = load_map_data(
+        {
+            "id": "branch_cost",
+            "name": "Branch cost",
+            "width": 160,
+            "height": 4,
+            "terrain": {"rows": [["bridge", "grass", "forest", "road"] * 40 for _ in range(4)]},
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.5, 0.5]}],
+        }
+    )
+    router = RoutingService(game_map)
+    path = router.shared_path(Point(0.5, 0.5), Point(159.5, 0.5))
+    assert path.prefix_costs is not None
+    for index in range(1, len(path.cells), 11):
+        x, y = path.cells[index]
+        branch = router.segment_path(
+            Point(x + 0.5, y + 0.5),
+            Point(158.5, 3.5),
+            frozenset(),
+            maximum_cost=float("inf"),
+            initial_cost=float(path.prefix_costs[index, 0]),
+            initial_correction=float(path.prefix_costs[index, 1]),
+        )
+        assert branch is not None
+        cells = path.cells[: index + 1] + branch.cells[1:]
+        assert branch.cost == sum(game_map.terrain_at_cell(c).movement_cost for c in cells[1:])
 
 
 def test_thousand_routes_share_one_field_and_cache_eviction_preserves_routes(

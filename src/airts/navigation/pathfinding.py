@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import floor, inf
 
 import numpy as np
@@ -22,6 +22,7 @@ class PathResult:
     cells: tuple[Cell, ...]
     waypoints: tuple[Point, ...]
     cost: float
+    prefix_costs: FloatArray | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -78,6 +79,7 @@ class RoutingService:
         self._cost_grid = np.asarray(self._costs).reshape((game_map.height, game_map.width))
         self._terrain_mask = np.isinf(self._cost_grid)
         self._obstacle_masks: OrderedDict[frozenset[Cell], BoolArray] = OrderedDict()
+        self._connected_regions: OrderedDict[frozenset[Cell], IntArray] = OrderedDict()
         _clear_segment(self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5)
         # Numba distinguishes an omitted default from an explicit cost threshold.
         # Warm both signatures before the first command, including weighted branches.
@@ -94,6 +96,11 @@ class RoutingService:
             0,
         )
         _reachable_cells(np.zeros((1, 1), dtype=np.bool_), 0, 0)
+        _label_regions(np.zeros((1, 1), dtype=np.bool_))
+        _extract_path(np.ones((1, 1)), np.full(1, -1, dtype=np.int64), 0)
+        _segment_path(
+            self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5, 1.0, 0.0, 0.0
+        )
         _visible_waypoints(
             self._cost_grid,
             self.obstacle_mask(frozenset()),
@@ -114,6 +121,81 @@ class RoutingService:
     def clear(self) -> None:
         self._fields.clear()
         self._obstacle_masks.clear()
+        self._connected_regions.clear()
+
+    def can_reach_any(
+        self, start: Point, goals: tuple[Point, ...], blocked: frozenset[Cell]
+    ) -> bool:
+        """Exact static connectivity, independent of path budgets and cache lifetime."""
+        if (
+            not goals
+            or not self.game_map.is_passable(start)
+            or self.game_map.cell_for(start) in blocked
+        ):
+            return False
+        regions = self._connected_regions.get(blocked)
+        if regions is None:
+            regions = _label_regions(self.obstacle_mask(blocked))
+            self._connected_regions[blocked] = regions
+            if len(self._connected_regions) > min(self.maximum_fields, 4):
+                self._connected_regions.popitem(last=False)
+        self._connected_regions.move_to_end(blocked)
+        x, y = self.game_map.cell_for(start)
+        region = regions[y, x]
+        for goal in goals:
+            if self.game_map.contains(goal):
+                gx, gy = self.game_map.cell_for(goal)
+                if regions[gy, gx] == region:
+                    return True
+        return False
+
+    def validate_connection(self, start: Point, goal: Point, blocked: frozenset[Cell]) -> None:
+        """Validate a route without allocating an unused full path."""
+        if not self.game_map.is_passable(start):
+            raise PathfindingError("START_NOT_PASSABLE")
+        if self.game_map.cell_for(start) in blocked:
+            raise PathfindingError("START_OCCUPIED")
+        if not self.game_map.is_passable(goal) or self.game_map.cell_for(goal) in blocked:
+            raise PathfindingError("TARGET_NOT_PASSABLE")
+        if not self.can_reach_any(start, (goal,), blocked):
+            raise PathfindingError("NO_PATH")
+
+    def segment_path(
+        self,
+        start: Point,
+        end: Point,
+        blocked: frozenset[Cell],
+        *,
+        maximum_cost: float = 1.0,
+        initial_cost: float = 0.0,
+        initial_correction: float = 0.0,
+    ) -> PathResult | None:
+        """Check, collect and cost a segment once, continuing an ordered prefix sum."""
+        indices, cost = _segment_path(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            float(start.x),
+            float(start.y),
+            float(end.x),
+            float(end.y),
+            maximum_cost,
+            initial_cost,
+            initial_correction,
+        )
+        if not len(indices):
+            return None
+        cells = self._path_cells(indices.tolist())
+        return PathResult(cells, () if start == end else (end,), cost)
+
+    def _path_cells(self, indices: list[int]) -> tuple[Cell, ...]:
+        cells = self._cells
+        width = self.game_map.width
+        return tuple(
+            cells[index]
+            if index in cells
+            else cells.setdefault(index, (index % width, index // width))
+            for index in indices
+        )
 
     def clear_segment(self, start: Point, end: Point, blocked: frozenset[Cell]) -> bool:
         return _clear_segment(
@@ -250,18 +332,9 @@ class RoutingService:
         cost = float(costs[index])
         if cost == inf:
             raise PathfindingError("NO_PATH")
-        indices = [index]
-        while following[index] != -1:
-            index = int(following[index])
-            indices.append(index)
-        goal = points[index]
-        cell_cache = self._cells
-        cells = tuple(
-            cell_cache[i]
-            if i in cell_cache
-            else cell_cache.setdefault(i, (i % game_map.width, i // game_map.width))
-            for i in indices
-        )
+        indices, prefix_costs = _extract_path(self._cost_grid, following, index)
+        goal = points[int(indices[-1])]
+        cells = self._path_cells(indices.tolist())
         # Cell centers keep every turn inside a passable cell. Continuous steering may
         # shorten these segments only after checking the intervening terrain.
         centers = self._centers
@@ -273,7 +346,7 @@ class RoutingService:
         )
         if start != goal:
             waypoints += (goal,)
-        return goal, PathResult(cells, waypoints, cost)
+        return goal, PathResult(cells, waypoints, cost, prefix_costs)
 
     def _build_field(self, goals: tuple[int, ...], blocked: frozenset[Cell]) -> _SearchField:
         count = self.game_map.width * self.game_map.height
@@ -285,6 +358,113 @@ class RoutingService:
         field = _SearchField(costs, np.full(count, -1, dtype=np.int64), heap, positions, len(goals))
         self.field_build_count += 1
         return field
+
+
+@compile_numeric
+def _label_regions(blocked: BoolArray) -> IntArray:
+    height, width = blocked.shape
+    regions = np.full((height, width), -1, dtype=np.int64)
+    queue = np.empty(height * width, dtype=np.int64)
+    for start in range(height * width):
+        x, y = start % width, start // width
+        if blocked[y, x] or regions[y, x] != -1:
+            continue
+        queue[0], regions[y, x] = start, start
+        read, size = 0, 1
+        while read < size:
+            index = queue[read]
+            read += 1
+            x, y = index % width, index // width
+            for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
+                if (
+                    0 <= nx < width
+                    and 0 <= ny < height
+                    and not blocked[ny, nx]
+                    and regions[ny, nx] == -1
+                ):
+                    regions[ny, nx] = start
+                    queue[size] = ny * width + nx
+                    size += 1
+    return regions
+
+
+@compile_numeric
+def _extract_path(
+    costs: FloatArray, following: IntArray, start: int
+) -> tuple[IntArray, FloatArray]:
+    size, index = 1, start
+    while following[index] != -1:
+        size += 1
+        index = following[index]
+    indices = np.empty(size, dtype=np.int64)
+    # Preserve Python 3.13 sum's compensated high/low state across a branch,
+    # rather than rounding the prefix and restarting a different float sum.
+    prefixes = np.zeros((size, 2), dtype=np.float64)
+    indices[0] = start
+    width = costs.shape[1]
+    for offset in range(1, size):
+        start = following[start]
+        indices[offset] = start
+        high, low = prefixes[offset - 1]
+        value = costs[start // width, start % width]
+        total = high + value
+        low += (high - total) + value if abs(high) >= abs(value) else (value - total) + high
+        prefixes[offset, 0], prefixes[offset, 1] = total, low
+    return indices, prefixes
+
+
+@compile_numeric
+def _segment_path(
+    costs: FloatArray,
+    blocked: BoolArray,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    maximum_cost: float,
+    initial_cost: float,
+    initial_correction: float,
+) -> tuple[IntArray, float]:
+    height, width = costs.shape
+    empty = np.empty(0, dtype=np.int64)
+    if not (0 <= ax < width and 0 <= ay < height and 0 <= bx < width and 0 <= by < height):
+        return empty, 0.0
+    x, y, ex, ey = floor(ax), floor(ay), floor(bx), floor(by)
+    if blocked[y, x] or costs[y, x] > maximum_cost:
+        return empty, 0.0
+    cells = np.empty(abs(ex - x) + abs(ey - y) + 1, dtype=np.int64)
+    cells[0], size, cost = y * width + x, 1, initial_cost
+    correction = initial_correction
+    dx, dy = bx - ax, by - ay
+    sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
+    tx = ((x + 1 - ax) if dx > 0 else (ax - x)) / abs(dx) if dx else inf
+    ty = ((y + 1 - ay) if dy > 0 else (ay - y)) / abs(dy) if dy else inf
+    step_x, step_y = (1 / abs(dx) if dx else inf), (1 / abs(dy) if dy else inf)
+    while x != ex or y != ey:
+        if x == ex:
+            tx = inf
+        if y == ey:
+            ty = inf
+        if abs(tx - ty) < 1e-12:
+            if blocked[y, x + sx] or blocked[y + sy, x]:
+                return empty, 0.0
+            x, y = x + sx, y + sy
+            tx, ty = tx + step_x, ty + step_y
+        elif tx < ty:
+            x += sx
+            tx += step_x
+        else:
+            y += sy
+            ty += step_y
+        if blocked[y, x] or costs[y, x] > maximum_cost:
+            return empty, 0.0
+        cells[size] = y * width + x
+        size += 1
+        value = costs[y, x]
+        total = cost + value
+        correction += (cost - total) + value if abs(cost) >= abs(value) else (value - total) + cost
+        cost = total
+    return cells[:size], cost + correction
 
 
 @compile_numeric

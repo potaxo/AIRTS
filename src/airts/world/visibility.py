@@ -108,6 +108,9 @@ class VisibilitySystem:
         self.game_map = game_map
         _visibility_words(np.empty((0, 3), dtype=np.float64), game_map.width, game_map.height)
         self.players: dict[str, PlayerVisibility] = {}
+        self._grouped_masks: dict[
+            str, tuple[tuple[tuple[float, float, float], ...], list[int]]
+        ] = {}
         self._source_masks: dict[
             str,
             tuple[str, Point, float, tuple[tuple[int, int], ...]],
@@ -116,6 +119,7 @@ class VisibilitySystem:
     def update(self, entities: dict[str, Entity], tick: int) -> dict[str, tuple[int, int, int]]:
         if len(entities) > 128:
             return self._update_grouped(entities, tick)
+        self._grouped_masks.clear()
         sources: dict[str, list[tuple[tuple[int, int], ...]]] = {}
         for entity_id, entity in entities.items():
             position = entity.selection_position
@@ -161,11 +165,18 @@ class VisibilitySystem:
             )
         changes: dict[str, tuple[int, int, int]] = {}
         for player_id in sorted(set(self.players).union(sources)):
-            array = np.asarray(sources.get(player_id, []), dtype=np.float64).reshape((-1, 3))
-            words = _visibility_words(array, self.game_map.width, self.game_map.height)
-            row_masks = [
-                sum(int(word) << (64 * index) for index, word in enumerate(row)) for row in words
-            ]
+            signature = tuple(sources.get(player_id, []))
+            cached = self._grouped_masks.get(player_id)
+            if cached is None or cached[0] != signature:
+                array = np.asarray(signature, dtype=np.float64).reshape((-1, 3))
+                words = _visibility_words(array, self.game_map.width, self.game_map.height)
+                row_masks = [
+                    int.from_bytes(row.astype("<u8", copy=False).tobytes(), "little")
+                    for row in words
+                ]
+                self._grouped_masks[player_id] = signature, row_masks
+            else:
+                row_masks = cached[1]
             visibility = self.players.setdefault(
                 player_id, PlayerVisibility(self.game_map.width, self.game_map.height)
             )

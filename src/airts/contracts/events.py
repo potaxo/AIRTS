@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from array import array
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import chain
 from pathlib import Path
 
 
@@ -42,19 +44,73 @@ class EventType(StrEnum):
     COMBAT_ATTACK = "combat_attack"
     DEFEND_ENGAGED = "defend_engaged"
     DEFEND_RETURNED = "defend_returned"
+    PATROL_ENGAGED = "patrol_engaged"
+    PATROL_RETURNED = "patrol_returned"
     PROJECTILE_LAUNCHED = "projectile_launched"
     PROJECTILE_IMPACT = "projectile_impact"
     ENTITY_DESTROYED = "entity_destroyed"
     RETREAT_STARTED = "retreat_started"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Event:
     sequence: int
     tick: int
     event_type: EventType
     subject_id: str | None
-    details: dict[str, object]
+    _details: dict[str, object]
+    _path_cells: bytes | None
+
+    def __init__(
+        self,
+        sequence: int,
+        tick: int,
+        event_type: EventType,
+        subject_id: str | None,
+        details: dict[str, object],
+    ) -> None:
+        packed = None
+        cells = details.get("cells")
+        if (
+            event_type is EventType.PATH_COMPUTED
+            and isinstance(cells, array)
+            and cells.typecode == "q"
+        ):
+            packed = cells.tobytes()
+        elif event_type is EventType.PATH_COMPUTED and isinstance(cells, list | tuple):
+            # Event payloads are otherwise generic. Compact ordinary integer cell
+            # records, retaining other payloads unchanged for the event codec.
+            coordinates = array("q")
+            for cell in cells:
+                if not isinstance(cell, list | tuple) or len(cell) != 2:
+                    break
+                if not all(
+                    type(value) is int and -(1 << 63) <= value < (1 << 63) for value in cell
+                ):
+                    break
+                coordinates.extend(cell)
+            else:
+                packed = coordinates.tobytes()
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "tick", tick)
+        object.__setattr__(self, "event_type", event_type)
+        object.__setattr__(self, "subject_id", subject_id)
+        object.__setattr__(self, "_path_cells", packed)
+        object.__setattr__(
+            self,
+            "_details",
+            {key: value for key, value in details.items() if packed is None or key != "cells"},
+        )
+
+    @property
+    def details(self) -> dict[str, object]:
+        """Expose the original payload; unpack complete paths only when inspected/exported."""
+        if self._path_cells is None:
+            return self._details
+        coordinates = array("q")
+        coordinates.frombytes(self._path_cells)
+        pairs = iter(coordinates)
+        return self._details | {"cells": [[x, next(pairs)] for x in pairs]}
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -84,6 +140,24 @@ class EventLog:
         event = Event(len(self._events) + 1, tick, event_type, subject_id, details)
         self._events.append(event)
         return event
+
+    def record_path(
+        self,
+        tick: int,
+        subject_id: str,
+        *,
+        source: str,
+        cost: float,
+        cells: tuple[tuple[int, int], ...],
+    ) -> Event:
+        return self.record(
+            tick,
+            EventType.PATH_COMPUTED,
+            subject_id,
+            source=source,
+            cost=cost,
+            cells=array("q", chain.from_iterable(cells)),
+        )
 
     def write_jsonl(self, path: str | Path) -> None:
         with Path(path).open("w", encoding="utf-8") as stream:

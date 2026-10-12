@@ -48,27 +48,55 @@ and economy. Reinforcement transfers eligible units and fails when its target is
 One movement controller handles all army sizes, with shared group-path planning for direct commands
 and patrol/defend dispatch.
 
+Armed patrollers interrupt their route for the nearest hostile in their own vision range,
+retain that target while pursuing, and resume the interrupted leg after its destruction or
+departure beyond the patrol pursuit margin. The margin is measured outside the point disk,
+polyline segments, or filled polygon, rather than from the unit's moving position.
+Builders use the same patrol command and interrupt their route for the nearest damaged,
+completed building belonging to their owner within their own vision range and patrol margin.
+They keep repairing that building until it is full or removed, then resume the interrupted leg.
+Patrol ownership remains active throughout combat/repair; pause, cancel, and manual orders
+stop this work through the usual control boundary.
+
 Static routing uses reverse Dijkstra fields over four-neighbor weighted terrain. A bounded LRU cache
 shares each destination field across units; changing building obstacles changes the cache key.
 Fields expand only until the requested starting cell is settled and retain their indexed-heap
 frontier for later requests. Strict relaxation, cost/index ties and neighbor order are unchanged;
 request order, cache eviction and load cannot change routes. Immutable cell centers are shared
-across extracted paths to reduce allocations. Gathering uses compiled connected-component masks
-and preserves the same nearest-anchor and station ordering. Combat checks its existing direct
-approach before requesting a field; its chosen path and route allowance are unchanged.
+across extracted paths to reduce allocations. Path extraction and segment collection run in serial
+numeric loops; a segment is checked, collected and costed once. Branches retain the compensated
+forward prefix sum used by Python 3.13, preserving cell lists and exact logged costs.
+Connectivity-only command validation does not materialize unused paths.
+Gathering uses compiled connected-component masks and preserves the same nearest-anchor and
+station ordering. Combat checks its existing direct approach before requesting a field.
+Pending combat routes rotate deterministically with the tick within the unchanged route allowance;
+projectile/event processing retains stable entity-ID order. Exact static connectivity rejects
+unreachable firing rings before admission. Such pursuits remain queued in `WAITING`, recording
+one path-failure diagnostic until the target/obstacles permit a route or a new order replaces them.
+Connectivity labels are derived from terrain and current buildings, so obstacle removal, target
+movement, cache eviction and save/load cannot leave a stale failure suppressing pursuit.
 Direct attacks retain their ordered enemy until destruction or another accepted control order.
 Moving targets can refresh a stale firing destination after one second of route travel, within
 the existing combat route budget; paths need not finish before pursuit adapts. Destroying a target
-clears its pursuit movement. Mixed UI selections dispatch attacks only to armed members.
+clears its pursuit movement. Projectile impacts remove casualties immediately in stable projectile-ID
+order; at the end of that phase, survivor references are cleared in one pass and each affected
+owner/defense target coordinates stations once. Builder queue restarts also occur at this boundary.
+Direct removal commands finish their coordination before returning. No pending batch enters saves.
+This also clears attack-memory references when a dead source's already-launched projectile lands
+later in the same phase. Mixed UI selections dispatch attacks only to armed members.
 Attackers sharing a target and range reuse its firing ring within the same combat pass;
 positions do not change during that pass, and the snapshot never survives into another tick.
 Direct move commands default to preserving the current formation for every army size; an explicit
 `gathering` flag instead allocates separated reachable slots around the destination. Missing flags
 in saved command histories retain the default behavior. Gathering defaults do not require save
 migration; pursuit and repair changes require the current replay schemas described below.
-Direct gathering searches expanding circles for the same nearest-slot prefix as the complete
-planner, reuses connected reachability, and constructs static clearance obstacles once per
-allocation. Partial slot lists do not enter the full formation cache. Friendly entity hits take
+Move, patrol, defense and production gathering search expanding circles for the same nearest-slot
+prefix as the complete planner, reusing connected reachability and static clearance obstacles.
+Cached disks are complete within their radius; growth adds their missing annulus and retains
+established valid stations. LRU limits bound both target count and total retained candidate slots,
+including cancelled targets; connected-region references are bounded separately. Cache eviction
+only reconstructs the same prefix and does not affect station identities or replay.
+Friendly entity hits take
 precedence over nearby enemies' generous click areas; single and double enemy hits still attack.
 Formation-preserving group orders preserve physically compatible translated positions, fitting
 the group inside map edges. When terrain, buildings, or overlapping source geometry prevent that
@@ -87,7 +115,10 @@ replanning; a blocked order stays queued.
 Numeric movement, reverse Dijkstra fields, lookahead, and exact visibility unions run in serial compiled CPU loops without
 fastmath or parallel reductions. Simulation construction compiles kernels or loads their Numba
 disk cache; compilation/cache errors propagate. Numeric buffers and navigation caches rebuild
-after load and do not enter saves.
+after load and do not enter saves. Movement reuses contiguous inputs and scratch buffers at their
+high-water capacity, while every stationary body still participates in contact/yielding. Unchanged
+visibility-source groups reuse exact row unions; observation ticks still refresh each tick, and
+owner/position/radius or membership changes invalidate the union.
 Compiled routing retains the same cost/index ties, neighbor order and route-request budgets;
 its warm-up occurs during simulation construction, never on the first movement click.
 
@@ -95,8 +126,11 @@ Line defenses spread along the line. Area defenses use separated stations, expan
 areas into hexagonal slots with a unit-width aisle between neighbors. This deliberately replaces
 maximum-density packing: the aisles reduce contact pressure, while settled units can yield and
 recover their established stations without reservations or global rematching. Same-owner defenses with the same target share unique stations and retain
-valid slots on membership changes. Patrol and defense route dispatch have per-controller and global
-budgets. Crowd throughput, separation, and frame-time requirements remain owned by
+valid slots on membership changes. Ordinary patrol/defense controllers can dispatch 16 routes per
+tick; gathering defenses can consume the global 32-route automation allowance, replacing their old
+four-route cap. Every accepted route still consumes one global claim. Controllers rotate by tick;
+defenses dispatch front ranks first and batch path planning for the admitted members. Combat
+responses still visit every member after route admission is exhausted. Crowd throughput, separation, and frame-time requirements remain owned by
 [performance](performance.md#crowd-and-routing); they must be measured, not inferred from the design.
 Ordinary defenses can also acquire deployment slots when their initial stations lack clearance;
 save/load preserves those expanded stations without changing the gathering flag.
@@ -411,15 +445,16 @@ capable member wins immediately, regardless of enemy residual armies. No viable 
 draw. A recorded result stops simulation advancement and is displayed with an option to return
 to opening configuration. A command center keeps its owner viable because it can produce a builder.
 
-Team matches use `airts-match-save-v4` and `airts-match-replay-v5`, carrying site/controller/team
+Team matches use `airts-match-save-v4` and `airts-match-replay-v8`, carrying site/controller/team
 map data, results, physical construction and opponent memory. Squad membership, phases, targets,
 destinations, command/retry ticks and budget pauses are authoritative and validated on load.
 Match saves v1/v2 migrate with empty opponent memory; surviving units regroup under the new policy
 on its next decision. Saves v3 retain opponent memory. Saves v1-v3 first validate their recorded
 result under the old factory/builder rule, then recompute it with command-center production; an
 older concluded match can resume if a surviving command center makes both teams viable. Existing
-event history remains intact. Match replays v1-v4 require their original AIRTS version and are
-explicitly rejected because combat, repair, opponent or elimination rules can change their outcome.
+event history remains intact. Match replays v1-v6 require their original AIRTS version and are
+explicitly rejected because combat routing, patrol, repair, opponent or elimination rules can
+change their outcome.
 New save continuation and replay share the same decisions.
 
 [persistence.py](../../src/airts/adapters/persistence.py) and
@@ -438,10 +473,20 @@ contact graphs, release geometry, derived leaders, per-tick work diagnostics and
 fields rebuild from authoritative positions and intent. Presentation history is not saved. Mobile
 units may share occupancy cells, while buildings remain exclusive obstacles.
 
+Complete path events retain packed integer coordinates in memory and materialize their original
+`cells: [[x, y], ...]` payload only for inspection or export. JSON event/save formats and event
+ordering remain unchanged; loaded path history is compacted again. Unit waypoints and movement
+physics are unchanged by this representation. Existing saves continue under the corrected combat
+admission rules without a schema migration; queued pursuit uses the existing unit state/target.
+
 The unfinished-automation query index is derived, rebuilt on load, and updated by lifecycle
 activation and terminal transitions. Live panel membership still reads current members and future
 sources; repeated queries and tick scheduling do not scan terminal history. History remains saved
-and inspectable, and query ordering and tick rotation remain unchanged.
+and inspectable, and query ordering and tick rotation remain unchanged. Formation coordination, casualty dependencies
+and factory queues also use unfinished work rather than terminal history. Patrols share per-owner
+selection-center enemy/building snapshots and per-target indexes within one automation pass;
+production membership changes and construction updates invalidate those queries before reuse.
+Team hostility uses the immutable map-slot teams. Snapshots never cross movement/combat phases.
 
 Obsolete congestion-stop flags and blocked-tick counters no longer exist in runtime state.
 JSON retains `congestion_stopped: false` and
@@ -474,8 +519,10 @@ and does not promise the previous implementation's future trajectories.
 
 The additive entity `repair_target_id` field records builder work and hub service ownership;
 supported older saves default it to null and continue with current repair/pursuit behavior.
-Replays use v12 (or match v5) and explicitly reject earlier schemas: their expected
-trajectories/events belong to the previous construction/movement/combat/repair behavior. There is no automatic replay
+Patrol interruptions reuse saved entity attack/repair targets and waypoint cursors; the save
+schema remains unchanged. Existing saves continue under the updated patrol rules.
+Replays use v15 (or match v8) and explicitly reject earlier schemas: their expected
+trajectories/events belong to the previous construction/movement/combat/repair/patrol/routing/dispatch behavior. There is no automatic replay
 migration. New replay verification still compares snapshot and ordered events; save continuation
 tests additionally compare complete exported authoritative state.
 

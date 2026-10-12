@@ -416,7 +416,7 @@ def factory_production_jobs(simulation: Simulation, factory_id: str) -> tuple[Au
         sorted(
             (
                 automation
-                for automation in simulation.automations.values()
+                for automation in simulation._live_automation_candidates
                 if automation.kind is AutomationKind.PRODUCTION
                 and not automation.status.terminal
                 and production_parameters(automation).factory_id == factory_id

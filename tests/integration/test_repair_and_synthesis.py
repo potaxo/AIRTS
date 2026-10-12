@@ -17,12 +17,13 @@ from airts.adapters.replay import capture_replay, run_replay
 from airts.contracts.commands import (
     AttackCommand,
     CreateConstructionCommand,
+    CreatePatrolCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
     RepairBuildingCommand,
     StopCommand,
 )
-from airts.contracts.spatial import Point
+from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLFrameBuilder
 from airts.presentation.rendering import SoftwareRenderer, order_feedback
@@ -215,7 +216,8 @@ def test_synthesis_commands_replay() -> None:
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
 
 
-def test_builder_repair_command_replays_combat_damage_and_restoration() -> None:
+@pytest.mark.parametrize("patrol", [False, True], ids=["direct-repair", "patrol-repair"])
+def test_builder_repair_replays_combat_damage_and_restoration(patrol: bool) -> None:
     data = repair_world().game_map.to_dict()
     data["entities"] = [
         {"id": "builder", "kind": "builder", "position": [2.5, 4.5]},
@@ -226,7 +228,12 @@ def test_builder_repair_command_replays_combat_damage_and_restoration() -> None:
     simulation.advance(40)
     assert simulation.entities["factory"].health < 500
     simulation.remove_entity("enemy")
-    assert simulation.execute(RepairBuildingCommand(("builder",), "factory")).accepted
+    command = (
+        CreatePatrolCommand(("builder",), PolylineTarget((Point(2.5, 8.5), Point(20.5, 8.5))))
+        if patrol
+        else RepairBuildingCommand(("builder",), "factory")
+    )
+    assert simulation.execute(command).accepted
     simulation.advance(150)
     assert simulation.entities["factory"].health == 500
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()

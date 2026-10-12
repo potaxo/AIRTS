@@ -9,7 +9,7 @@ from airts.contracts.automations import AutomationKind
 from airts.contracts.commands import RemoveEntityCommand
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
-from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
+from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import movement
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
@@ -37,6 +37,9 @@ def drive_combat(simulation: Simulation) -> None:
     }
     nearest_enemies: dict[str, str] = {}
     approach_cache: dict[tuple[str, float], tuple[Point, ...]] = {}
+    pending_routes: list[str] = []
+    blocked_routes: set[str] = set()
+    interaction_cache: dict[str, frozenset[tuple[int, int]]] = {}
     for owner_id, owned in positions_by_owner.items():
         armed = []
         query_list = []
@@ -59,6 +62,29 @@ def drive_combat(simulation: Simulation) -> None:
                 and simulation.automations[assigned].kind is AutomationKind.REPAIR_AND_RETURN
             ):
                 continue
+            if (
+                entity.pursue_target
+                and target is not None
+                and simulation.are_hostile(target.owner_id, owner_id)
+                and (
+                    not entity.path
+                    or (
+                        entity.route_ticks >= simulation.TICKS_PER_SECOND
+                        and entity.move_target is not None
+                        and _squared_distance(entity.move_target, positions[target.entity_id])
+                        > profile.attack_range * profile.attack_range
+                    )
+                )
+                and simulation.game_map.cell_for(entity.position)
+                not in _interaction_cells(simulation, target, interaction_cache)
+            ):
+                goals = _approach_points(simulation, entity, target, approach_cache)
+                if simulation._routes.can_reach_any(
+                    entity.position, goals, simulation._building_cells()
+                ):
+                    pending_routes.append(key)
+                else:
+                    blocked_routes.add(key)
             armed.append(key)
             query_list.append((positions[key], profile.attack_range))
         armed_ids, queries = tuple(armed), tuple(query_list)
@@ -75,6 +101,15 @@ def drive_combat(simulation: Simulation) -> None:
                     candidate,
                 ) < (_squared_distance(positions[key], positions[previous]), previous):
                     nearest_enemies[key] = candidate
+    # Admission rotates independently of the stable firing/event order. Static
+    # failures never consume route allowance; connectivity is derived and exact
+    # even after save/load or cache eviction.
+    pending_routes.sort()
+    remaining = simulation._routes.combat_budget - simulation._routes.combat_route_count
+    if pending_routes:
+        offset = simulation.tick % len(pending_routes)
+        pending_routes = pending_routes[offset:] + pending_routes[:offset]
+    admitted_routes = frozenset(pending_routes[:remaining])
     # Persistence deliberately serializes entity mappings by stable ID.  Combat
     # therefore has to use the same order as a freshly loaded simulation rather
     # than depending on the construction history of the live dict.
@@ -119,33 +154,28 @@ def drive_combat(simulation: Simulation) -> None:
             and ordered_target is not None
             and ordered_target_distance_squared is not None
             and ordered_target_distance_squared <= attack_range_squared
-            and (attacker.path or attacker.move_target is not None)
         ):
+            if attacker.path or attacker.move_target is not None:
+                attacker.path.clear()
+                attacker.move_target = None
+                movement.reset_movement_liveness(attacker)
+            attacker.state = UnitState.ATTACKING
+        if entity_id in blocked_routes:
+            if attacker.state is not UnitState.WAITING:
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.PATHFINDING_FAILED,
+                    entity_id,
+                    operation="combat",
+                    reason="NO_REACHABLE_FIRING_POSITION",
+                    target_id=attacker.attack_target_id,
+                )
+            attacker.state = UnitState.WAITING
             attacker.path.clear()
             attacker.move_target = None
             movement.reset_movement_liveness(attacker)
-            attacker.state = UnitState.ATTACKING
-        if (
-            attacker.pursue_target
-            and ordered_target is not None
-            and (
-                not attacker.path
-                or (
-                    attacker.route_ticks >= simulation.TICKS_PER_SECOND
-                    and attacker.move_target is not None
-                    and _squared_distance(attacker.move_target, positions[ordered_target.entity_id])
-                    > attack_range_squared
-                )
-            )
-            and ordered_target_distance_squared is not None
-            and ordered_target_distance_squared > attack_range_squared
-            and simulation.game_map.cell_for(attacker.position)
-            not in {
-                simulation.game_map.cell_for(point)
-                for point in simulation._interaction_points(ordered_target)
-            }
-            and simulation._routes.claim_combat_route()
-        ):
+        elif entity_id in admitted_routes and simulation._routes.claim_combat_route():
+            assert ordered_target is not None
             chase_target(simulation, attacker, ordered_target, approach_cache)
         firing_target: Entity | None
         if (
@@ -194,33 +224,36 @@ def drive_combat(simulation: Simulation) -> None:
 def drive_projectiles(simulation: Simulation) -> None:
     """Advance live projectiles and retain bounded visual traces."""
 
-    simulation.projectile_traces = [
-        trace for trace in simulation.projectile_traces if trace.expires_tick > simulation.tick
-    ]
-    for projectile_id in sorted(tuple(simulation.projectiles)):
-        projectile = simulation.projectiles.get(projectile_id)
-        if projectile is None:
-            continue
-        target = simulation.entities.get(projectile.target_entity_id)
-        if target is not None and simulation.are_hostile(target.owner_id, projectile.owner_id):
-            projectile.destination = target.selection_position
-        destination = projectile.destination
-        distance = projectile.position.distance_to(destination)
-        maximum_step = projectile.speed * simulation.TICK_SECONDS
-        if distance <= maximum_step or isclose(distance, maximum_step):
-            projectile.position = destination
-            projectile.trajectory.append(destination)
-            if target is None or not simulation.are_hostile(target.owner_id, projectile.owner_id):
-                finish_projectile(simulation, projectile)
-            else:
-                impact_projectile(simulation, projectile, target)
-            continue
-        fraction = maximum_step / distance
-        projectile.position = Point(
-            projectile.position.x + (destination.x - projectile.position.x) * fraction,
-            projectile.position.y + (destination.y - projectile.position.y) * fraction,
-        )
-        projectile.trajectory.append(projectile.position)
+    with simulation._batch_entity_removals():
+        simulation.projectile_traces = [
+            trace for trace in simulation.projectile_traces if trace.expires_tick > simulation.tick
+        ]
+        for projectile_id in sorted(tuple(simulation.projectiles)):
+            projectile = simulation.projectiles.get(projectile_id)
+            if projectile is None:
+                continue
+            target = simulation.entities.get(projectile.target_entity_id)
+            if target is not None and simulation.are_hostile(target.owner_id, projectile.owner_id):
+                projectile.destination = target.selection_position
+            destination = projectile.destination
+            distance = projectile.position.distance_to(destination)
+            maximum_step = projectile.speed * simulation.TICK_SECONDS
+            if distance <= maximum_step or isclose(distance, maximum_step):
+                projectile.position = destination
+                projectile.trajectory.append(destination)
+                if target is None or not simulation.are_hostile(
+                    target.owner_id, projectile.owner_id
+                ):
+                    finish_projectile(simulation, projectile)
+                else:
+                    impact_projectile(simulation, projectile, target)
+                continue
+            fraction = maximum_step / distance
+            projectile.position = Point(
+                projectile.position.x + (destination.x - projectile.position.x) * fraction,
+                projectile.position.y + (destination.y - projectile.position.y) * fraction,
+            )
+            projectile.trajectory.append(projectile.position)
 
 
 def impact_projectile(simulation: Simulation, projectile: Projectile, target: Entity) -> None:
@@ -288,28 +321,19 @@ def chase_target(
 ) -> None:
     """Route an ordered attacker to a valid interaction point."""
 
-    key = (target.entity_id, attacker.kind.profile.attack_range)
-    goals = approach_cache.get(key) if approach_cache is not None else None
-    if goals is None:
-        goals = _firing_approach_points(simulation, attacker, target)
-        if approach_cache is not None:
-            approach_cache[key] = goals
+    goals = _approach_points(simulation, attacker, target, approach_cache)
     if not goals:
         return
     slot = sum((index + 1) * ord(char) for index, char in enumerate(attacker.entity_id)) % len(
         goals
     )
     approach = goals[slot]
-    direct = passable_segment_cells(
-        simulation.game_map, attacker.position, approach, simulation._building_cells()
+    direct = simulation._routes.segment_path(
+        attacker.position, approach, simulation._building_cells(), maximum_cost=float("inf")
     )
     if direct is not None:
         point = approach
-        path = PathResult(
-            direct,
-            (point,),
-            sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
-        )
+        path = direct
     else:
         try:
             point, path = simulation._routes.shared_path_to_any(
@@ -320,6 +344,35 @@ def chase_target(
         except PathfindingError:
             return
     movement.start_path(simulation, attacker, point, path, "combat", UnitState.ATTACKING)
+
+
+def _approach_points(
+    simulation: Simulation,
+    attacker: Entity,
+    target: Entity,
+    cache: dict[tuple[str, float], tuple[Point, ...]] | None,
+) -> tuple[Point, ...]:
+    key = (target.entity_id, attacker.kind.profile.attack_range)
+    goals = cache.get(key) if cache is not None else None
+    if goals is None:
+        goals = _firing_approach_points(simulation, attacker, target)
+        if cache is not None:
+            cache[key] = goals
+    return goals
+
+
+def _interaction_cells(
+    simulation: Simulation,
+    target: Entity,
+    cache: dict[str, frozenset[tuple[int, int]]],
+) -> frozenset[tuple[int, int]]:
+    cells = cache.get(target.entity_id)
+    if cells is None:
+        cells = frozenset(
+            simulation.game_map.cell_for(point) for point in simulation._interaction_points(target)
+        )
+        cache[target.entity_id] = cells
+    return cells
 
 
 def _firing_approach_points(

@@ -12,11 +12,55 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.collision import advance_positions, collision_radius
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
+from airts.world._numeric import BoolArray, FloatArray, IntArray
 from airts.world.entities import Entity, UnitState
-from airts.world.map import Cell, footprint_cells
+from airts.world.map import Cell, EntityKind, footprint_cells
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+class MovementWorkspace:
+    """Reusable contiguous inputs/scratch; never saved or fed back as world state."""
+
+    def __init__(self, entities: dict[str, Entity]) -> None:
+        self.capacity = 0
+        self.floats: dict[str, FloatArray] = {}
+        self.booleans: dict[str, BoolArray] = {}
+        self.integers: dict[str, IntArray] = {}
+        self.members = {key: entity.kind for key, entity in entities.items()}
+        self.keys = sorted(key for key, entity in entities.items() if entity.is_movable)
+        self.ensure(len(self.keys))
+
+    def ensure(self, count: int) -> None:
+        if count <= self.capacity:
+            return
+        self.capacity = max(count, 128, self.capacity * 2)
+        self.floats = {
+            key: np.empty(
+                (self.capacity, 2)
+                if key in {"positions", "targets", "goals", "recovery_targets"}
+                else self.capacity,
+                dtype=np.float64,
+            )
+            for key in (
+                "positions",
+                "targets",
+                "goals",
+                "radii",
+                "speeds",
+                "recovery_targets",
+                "tolerances",
+            )
+        }
+        self.booleans = {
+            key: np.empty(self.capacity, dtype=np.bool_)
+            for key in ("moving", "stationary", "routed", "stalled", "recovering", "released")
+        }
+        self.integers = {
+            key: np.empty(self.capacity, dtype=np.int64) for key in ("ticks", "status")
+        }
+        self.integers["work"] = np.empty(4, dtype=np.int64)
 
 
 def reset_movement_liveness(entity: Entity) -> None:
@@ -39,13 +83,12 @@ def start_path(
     entity.path_cost = path.cost
     entity.state = state if entity.path else simulation._state_for_assignment(entity.entity_id)
     simulation._movement_blocked.discard(entity.entity_id)
-    simulation.events.record(
+    simulation.events.record_path(
         simulation.tick,
-        EventType.PATH_COMPUTED,
         entity.entity_id,
         source=source,
         cost=path.cost,
-        cells=[list(c) for c in path.cells],
+        cells=path.cells,
     )
     if entity.path:
         simulation.events.record(
@@ -170,7 +213,16 @@ def _track_progress(entity: Entity, target: Point, minimum: float) -> float:
 
 
 def move_entities(simulation: Simulation) -> None:
-    keys = sorted(key for key, entity in simulation.entities.items() if entity.is_movable)
+    workspace = simulation._movement_workspace
+    members: dict[str, EntityKind] = workspace.members
+    if len(members) != len(simulation.entities) or any(
+        members.get(key) is not entity.kind for key, entity in simulation.entities.items()
+    ):
+        workspace.members = {key: entity.kind for key, entity in simulation.entities.items()}
+        workspace.keys = sorted(
+            key for key, entity in simulation.entities.items() if entity.is_movable
+        )
+    keys = workspace.keys
     if not keys:
         return
     entities = [simulation.entities[key] for key in keys]
@@ -312,13 +364,22 @@ def move_entities(simulation: Simulation) -> None:
             )
         )
     data = np.asarray(records, dtype=np.float64)
-    positions, target_data, goals = data[:, :2].copy(), data[:, 2:4].copy(), data[:, 4:6].copy()
-    radii, speeds = data[:, 6].copy(), data[:, 7].copy()
-    moving = data[:, 8].astype(np.bool_)
-    stationary = ~moving
+    count = len(keys)
+    workspace.ensure(count)
+    floats = {key: value[:count] for key, value in workspace.floats.items()}
+    booleans = {key: value[:count] for key, value in workspace.booleans.items()}
+    integers = {key: value[:count] for key, value in workspace.integers.items()}
+    positions, target_data, goals = floats["positions"], floats["targets"], floats["goals"]
+    positions[:], target_data[:], goals[:] = data[:, :2], data[:, 2:4], data[:, 4:6]
+    radii, speeds = floats["radii"], floats["speeds"]
+    radii[:], speeds[:] = data[:, 6], data[:, 7]
+    moving, stationary = booleans["moving"], booleans["stationary"]
+    moving[:] = data[:, 8]
+    np.logical_not(moving, out=stationary)
     # One stable front ordering for active routes and nearby resting bodies.
     # Batch the arithmetic; IDs are already sorted and provide the last tie break.
-    routed = data[:, 9].astype(np.bool_)
+    routed = booleans["routed"]
+    routed[:] = data[:, 9]
     headings = data[:, 10:12]
     totals = [sum(np.abs(headings[routed, axis]).tolist()) for axis in (0, 1)]
     axis = int(totals[1] > totals[0])
@@ -334,8 +395,16 @@ def move_entities(simulation: Simulation) -> None:
     )
     order = np.asarray(np.lexsort((np.arange(len(keys)), fronts, priority)), dtype=np.int64)
     simulation._movement_step_attempt_count += len(planned)
-    work = np.zeros(4, dtype=np.int64)
-    recovery_status = np.zeros(len(keys), dtype=np.int64)
+    work = workspace.integers["work"]
+    work.fill(0)
+    recovery_status = integers["status"]
+    recovery_status.fill(0)
+    booleans["stalled"][:] = stalled
+    booleans["recovering"][:] = recovering
+    booleans["released"][:] = recovery_released
+    integers["ticks"][:] = recovery_ticks
+    floats["recovery_targets"][:] = recovery_targets
+    floats["tolerances"][:] = recovery_tolerances
     updated, pressure, checks = advance_positions(
         positions,
         target_data,
@@ -348,12 +417,12 @@ def move_entities(simulation: Simulation) -> None:
         simulation._routes.obstacle_mask(obstacles),
         axis,
         work,
-        np.asarray(stalled, dtype=np.bool_),
-        recovering=np.asarray(recovering, dtype=np.bool_),
-        recovery_ticks=np.asarray(recovery_ticks, dtype=np.int64),
-        recovery_released=np.asarray(recovery_released, dtype=np.bool_),
-        recovery_targets=np.asarray(recovery_targets, dtype=np.float64),
-        recovery_tolerances=np.asarray(recovery_tolerances, dtype=np.float64),
+        booleans["stalled"],
+        recovering=booleans["recovering"],
+        recovery_ticks=integers["ticks"],
+        recovery_released=booleans["released"],
+        recovery_targets=floats["recovery_targets"],
+        recovery_tolerances=floats["tolerances"],
         recovery_status=recovery_status,
     )
     simulation._collision_pair_check_count += checks
@@ -477,27 +546,27 @@ def plan_group_paths(
     result: dict[str, PathResult] = {}
     for key in entity_ids:
         start, target = simulation.entities[key].position, destinations[key]
-        if simulation._routes.clear_segment(start, target, blocked):
-            direct = passable_segment_cells(simulation.game_map, start, target, blocked)
-            assert direct is not None
-            result[key] = PathResult(
-                direct,
-                () if start == target else (target,),
-                sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in direct[1:]),
-            )
+        direct = simulation._routes.segment_path(start, target, blocked)
+        if direct is not None:
+            result[key] = direct
             continue
         shared = simulation._routes.shared_path(start, anchor, blocked)
         for index, point in enumerate(shared.waypoints):
-            if not simulation._routes.passable_segment(point, target, blocked):
-                continue
-            branch = passable_segment_cells(simulation.game_map, point, target, blocked)
+            last = index + 1
+            assert shared.prefix_costs is not None
+            branch = simulation._routes.segment_path(
+                point,
+                target,
+                blocked,
+                maximum_cost=float("inf"),
+                initial_cost=float(shared.prefix_costs[last, 0]),
+                initial_correction=float(shared.prefix_costs[last, 1]),
+            )
             if branch is not None:
-                last = shared.cells.index(simulation.game_map.cell_for(point))
-                cells = shared.cells[: last + 1] + branch[1:]
                 result[key] = PathResult(
-                    cells,
+                    shared.cells[: last + 1] + branch.cells[1:],
                     shared.waypoints[: index + 1] + (target,),
-                    sum(simulation.game_map.terrain_at_cell(c).movement_cost for c in cells[1:]),
+                    branch.cost,
                 )
                 break
         else:
@@ -511,6 +580,8 @@ def validate_paths(
     blocked = simulation._building_cells()
     # All members must reach the route; all route vertices must be connected.
     for key in entity_ids:
-        simulation._routes.shared_path(simulation.entities[key].position, targets[0], blocked)
+        simulation._routes.validate_connection(
+            simulation.entities[key].position, targets[0], blocked
+        )
     for point in targets[1:]:
-        simulation._routes.shared_path(point, targets[0], blocked)
+        simulation._routes.validate_connection(point, targets[0], blocked)
