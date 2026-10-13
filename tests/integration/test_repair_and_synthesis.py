@@ -1,5 +1,6 @@
 """Builder repair, automatic repair capacity, synthesis and moving-target pursuit."""
 
+from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,9 +27,12 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLFrameBuilder
+from airts.presentation.palette import REPAIR_COLOR
 from airts.presentation.rendering import SoftwareRenderer, order_feedback
+from airts.presentation.ui import selection
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def repair_world() -> Simulation:
@@ -126,6 +130,43 @@ def test_hub_repairs_one_in_range_unit_until_full_then_switches(tmp_path: Path) 
     assert simulation.export_state() == restored.export_state()
     assert simulation.entities["a"].health == 100
     assert simulation.entities["b"].health == 25
+
+
+def test_repair_beam_tracks_hub_service_without_selection_in_both_renderers() -> None:
+    simulation = repair_world()
+    simulation.entities["a"].health = 90
+    simulation.entities["b"].health = 20
+    app = AirtsApp(simulation)
+    software = SoftwareRenderer()
+
+    def check_beam(target_id: str | None) -> None:
+        before = simulation.export_state()
+        paths = software._representative_path_points(app)
+        packed, vertices, selected_paths = OpenGLFrameBuilder._build_paths(app, (0, 0), 1.0)
+        assert selected_paths == 0
+        if target_id is None:
+            assert not paths and not packed and vertices == 0
+        else:
+            source = simulation.entities["hub"].selection_position
+            target = simulation.entities[target_id].selection_position
+            assert paths == ((REPAIR_COLOR, (app.screen_point(source), app.screen_point(target))),)
+            values = array("f")
+            values.frombytes(packed)
+            assert vertices == 2
+            assert tuple(values[:2]) == (source.x, source.y)
+            assert tuple(values[6:8]) == (target.x, target.y)
+            assert tuple(values[2:6]) == pytest.approx((*[v / 255 for v in REPAIR_COLOR], 1.0))
+        assert simulation.export_state() == before
+
+    check_beam(None)
+    simulation.advance()
+    check_beam("a")
+    simulation.advance()
+    check_beam(None)  # Full health clears the service link in the same tick.
+    simulation.advance()
+    check_beam("b")
+    simulation.remove_entity("b")
+    check_beam(None)
 
 
 def test_queued_construction_waits_for_direct_building_repair() -> None:
@@ -312,11 +353,11 @@ def test_right_click_dispatch_price_and_live_attack_feedback() -> None:
     assert points[-1] != old_endpoint
     assert points[-1] == simulation.entities["hostile"].selection_position
     pygame.font.init()
-    app._font = pygame.font.Font(None, 22)
-    app._small_font = pygame.font.Font(None, 18)
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
     app.selected_entities = {"factory"}
-    with patch.object(app, "_small_text", wraps=app._small_text) as text:
-        app._draw_context_panel(pygame.Surface(app.window_size))
+    with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
+        selection.draw_selection(app, pygame.Surface(app.window_size))
     assert any("Cost 400" in call.args[1] for call in text.call_args_list)
 
 

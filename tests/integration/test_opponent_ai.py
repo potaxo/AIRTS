@@ -22,8 +22,8 @@ from airts.contracts.commands import (
 )
 from airts.contracts.spatial import Point
 from airts.systems.opponent_ai import engagement_margin
-from airts.world.map import EntityKind
 from airts.world.opponents import SquadPhase
+from airts.world.units.catalog import EntityKind
 
 
 def test_force_prediction_distinguishes_health_and_unit_quality() -> None:

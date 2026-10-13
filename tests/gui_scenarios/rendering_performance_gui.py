@@ -14,7 +14,8 @@ from airts.contracts.commands import CreateDefendCommand, CreatePatrolCommand, M
 from airts.contracts.spatial import Point, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 DISPLAY_SIZE = (3840, 2160)
 UNIT_COUNT = 1_000

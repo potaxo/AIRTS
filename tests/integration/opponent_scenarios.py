@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def opponent_scenario(

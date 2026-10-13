@@ -35,10 +35,12 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolylineTarget, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.presentation.app import AirtsApp
+from airts.presentation.ui import automations
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize(
@@ -769,7 +771,7 @@ def test_automation_inspector_can_attach_current_loop_to_defense_area() -> None:
         CreateProductionCommand("factory", EntityKind.BUILDER, 1, continuous=True)
     )
     app = AirtsApp(simulation)
-    app.selected_automation_id = loop_result.automation_id
+    app.automation_panel.selected_id = loop_result.automation_id
     app.active_target = rectangle_region(Point(12, 12), Point(18, 18))
 
     app._apply_target_to_automation()
@@ -797,7 +799,7 @@ def test_factory_production_and_linked_area_defense_share_one_panel_item() -> No
         AutomationKind.DEFEND,
     }
 
-    rows = AirtsApp(simulation)._automation_panel_rows()
+    rows = automations.panel_rows(AirtsApp(simulation))
 
     assert len(rows) == 1
     assert rows[0].kind is AutomationKind.PRODUCTION
@@ -820,7 +822,7 @@ def test_factory_and_area_interaction_attaches_current_loop_to_defense() -> None
 
     assert app.selected_entities == {"factory"}
     assert app.selected_regions == {created_region.reference_id}
-    automation = simulation.automations[app.selected_automation_id or ""]
+    automation = simulation.automations[app.automation_panel.selected_id or ""]
     assert automation.automation_id == loop.automation_id
     assert isinstance(automation.parameters, ProductionParameters)
     assert automation.parameters.continuous

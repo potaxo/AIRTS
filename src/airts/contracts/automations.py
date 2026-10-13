@@ -15,7 +15,8 @@ from airts.contracts.spatial import (
     SpatialTarget,
     target_to_dict,
 )
-from airts.world.map import EntityKind, GameMap
+from airts.world.map import GameMap
+from airts.world.units.catalog import EntityKind
 
 
 class AutomationStatus(StrEnum):

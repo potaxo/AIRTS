@@ -9,7 +9,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.systems.production import spawn_cell_available
 from airts.world.entities import Entity, UnitState
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

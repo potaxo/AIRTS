@@ -1,141 +1,111 @@
 # Engineering
 
-[Design](../design.md) owns scope and invariants; [AGENTS](../../AGENTS.md) owns workflow.
+[Design](../design.md) owns priorities; [AGENTS](../../AGENTS.md) owns contributor workflow.
 
 ## Ownership
 
-AIRTS is a modular monolith. Split code by responsibility and reason to change, not line count.
-Keep one canonical implementation per responsibility; the public facade does not require private
-forwarders for every system function. Local work calls its owner; retain shared hooks where useful.
+AIRTS is a modular monolith with one canonical implementation per responsibility. Split by reason
+to change, not line count; avoid facade forwarders, generic managers and transitional import shims.
 
-Directories identify responsibilities: shared contracts, world state, navigation algorithms,
-authoritative systems, persistence adapters, presentation, and bundled data. Package initializers
-only declare packages; the root initializer explicitly exports the public entry points.
+| Owner | Responsibility |
+| --- | --- |
+| Package root | Explicit public exports, CLI and `Simulation` orchestration |
+| `contracts/` | Serializable commands, automations, spatial input and events |
+| `world/` | Maps, occupancy, runtime entities, visibility, numeric kernels and opponent memory |
+| `world/units/` | Immutable profiles, stable tags and explicit production relationships |
+| `navigation/` | Routing fields/budgets, spatial queries and local collision geometry |
+| `navigation/collision/` | Shared disc certificates (`geometry`), bounded queries (`neighbors`), joint release (`release`), anchor recovery (`returning`), tick solver (`solver`) and dependency-aware compilation (`_compile`) |
+| `systems/` | Command application, automation, movement, combat, repair, economy, production, construction and results |
+| `adapters/` | Versioned persistence and replay diagnostics |
+| `presentation/` | Window/input, lobby, UI, software/GPU rendering and frame metrics |
+| `presentation/ui/` | Font/text primitives (`drawing`), selection/production controls (`selection`), automation inspection/scroll (`automations`) and settings/help (`menus`) |
+| `data/` | Bundled maps; package-data configuration belongs to `pyproject.toml` |
 
-```text
-src/airts/
-|-- __init__.py                 Public Simulation and load_example_map exports
-|-- __main__.py                 CLI argument parsing, startup and exit exports
-|-- simulation.py               Public facade, authoritative state, command/tick orchestration
-|-- contracts/                  Shared serializable data and control contracts
-|   |-- __init__.py
-|   |-- commands.py             Command schemas/codecs, authority precedence and validation
-|   |-- automations.py          Parameters, legal transitions and formation planning
-|   |-- spatial.py              Geometry targets, spatial references and selections
-|   `-- events.py               Ordered event records, queries and JSON Lines export
-|-- world/                      World models and lowest-level numeric execution support
-|   |-- __init__.py
-|   |-- map.py                  Cells, terrain/entity profiles, loading and occupancy
-|   |-- skirmish.py             Fixed symmetric map and opening slot configuration
-|   |-- opponents.py            Serializable opponent squads and economy memory
-|   |-- entities.py             Runtime entities, projectiles and trajectory traces
-|   |-- visibility.py           Per-owner visibility and exploration
-|   `-- _numeric.py             Typed serial CPU compilation for domain kernels
-|-- navigation/                 Routing and local collision algorithms
-|   |-- __init__.py
-|   |-- pathfinding.py          Weighted routes, shared fields and route budgets
-|   |-- collision.py            Continuous clearance and local steering
-|   `-- spatial_index.py        Neighbor and nearest-target queries
-|-- systems/                    Validated commands and tick-driven authoritative behavior
-|   |-- __init__.py
-|   |-- command_handlers.py     Unit/automation command validation and application
-|   |-- spatial_commands.py     Spatial reference and selection command application
-|   |-- automation_control.py   Lifecycle, assignments, ownership and control claims
-|   |-- automation_execution.py Patrol/defend/reinforcement/repair and formation coordination
-|   |-- movement.py             Shared group-path planning and movement execution
-|   |-- combat.py               Pursuit, firing, projectile impacts and damage
-|   |-- repair.py               Direct builder repair and automatic single-target repair hubs
-|   |-- production.py           Factory queues, spawning and linked automation work
-|   |-- construction.py         Placement, builder queues and construction progress
-|   |-- opponent_ai.py          Bounded economy planning, combat forecasts and squad decisions
-|   |-- skirmish.py             Elimination, team results and match-state validation
-|   `-- economy.py              Income, economy targets and ambient enemy spawning
-|-- adapters/                   Versioned persistence and deterministic replay
-|   |-- __init__.py
-|   |-- persistence.py          Complete save/load validation and restoration
-|   `-- replay.py               Command recording and replay verification
-|-- presentation/               Window/input state, interface and scene presentation
-|   |-- __init__.py
-|   |-- app.py                  Event loop, input, UI drawing and frame composition
-|   |-- lobby.py                Opening cover and pre-match player/team configuration
-|   |-- rendering.py            Shared SceneView, backend choice and software scene caches
-|   |-- metrics.py              Frame-pacing samples and Real FPS calculation
-|   |-- opengl_renderer.py      GPU batches, interpolation, uploads and resource lifetime
-|   |-- gpu_feedback.py         Cached world feedback, camera transforms and text atlas
-|   `-- palette.py              Shared terrain, entity and projectile colors
-`-- data/
-    `-- phase1_map.json          Bundled starting map
-```
+Runtime dependencies point inward: **presentation/adapters -> facade -> systems -> navigation/world**.
+Contracts may read world profiles. World does not import navigation; neither imports systems,
+adapters, presentation or the facade. Systems reference `Simulation` only under `TYPE_CHECKING`.
+Imports are acyclic; Pygame/ModernGL remain outside domain code. Package initializers declare
+packages; the root directly re-exports `Simulation` and `load_example_map` with unchanged identity.
+Internal calls import their owner directly. JSON tags carry data, not Python module paths.
 
-Command schemas, conflict precedence and failure types belong together at the control boundary.
-Geometry and spatial references share one representation and codec. Map footprints and occupancy
-share cell semantics; runtime entities and projectiles share authoritative object serialization.
-Visibility and navigation retain independent computational boundaries. Automation data, control
-and execution remain separate because schema changes, ownership changes and tick behavior differ.
-World entities store recovery request ages and phases that affect later trajectories. Navigation
-derives contact graphs and release geometry; movement owns return intent, phase lifecycle and all
-position/occupancy submission. Automations retain business station identities and control claims;
-adapters serialize authoritative recovery state and validate its restored owner. Derived graphs,
-leaders and numeric scratch state remain reconstructible navigation data.
+### Definitions and execution
 
-SoftwareRenderer owns terrain, sprite, entity and path caches and reads SceneView instead of
-application internals. The app retains input drafts, UI overlays and whole-window composition;
-the GPU backend owns its buffers and resources. Metrics has no Pygame or application dependency.
-Shared palette and independent render backends retain useful boundaries.
+Each mobile kind has one keyword-based immutable profile; buildings share the same schema.
+The explicit catalog owns tag/profile and producer bindings, never dynamic plugin discovery.
+Armed profiles require positive projectile speed; collision radii and relative mass must be finite
+and positive. Each mobile profile declares its mass; buildings remain hard obstacles regardless of mass.
+Add a kind through its definition, catalog/producer binding and presentation palette; opponent
+composition remains an explicit AI policy. Simulation behavior stays in shared systems, not
+per-kind executors. Images/colors belong to presentation.
 
-Runtime dependencies point inward: presentation/adapters -> facade -> systems -> navigation/world.
-`contracts/` holds shared data and control contracts; commands and automations may read world profiles.
-The package root contains only exports, the CLI entry and the public facade. Internal imports use
-the owning modules directly; removed module paths do not have forwarding shims.
-Public `airts.Simulation` and `airts.load_example_map` are direct re-exports with unchanged identity.
-JSON command/save/replay formats contain tags and data, not Python module paths; this organization
-does not require a format migration. Bundled map lookup stays package-relative and package-data
-configuration remains owned by [pyproject.toml](../../pyproject.toml).
-World does not import navigation; neither imports systems, adapters, presentation, or the facade.
-Systems may reference `Simulation` under `TYPE_CHECKING` only. Pygame/ModernGL stay outside domain
-code. Keep the public `airts.Simulation` identity; do not recreate transitional compatibility APIs.
-Runtime module imports are acyclic. The facade schedules automation work; command handlers and
-automation execution share group-path planning in `systems/movement.py`.
+Command validation and precedence belong at the control boundary; spatial targets share codecs.
+Navigation owns contact geometry; movement owns intent/recovery lifecycle and all position/occupancy
+submission. Adapters restore authoritative recovery state; scratch, graphs and leaders are derived.
+Automation schema, control and execution remain separate responsibilities.
+
+SoftwareRenderer owns scene caches and reads SceneView; the app owns input drafts, overlays and
+composition. Camera owns zoom/offset and bounded transforms independently of input. UI panels use
+scoped view protocols rather than importing AirtsApp or a render backend, emit clickable action
+records, and leave command dispatch to the app. AutomationPanelState owns local inspection, tabs,
+scroll and hit geometry; authoritative automation data remains in Simulation. UiPainter owns fonts
+and text/button drawing, including the font handle read by the GPU text atlas.
+GPU resources/buffers belong to its backend; metrics has no Pygame/app dependency.
+Shared palette and independent backends retain separate owners.
+
+Collision geometry and queries are shared leaves. Release and return algorithms import those
+leaves; the solver orchestrates them. Movement packs each profile's mass into its existing reusable
+numeric workspace and remains the only position/occupancy submitter. The extraction replaces
+module ownership and UI state ownership, with no compatibility import shims or extra execution
+controller. Public Simulation and command tags are unchanged. Save and replay consequences of
+mass-weighted response belong to the persistence policy.
+
+Contact kernels fingerprint their source package once at import and extend each Numba cache index
+stamp through the numeric adapter. A helper edit invalidates inlined callers even when the caller
+file is unchanged; unchanged sources retain disk-cache reuse and Numba's existing source/user/frozen
+cache placement. The adapter targets the declared Numba minor version and has a cross-process
+regression that holds source size/mtime constant while changing helper bytes. This prevents stale
+compiled contact behavior after splitting kernels across files.
 
 ## Change policy
 
-Update only the document that owns a changed contract. Keep implementation details in code,
-parameter values in their definitions, and executable acceptance scenarios in tests. Historical
-rationale should explain a surviving tradeoff once, not repeat every patch or validation run.
-A consequential new choice needs a concise decision/tradeoff note in its owner, not another file
-unless it introduces a separate durable concern. Roadmap proposals are not current requirements.
+Update each fact's owner, linking instead of repeating contracts. Keep implementation details in
+code and exact acceptance fixtures in tests. Retain historical rationale only for a surviving
+tradeoff; proposals are not requirements. New durable concerns may get a focused document linked
+directly from design. Use its task index to read only relevant documents or sections.
 
-For cleanup, preserve commands, schemas, tick/event order, determinism, and hardware thresholds.
-A movement rewrite needs an explicit replacement scope and save/replay migration decision.
-Do not introduce generic managers, registries, parallel facades, or unrelated restructuring.
+Cleanup preserves commands, schemas, observable behavior and hardware thresholds. A movement
+rewrite defines replacement scope, save migration and replay impact under
+[persistence policy](../milestones/persistence.md#save-reliability-and-replay-policy).
+Do not add unrelated restructuring or a second public facade.
+
+Execution changes may alter arithmetic order, scheduling, trajectories or event order while
+preserving gameplay contracts. Keep one authoritative writer; workers have explicit input ownership
+and return results through controlled submission. Rendering reads coherent state. Races, lost
+commands, duplicate resource transactions, invalid references and partial saves remain failures.
+Numerical approximations need bounded error and relevant finite-value, clearance, speed and gameplay
+checks. Measure responsiveness and complete workloads instead of assuming optimizations are faster.
 
 ## Test ownership
 
 | Suite | Contract |
 | --- | --- |
 | `tests/unit/` | Isolated domain components and codecs |
-| `tests/integration/` | Facade, adapters, controls, and renderer behavior |
-| `tests/performance/` | Workload behavior plus opt-in `performance` hardware/wall-clock contracts |
-| `tests/architecture/` | Dependency direction, public facade, document links/discovery |
-| `tests/gui_scenarios/` | Explicit, blocking visual inspection; excluded from default discovery |
+| `tests/integration/` | Facade, adapters, controls and rendering behavior |
+| `tests/performance/` | Workload behavior plus opt-in hardware/wall-clock acceptance |
+| `tests/architecture/` | Dependency direction, public facade and documentation discovery/links |
+| `tests/gui_scenarios/` | Explicit blocking inspection, excluded from default discovery |
 
-Test at the lowest useful layer. Remove duplicate smoke checks when a retained scenario covers
-their assertions; merge unique assertions into that scenario. Preserve independent failures and
-use descriptive parameter IDs. Do not freeze obsolete filenames or private candidate ordering.
-Architecture checks classify every source module and inspect every domain directory, including
-`contracts/`, with nested/relative imports and type-only guards. Unclassified packages fail validation.
+Test at the lowest useful layer. Reuse meaningful cases, merge unique assertions and remove
+duplicate smoke checks. Do not freeze obsolete filenames or private ordering. Architecture checks
+cover every source package, nested/relative imports and type-only guards; unclassified modules fail.
+Keep fixtures local until independent tests need the same setup, always returning fresh simulations.
+Use helpers rather than importing discovered tests: [scenarios](../../tests/integration/scenarios.py),
+[recovery oracle](../../tests/integration/recovery_checks.py), and `tests/scout_scenario.py` own shared inputs.
 
-Keep fixtures local until independent tests need identical setup; never share mutable simulations.
-Share reusable checks through helper modules, not imports from discovered `test_*.py` files;
-[recovery checks](../../tests/integration/recovery_checks.py) own the independent swept-disc oracle.
-Integration modules are organized by behavior rather than historical phase or milestone.
-[Shared scenario constructors](../../tests/integration/scenarios.py) return fresh maps/simulations;
-[persistence tests](../../tests/integration/test_persistence.py) own save/load continuation cases.
-Renderer startup checks use small worlds; full-scene/timing tests retain their required scale.
-Backend stress tests share `tests/scout_scenario.py`. Persistence scenarios retain distinct patrol,
-repair, queues, spawns, and defense cases and compare complete exported state after continuation.
-FPS tests use the common completed-frame probe; no average-throughput substitution. Gates belong to
-[performance](../milestones/performance.md); change them only for an explicit acceptance decision,
-not to make a failing cleanup pass. Mixed workload tests retain behavior assertions in default
-validation and add timing budgets in their marked variant. Hardware FPS acceptance is opt-in;
-the default Windows packaging validation is functional validation, not hardware performance evidence.
+Persistence tests retain distinct patrol, repair, queues, spawn and defense continuation cases.
+Current exact continuation/replay comparisons may become meaningful restoration, gameplay and
+concurrency checks when an intentional execution change needs that; preserve unique failure coverage
+and document diagnostic support. Do not silently skip failures. Renderer startup uses small worlds;
+stress/timing scenarios keep full scale. FPS uses the shared completed-frame probe.
+[Performance](../milestones/performance.md) owns gates and hardware evidence; [AGENTS](../../AGENTS.md#validation)
+owns required commands. Full workload behavior remains in default validation even when timing is opt-in.

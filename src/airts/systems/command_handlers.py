@@ -41,7 +41,7 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, SpatialTarget
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import (
     automation_control,

@@ -26,13 +26,15 @@ from airts.contracts.commands import (
     CreateProductionCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.presentation.app import AirtsApp
 from airts.presentation.rendering import RendererBackend
+from airts.presentation.ui import automations, selection
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world.entities import Projectile
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize("health", [49, 50, 51], ids=["below-half", "exactly-half", "above-half"])
@@ -73,11 +75,11 @@ def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:
     )
     app = AirtsApp(Simulation(game_map))
     pygame.font.init()
-    app._font = pygame.font.Font(None, 22)
-    app._small_font = pygame.font.Font(None, 18)
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
     app.selected_entities = {"generator_1", "generator_2"}
     app._selection_changed()
-    app._draw_context_panel(pygame.Surface(app.window_size))
+    selection.draw_selection(app, pygame.Surface(app.window_size))
     assert all(action != "economy" for _, action in app._command_buttons)
     app._handle_key(pygame.K_g)
     assert not app.simulation.automations
@@ -96,26 +98,28 @@ def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
         created_ids.append(result.automation_id)
     app = AirtsApp(simulation)
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface(app.WINDOW_SIZE)
 
-    app._draw_panel(surface)
-    maximum = len(app._automation_panel_rows()) - app._automation_visible_rows
-    app.automation_scroll = maximum
+    automations.draw_panel(app, surface)
+    maximum = len(automations.panel_rows(app)) - app.automation_panel.visible_rows
+    app.automation_panel.scroll = maximum
     canceled = simulation.execute(CancelAutomationCommand(created_ids[-1]))
     assert canceled.accepted
-    app._draw_panel(surface)
+    automations.draw_panel(app, surface)
 
-    panel_rows = app._automation_panel_rows()
+    panel_rows = automations.panel_rows(app)
     visible_ids = [
-        automation_id for _, action, automation_id in app._automation_buttons if action == "inspect"
+        automation_id
+        for _, action, automation_id in app.automation_panel.buttons
+        if action == "inspect"
     ]
-    assert app.automation_scroll == maximum - 1
-    assert len(visible_ids) == app._automation_visible_rows
+    assert app.automation_panel.scroll == maximum - 1
+    assert len(visible_ids) == app.automation_panel.visible_rows
     assert visible_ids == [
         item.automation_id
-        for item in panel_rows[maximum - 1 : maximum - 1 + app._automation_visible_rows]
+        for item in panel_rows[maximum - 1 : maximum - 1 + app.automation_panel.visible_rows]
     ]
     pygame.font.quit()
 
@@ -127,13 +131,13 @@ def test_automation_panel_exposes_a_prominent_clickable_scrollbar() -> None:
         assert result.accepted
     app = AirtsApp(simulation)
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface(app.WINDOW_SIZE)
-    app._draw_panel(surface)
+    automations.draw_panel(app, surface)
 
-    track = app._automation_scrollbar_track
-    thumb = app._automation_scrollbar_thumb
+    track = app.automation_panel.scrollbar_track
+    thumb = app.automation_panel.scrollbar_thumb
     assert track is not None
     assert thumb is not None
     assert track.width == app.AUTOMATION_SCROLLBAR_WIDTH
@@ -142,16 +146,19 @@ def test_automation_panel_exposes_a_prominent_clickable_scrollbar() -> None:
 
     app._handle_mouse_down(1, (track.centerx, track.bottom - 1))
 
-    assert app.automation_scroll == len(app._automation_panel_rows()) - app._automation_visible_rows
-    app._draw_panel(surface)
-    thumb = app._automation_scrollbar_thumb
+    assert (
+        app.automation_panel.scroll
+        == len(automations.panel_rows(app)) - app.automation_panel.visible_rows
+    )
+    automations.draw_panel(app, surface)
+    thumb = app.automation_panel.scrollbar_thumb
     assert thumb is not None
     app._handle_mouse_down(1, thumb.center)
     app._handle_mouse_motion((track.centerx, track.top), (True, False, False))
     app._handle_mouse_up(1, (track.centerx, track.top))
 
-    assert app.automation_scroll == 0
-    assert app._automation_scroll_drag_offset is None
+    assert app.automation_panel.scroll == 0
+    assert app.automation_panel.scroll_drag_offset is None
     pygame.font.quit()
 
 
@@ -170,11 +177,11 @@ def test_compact_production_rows_inspect_cost_without_starting_production(
     app.selected_entities = {"factory"}
     app._selection_changed()
     pygame.font.init()
-    app._font = pygame.font.Font(None, round(24 * app.ui_scale))
-    app._small_font = pygame.font.Font(None, round(19 * app.ui_scale))
+    app.ui.font = pygame.font.Font(None, round(24 * app.ui_scale))
+    app.ui.small_font = pygame.font.Font(None, round(19 * app.ui_scale))
     surface = pygame.Surface(app.window_size)
     try:
-        with patch.object(app, "_text", wraps=app._text) as text:
+        with patch.object(app.ui, "text", wraps=app.ui.text) as text:
             app._draw_interface(surface)
         assert all(
             call.args[2][0] >= app.right_panel_rect.x
@@ -210,7 +217,7 @@ def test_compact_production_rows_inspect_cost_without_starting_production(
         )
         app._handle_panel_click(inspect.center)
         assert not app.simulation.automations
-        with patch.object(app, "_small_text", wraps=app._small_text) as text:
+        with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
             app._draw_interface(surface)
         assert any(
             f"Cost {inspected_kind.profile.production_cost}" in call.args[1]
@@ -227,7 +234,10 @@ def test_compact_production_rows_inspect_cost_without_starting_production(
         pygame.font.quit()
 
 
-def test_automation_categories_keep_controls_on_one_line_and_show_details_on_demand() -> None:
+@pytest.mark.parametrize("size", [(760, 520), AirtsApp.WINDOW_SIZE, (3840, 2160)])
+def test_automation_categories_keep_controls_on_one_line_and_show_details_on_demand(
+    size: tuple[int, int],
+) -> None:
     simulation = builder_factory_simulation()
     production = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
     construction = simulation.execute(
@@ -238,9 +248,10 @@ def test_automation_categories_keep_controls_on_one_line_and_show_details_on_dem
     )
     assert production.accepted and construction.accepted and defense.accepted
     app = AirtsApp(simulation)
+    app.resize_layout(size)
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface(app.window_size)
     try:
         for group, command, expected in (
@@ -256,24 +267,158 @@ def test_automation_categories_keep_controls_on_one_line_and_show_details_on_dem
             )
             app._handle_panel_click(tab.center)
             app._draw_interface(surface)
-            assert app.automation_group is group
-            assert [item.automation_id for item in app._automation_panel_rows()] == [expected]
-            assert len(app._automation_buttons) == 3
-            assert len({rect.y for rect, _, _ in app._automation_buttons}) == 1
+            assert app.automation_panel.group is group
+            assert [item.automation_id for item in automations.panel_rows(app)] == [expected]
+            assert len(app.automation_panel.buttons) == 3
+            assert len({rect.y for rect, _, _ in app.automation_panel.buttons}) == 1
             details = next(
-                rect for rect, action, _ in app._automation_buttons if action == "inspect"
+                rect for rect, action, _ in app.automation_panel.buttons if action == "inspect"
             )
+            previous = app._opengl_overlay_key()
             app._handle_panel_click(details.center)
-            assert app.automation_details_open
-            assert app.selected_automation_id == expected
+            assert app.automation_panel.details_open
+            assert app.automation_panel.selected_id == expected
+            assert app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key()) is None
             app._draw_interface(surface)
-            toggle = next(rect for rect, action, _ in app._automation_buttons if action == "pause")
+            flyout = automations.details_rect(app)
+            assert flyout is not None
+            assert app.canvas_rect.contains(flyout)
+            assert not app.right_panel_rect.colliderect(flyout)
+            assert flyout.left > app.left_panel_rect.right
+            with patch.object(app.ui, "text", wraps=app.ui.text) as text:
+                selection.draw_selection(app, surface)
+            assert text.call_args_list[0].args[1:3] == (
+                "Selection",
+                (app.right_panel_rect.x + 16, 16),
+            )
+            command_count = simulation.command_count
+            app._handle_mouse_down(3, flyout.center)
+            app._handle_mouse_down(1, flyout.center)
+            assert simulation.command_count == command_count
+            assert app.drag_start is None
+            toggle = next(
+                rect for rect, action, _ in app.automation_panel.buttons if action == "pause"
+            )
             app._handle_panel_click(toggle.center)
             assert simulation.automations[expected or ""].status is AutomationStatus.PAUSED
             app._draw_interface(surface)
-            resume = next(rect for rect, action, _ in app._automation_buttons if action == "resume")
+            resume = next(
+                rect for rect, action, _ in app.automation_panel.buttons if action == "resume"
+            )
             app._handle_panel_click(resume.center)
             assert simulation.automations[expected or ""].status is AutomationStatus.ACTIVE
+            close = next(
+                rect
+                for rect, action in app._command_buttons
+                if action == "close_automation_details"
+            )
+            previous = app._opengl_overlay_key()
+            app._handle_mouse_down(1, close.center)
+            assert not app.automation_panel.details_open
+            assert app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key()) is None
+            app._handle_panel_click(details.center)
+            assert simulation.execute(CancelAutomationCommand(expected or "")).accepted
+            app._draw_interface(surface)
+            assert not app.automation_panel.details_open
+            assert automations.details_rect(app) is None
+    finally:
+        pygame.font.quit()
+
+
+def test_selection_drag_finishes_over_command_bar_without_activating_commands() -> None:
+    app = AirtsApp(builder_factory_simulation(), renderer_backend=RendererBackend.SOFTWARE)
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
+    surface = pygame.Surface(app.window_size)
+    start = (app.canvas_rect.left + 1, app.canvas_rect.top + 1)
+    end = (app.command_bar_rect.right - 1, app.command_bar_rect.centery)
+    try:
+        app._draw_interface(surface)
+        before = app.simulation.command_count
+        app._handle_mouse_down(1, start)
+        assert app.drag_start is not None
+        with (
+            patch("airts.presentation.app.pygame.mouse.get_pos", return_value=end),
+            patch("airts.presentation.app.pygame.key.get_mods", return_value=0),
+            patch("airts.presentation.app.pygame.draw.rect", wraps=pygame.draw.rect) as rectangles,
+        ):
+            app._draw(surface)
+            assert any(call.args[1] == (245, 245, 245) for call in rectangles.call_args_list)
+            app._handle_mouse_up(1, end)
+        assert app.drag_start is None
+        assert app.selected_entities == {"builder", "builder_2", "scout", "tank"}
+        assert set(app.simulation.selection.entity_ids) == app.selected_entities
+        assert app.simulation.command_count == before + 1
+        # A completed drag must not turn the next ordinary click into another box.
+        builder = app.simulation.entities["builder"].selection_position
+        with patch("airts.presentation.app.pygame.key.get_mods", return_value=0):
+            app._handle_mouse_down(1, app.screen_point(builder))
+            app._handle_mouse_up(1, app.screen_point(builder))
+        assert app.selected_entities == {"builder"}
+    finally:
+        pygame.font.quit()
+
+
+@pytest.mark.parametrize("additive", [False, True], ids=["replace", "shift-add"])
+@pytest.mark.parametrize("release_area", ["commands", "left-panel", "right-panel"])
+def test_selection_drag_outside_canvas_excludes_offscreen_units(
+    additive: bool, release_area: str
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "selection_clip",
+                "name": "Selection clipping",
+                "width": 64,
+                "height": 64,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "visible", "kind": "scout", "position": [32.5, 32.5]},
+                    {"id": "bottom-edge", "kind": "scout", "position": [32.5, 47.5]},
+                    {"id": "below", "kind": "scout", "position": [32.5, 49.5]},
+                    {"id": "left", "kind": "scout", "position": [13.5, 32.5]},
+                    {"id": "right", "kind": "scout", "position": [50.5, 32.5]},
+                ],
+            }
+        )
+    )
+    app = AirtsApp(simulation)
+    app.camera.zoom = 2
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 24)
+    canvas = app.canvas_rect
+    start = (canvas.left + 1, canvas.top + 1)
+    if release_area == "commands":
+        end = (canvas.right - 1, app.command_bar_rect.centery)
+        hidden_id = "below"
+    elif release_area == "left-panel":
+        start = (canvas.right - 1, canvas.top + 1)
+        end = (app.left_panel_rect.centerx, canvas.bottom - 1)
+        hidden_id = "left"
+    else:
+        end = (app.right_panel_rect.centerx, canvas.bottom - 1)
+        hidden_id = "right"
+    hidden = app.screen_point(simulation.entities[hidden_id].selection_position)
+    assert not canvas.collidepoint(hidden)
+    assert min(start[0], end[0]) <= hidden[0] <= max(start[0], end[0])
+    assert min(start[1], end[1]) <= hidden[1] <= max(start[1], end[1])
+    if additive:
+        app.selected_entities = {"below"}
+        app._commit_selection()
+    try:
+        with patch(
+            "airts.presentation.app.pygame.key.get_mods",
+            return_value=pygame.KMOD_SHIFT if additive else 0,
+        ):
+            app._handle_mouse_down(1, start)
+            app._handle_mouse_up(1, end)
+        expected = {"visible", "bottom-edge"}
+        if additive:
+            expected.add("below")  # Shift preserves earlier selections outside the viewport.
+        assert app.drag_start is None
+        assert app.selected_entities == expected
+        assert set(simulation.selection.entity_ids) == expected
     finally:
         pygame.font.quit()
 
@@ -281,8 +426,8 @@ def test_automation_categories_keep_controls_on_one_line_and_show_details_on_dem
 def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() -> None:
     app = AirtsApp(interaction_simulation(), renderer_backend=RendererBackend.SOFTWARE)
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     screen = pygame.Surface(app.window_size)
     app._draw_interface(screen)
     pause = next(rect for rect, action in app._command_buttons if action == "pause_game")
@@ -318,8 +463,8 @@ def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -
     app._selection_changed()
     assert app.simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1)).accepted
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface(app.window_size, pygame.SRCALPHA)
     try:
         app._draw_opengl_overlay(surface)
@@ -355,7 +500,7 @@ def test_resizing_reflows_panels_and_scales_canvas_coordinates() -> None:
 
     # The full-map view is centered and cannot be dragged beyond the map.
     app.pan_camera(120, -80)
-    assert app.camera_offset == Point(0, 0)
+    assert app.camera.offset == Point(0, 0)
     app.zoom_camera(5, app.canvas_rect.center)
     screen_point = app.screen_point(point)
     app.pan_camera(120, -80)
@@ -500,8 +645,8 @@ def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
     app = AirtsApp(builder_factory_simulation())
     app.quick_save_path = tmp_path / "quicksave.json"
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface((1200, 780))
     app.resize_layout(surface.get_size())
     app.settings_open = True
@@ -530,8 +675,8 @@ def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
 def test_settings_menu_requests_a_higher_explicit_resolution() -> None:
     app = AirtsApp(builder_factory_simulation())
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface((1280, 720))
     app.resize_layout(surface.get_size())
     app.settings_open = True
@@ -550,12 +695,12 @@ def test_info_panel_displays_stutter_sensitive_real_fps() -> None:
     app = AirtsApp(builder_factory_simulation())
     app.real_fps = 41.6
     pygame.font.init()
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     surface = pygame.Surface(app.WINDOW_SIZE)
 
-    with patch.object(app, "_small_text", wraps=app._small_text) as small_text:
-        app._draw_panel(surface)
+    with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as small_text:
+        automations.draw_panel(app, surface)
 
     rendered = [call.args[1] for call in small_text.call_args_list]
     assert any("Real FPS   42" in line for line in rendered)
@@ -650,8 +795,8 @@ def test_window_close_exits_before_another_tick_or_render_and_releases_resources
     draw.assert_not_called()
     flip.assert_not_called()
     assert simulation.tick == 0
-    assert app._font is None
-    assert app._small_font is None
+    assert app.ui.font is None
+    assert app.ui.small_font is None
     assert app._software_renderer._map_surface is None
     assert lifecycle.mock_calls == [
         call.display_init(),

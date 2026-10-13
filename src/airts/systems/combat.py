@@ -12,7 +12,7 @@ from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import movement
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -192,7 +192,7 @@ def drive_combat(simulation: Simulation) -> None:
             attacker.attack_target_id = firing_target.entity_id
         if attacker.attack_cooldown:
             continue
-        speed = projectile_speed(attacker.kind)
+        speed = attacker.kind.profile.projectile_speed
         if speed <= 0:
             continue
         projectile_id = f"projectile_{simulation._next_projectile_number:06d}"

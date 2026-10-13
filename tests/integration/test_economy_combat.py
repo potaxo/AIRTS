@@ -29,11 +29,12 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems import automation_execution
 from airts.world.entities import Projectile, UnitState
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def test_unreachable_attackers_leave_route_allowance_for_reachable_members() -> None:

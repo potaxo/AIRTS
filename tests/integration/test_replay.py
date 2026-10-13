@@ -27,7 +27,8 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, PointTarget
 from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, GameMap, load_example_map, load_map_data
+from airts.world.map import GameMap, load_example_map, load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def test_internal_squad_exit_from_normal_hold_formation_replays(tmp_path: Path) -> None:

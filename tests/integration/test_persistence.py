@@ -54,11 +54,12 @@ from airts.contracts.commands import (
     SetSelectionCommand,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind, GameMap, load_example_map
+from airts.world.map import GameMap, load_example_map
+from airts.world.units.catalog import EntityKind
 
 
 def test_blocked_attack_continues_after_save_load_and_gate_removal(tmp_path: Path) -> None:

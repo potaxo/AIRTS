@@ -1,7 +1,8 @@
 # AIRTS repository instructions
 
-Read [docs/design.md](docs/design.md) before substantial work, then only the relevant owner docs
-and code. Infer scope from the user's request and conversation; do not add roadmap phases.
+Read [docs/design.md](docs/design.md) before substantial work; use its task index to choose only
+the relevant owner document/section and code. Do not load every linked document. Infer scope from
+the user's request and conversation; do not add roadmap phases.
 User instructions take precedence over repository and skill guidance, subject to higher-priority
 system/developer instructions and tool permissions.
 
@@ -32,12 +33,16 @@ system/developer instructions and tool permissions.
 If an instruction blocks work, cite its file and relevant wording and explain the concrete
 conflict. Distinguish an explicit requirement from an interpretation; do not invent approval gates.
 
-Preserve the public `Simulation` facade, shared command boundary, deterministic headless core,
+Preserve the public `Simulation` facade, shared command boundary, renderer-independent headless core,
 and [dependency direction](docs/architecture/engineering.md#ownership). Keep changes focused;
 no speculative abstractions, silent error swallowing, or fallbacks that conceal failure.
+Follow [product priorities](docs/design.md#product-priorities) and
+[save/replay policy](docs/milestones/persistence.md#save-reliability-and-replay-policy) when changing
+execution. Exact replay equality is not a prerequisite for authorized gameplay or performance
+changes; handle affected diagnostics and tests under the engineering change policy.
 Fix root causes and provide useful diagnostics. For a requested rewrite, define replacement scope
-and compatibility/save/replay migration in the owning document as part of the work; ask only for
-consequential choices that the request and existing contracts do not resolve.
+and compatibility/save migration and replay diagnostic impact in the owning document as part of the
+work; ask only for consequential choices that the request and existing contracts do not resolve.
 
 ## Git and outputs
 

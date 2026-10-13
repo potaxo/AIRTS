@@ -36,12 +36,14 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import automation_execution, movement, spatial_commands
 from airts.systems.automation_execution import coordinate_shared_defend_stations
 from airts.world.entities import Entity, UnitState
-from airts.world.map import Cell, EntityCategory, EntityKind
+from airts.world.map import Cell
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

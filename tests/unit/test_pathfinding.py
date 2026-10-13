@@ -7,7 +7,7 @@ from random import Random
 import pytest
 
 from airts.contracts.spatial import Point
-from airts.navigation.collision import constrained_step
+from airts.navigation.collision.geometry import constrained_step
 from airts.navigation.pathfinding import PathfindingError, RoutingService, passable_segment_cells
 from airts.world.map import GameMap, load_map_data
 

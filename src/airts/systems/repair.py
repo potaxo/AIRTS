@@ -18,7 +18,8 @@ from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import automation_control, movement
 from airts.systems.command_handlers import validate_entities
 from airts.world.entities import Entity, UnitState
-from airts.world.map import EntityCategory, EntityKind
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

@@ -33,13 +33,11 @@ from airts.contracts.spatial import (
     spatial_kind,
     target_from_dict,
 )
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems.movement import CONTACT_WAIT_TICKS
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, projectile_speed
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
 from airts.world.map import (
-    EntityCategory,
-    EntityKind,
     GameMap,
     MapValidationError,
     OccupancyError,
@@ -47,6 +45,8 @@ from airts.world.map import (
     load_map_data,
 )
 from airts.world.opponents import OpponentState, Squad, SquadPhase
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
 SAVE_SCHEMA = "airts-save-v12"
@@ -772,7 +772,7 @@ def _load_projectiles(raw_data: object, simulation: Simulation) -> dict[str, Pro
             raise PersistenceError(f"invalid projectile weapon kind: {error}") from error
         speed = _number(item.get("speed"), "projectile.speed", minimum=0.01)
         damage = _integer(item.get("damage"), "projectile.damage", minimum=1)
-        if projectile_speed(weapon_kind) <= 0 or damage != weapon_kind.profile.attack_damage:
+        if weapon_kind.profile.projectile_speed <= 0 or damage != weapon_kind.profile.attack_damage:
             raise PersistenceError("projectile weapon profile is invalid")
         position = _point(item.get("position"), "projectile.position")
         destination = _point(item.get("destination"), "projectile.destination")

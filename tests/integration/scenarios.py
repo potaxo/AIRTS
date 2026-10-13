@@ -8,7 +8,8 @@ from math import ceil, sqrt
 from airts.contracts.commands import CreateProductionCommand
 from airts.contracts.spatial import Point, rectangle_region
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, EntitySpec, GameMap, load_example_map, load_map_data
+from airts.world.map import EntitySpec, GameMap, load_example_map, load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def gated_attack_simulation(

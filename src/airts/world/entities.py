@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from airts.contracts.spatial import Point
-from airts.world.map import Cell, EntityCategory, EntityKind, footprint_cells
+from airts.world.map import Cell, footprint_cells
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 
 class UnitState(StrEnum):
@@ -189,11 +191,3 @@ class ProjectileTrace:
             "points": [[point.x, point.y] for point in self.points],
             "expires_tick": self.expires_tick,
         }
-
-
-def projectile_speed(kind: EntityKind) -> float:
-    return {
-        EntityKind.SCOUT: 12.0,
-        EntityKind.LIGHT_TANK: 10.0,
-        EntityKind.HEAVY_TANK: 7.0,
-    }.get(kind, 0.0)

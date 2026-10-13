@@ -25,9 +25,11 @@ from airts.contracts.commands import (
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
+from airts.presentation.ui import automations
 from airts.simulation import Simulation
 from airts.systems.skirmish import owner_status
-from airts.world.map import EntityKind, load_example_map, load_map_data
+from airts.world.map import load_example_map, load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def match_simulation() -> Simulation:
@@ -202,11 +204,11 @@ def test_zoom_clamps_and_preserves_cursor_world_point_and_panel_wheel() -> None:
     assert app.map_origin[0] <= app.canvas_rect.left
     assert app.map_origin[1] + app.map_pixel_size[1] >= app.canvas_rect.bottom
     app.zoom_camera(-100, pointer)
-    assert app.zoom == 1
-    assert app.camera_offset == Point(0, 0)
+    assert app.camera.zoom == 1
+    assert app.camera.offset == Point(0, 0)
     with patch("pygame.mouse.get_pos", return_value=app.left_panel_rect.center):
         app._handle_event(pygame.event.Event(pygame.MOUSEWHEEL, {"y": 3}))
-    assert app.zoom == 1
+    assert app.camera.zoom == 1
 
 
 def test_opening_cover_configures_then_locks_match_until_restart() -> None:
@@ -216,8 +218,8 @@ def test_opening_cover_configures_then_locks_match_until_restart() -> None:
     assert app.lobby is not None
     pygame.font.init()
     try:
-        app._font = pygame.font.Font(None, 24)
-        app._small_font = pygame.font.Font(None, 19)
+        app.ui.font = pygame.font.Font(None, 24)
+        app.ui.small_font = pygame.font.Font(None, 19)
         screen = pygame.Surface(app.WINDOW_SIZE)
         app._draw(screen)
         cover = app.lobby
@@ -279,17 +281,17 @@ def test_automation_panel_excludes_enemy_and_allied_ai_and_clears_ai_inspection(
     assert any(automation.owner_id == "ai_b" for automation in simulation.live_automations)
     assert any(automation.owner_id == "ai_c" for automation in simulation.live_automations)
     app = AirtsApp(simulation)
-    rows = app._automation_panel_rows()
+    rows = automations.panel_rows(app)
     assert [automation.automation_id for automation in rows] == [result.automation_id]
-    app.selected_automation_id = next(
+    app.automation_panel.selected_id = next(
         automation.automation_id
         for automation in simulation.live_automations
         if automation.owner_id == "ai_b"
     )
     app._prune_removed_entities()
-    assert app.selected_automation_id is None
-    app.scroll_automations(100, visible_rows=1, total_rows=len(rows))
-    assert app.automation_scroll == 0
+    assert app.automation_panel.selected_id is None
+    automations.scroll(app, 100, visible_rows=1, total_rows=len(rows))
+    assert app.automation_panel.scroll == 0
 
 
 def test_wasd_moves_camera_continuously_without_unit_commands_and_respects_edges() -> None:
@@ -299,15 +301,15 @@ def test_wasd_moves_camera_continuously_without_unit_commands_and_respects_edges
     app._handle_key(pygame.K_w)
     app._handle_key(pygame.K_a)
     app._move_camera_from_keys(0.1)
-    first = app.camera_offset
+    first = app.camera.offset
     assert first.x > 0 and first.x == pytest.approx(first.y)
     app._move_camera_from_keys(0.1)
-    assert app.camera_offset.x == pytest.approx(2 * first.x)
+    assert app.camera.offset.x == pytest.approx(2 * first.x)
     app._handle_event(pygame.event.Event(pygame.KEYUP, {"key": pygame.K_w}))
     app._handle_event(pygame.event.Event(pygame.KEYUP, {"key": pygame.K_a}))
-    released = app.camera_offset
+    released = app.camera.offset
     app._move_camera_from_keys(1)
-    assert app.camera_offset == released
+    assert app.camera.offset == released
     app._handle_key(pygame.K_d)
     app._handle_key(pygame.K_s)
     app._move_camera_from_keys(100)
@@ -315,9 +317,9 @@ def test_wasd_moves_camera_continuously_without_unit_commands_and_respects_edges
     assert origin[0] + app.map_pixel_size[0] >= app.canvas_rect.right
     assert origin[1] + app.map_pixel_size[1] >= app.canvas_rect.bottom
     app._handle_event(pygame.event.Event(pygame.WINDOWFOCUSLOST))
-    released = app.camera_offset
+    released = app.camera.offset
     app._move_camera_from_keys(1)
-    assert app.camera_offset == released
+    assert app.camera.offset == released
     assert app.simulation.command_history == history
     with (
         patch.object(app, "_create_patrol") as patrol,

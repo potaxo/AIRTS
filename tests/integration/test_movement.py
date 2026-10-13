@@ -16,7 +16,7 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world.entities import UnitState

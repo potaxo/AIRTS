@@ -9,8 +9,9 @@ import pygame
 
 from airts.contracts.automations import AutomationKind, ConstructionParameters
 from airts.contracts.spatial import Point, PointTarget, PolygonRegion, SpatialTarget
+from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 class FeedbackView(Protocol):
@@ -54,7 +55,7 @@ class FeedbackView(Protocol):
     def placement_kind(self) -> EntityKind | None: ...
 
     @property
-    def _small_font(self) -> pygame.font.Font | None: ...
+    def ui(self) -> UiPainter: ...
 
     def _map_point(self, position: tuple[int, int]) -> Point: ...
     def _construction_preview_at(self, point: Point) -> tuple[Point, bool] | None: ...
@@ -194,7 +195,10 @@ class GPUFeedback:
         mouse = pygame.mouse.get_pos() if pygame.display.get_init() else (-1, -1)
         pointer = (
             app._map_point(mouse)
-            if app.canvas_rect.collidepoint(mouse)
+            if (
+                app.canvas_rect.collidepoint(mouse)
+                or (app.mode == "select" and app.drag_start is not None)
+            )
             and (app.placement_kind is not None or app.drag_start is not None or app.mode == "line")
             else None
         )
@@ -212,7 +216,7 @@ class GPUFeedback:
             app.mode,
             app.placement_kind,
             pointer,
-            id(app._small_font),
+            id(app.ui.small_font),
         )
         if key != self.key:
             self._build(app, pointer)
@@ -406,12 +410,12 @@ class GPUFeedback:
         self.counts = (len(shapes) // 18, len(lines) // 9, len(triangles) // 6, count)
 
     def _build_labels(self, app: FeedbackView, labels: list[tuple[str, Point, bool]]) -> int:
-        if app._small_font is None or not labels:
+        if app.ui.small_font is None or not labels:
             return 0
         texts = tuple(dict.fromkeys(text for text, _, _ in labels))
-        key = (id(app._small_font), texts)
+        key = (id(app.ui.small_font), texts)
         if key != self.text_key:
-            images = [app._small_font.render(text, True, (245, 250, 252)) for text in texts]
+            images = [app.ui.small_font.render(text, True, (245, 250, 252)) for text in texts]
             width, height = (
                 max(image.get_width() for image in images),
                 sum(image.get_height() for image in images),

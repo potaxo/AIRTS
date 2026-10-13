@@ -1,8 +1,11 @@
 """Shared terrain, entity, and projectile colors for both rendering backends."""
 
-from airts.world.map import EntityKind, GameMap, Terrain
+from airts.world.map import GameMap, Terrain
+from airts.world.units.catalog import EntityKind
 
 type Color = tuple[int, int, int]
+
+REPAIR_COLOR: Color = (105, 232, 172)
 
 TEAM_COLORS: dict[int, Color] = {
     1: (92, 220, 145),

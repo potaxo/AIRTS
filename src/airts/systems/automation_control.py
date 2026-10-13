@@ -22,7 +22,7 @@ from airts.contracts.commands import (
 from airts.contracts.events import EventType
 from airts.systems import automation_execution, construction, movement, production
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

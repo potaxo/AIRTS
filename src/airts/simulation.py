@@ -61,7 +61,8 @@ from airts.contracts.spatial import (
     SpatialStore,
     SpatialTarget,
 )
-from airts.navigation.collision import collision_radius, warm_collision_kernel
+from airts.navigation.collision.geometry import collision_radius
+from airts.navigation.collision.solver import warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.navigation.spatial_index import SpatialIndex, warm_spatial_index
 from airts.systems import (
@@ -80,8 +81,10 @@ from airts.systems import repair as repair_system
 from airts.systems import skirmish as skirmish_system
 from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
-from airts.world.map import Cell, EntityCategory, EntityKind, GameMap, OccupancyGrid
+from airts.world.map import Cell, GameMap, OccupancyGrid
 from airts.world.opponents import OpponentState
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 from airts.world.visibility import VisibilitySystem
 
 

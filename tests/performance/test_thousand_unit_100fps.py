@@ -87,8 +87,8 @@ def _rendering_app(
 ) -> tuple[AirtsApp, pygame.Surface]:
     pygame.font.init()
     app = AirtsApp(simulation)
-    app._font = pygame.font.Font(None, 24)
-    app._small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
     app.selected_entities = set(entity_ids)
     surface = pygame.Surface(app.WINDOW_SIZE)
     app._draw(surface)

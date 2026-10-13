@@ -1,7 +1,7 @@
 # AIRTS
 
-Windows-native RTS research prototype with direct control, persistent automations, economy,
-construction, combat, save/load, and deterministic replay. Language-model control is planned.
+Windows-native RTS game with direct control, persistent automations, economy,
+construction, combat, save/load, and diagnostic command replay. Language-model control is planned.
 [Design](docs/design.md) owns scope/contracts; [AGENTS](AGENTS.md) owns contributor workflow.
 
 ## Requirements and setup
@@ -41,8 +41,9 @@ New-Item -ItemType Directory -Force outputs | Out-Null
 ```
 
 `--map`, `--load-state`, and `--replay` are mutually exclusive. Load/replay examples require a
-previously exported file. Replay verifies the recorded final snapshot and event stream, then opens
-that resulting simulation; it does not play back an animated timeline.
+previously exported file. The optional replay diagnostic currently verifies the recorded final
+snapshot and event stream, then opens that resulting simulation; it does not play back an animated
+timeline. [Persistence](docs/milestones/persistence.md#save-reliability-and-replay-policy) owns its support policy.
 
 Default startup shows a cover and opening setup for the fixed 320 x 320 symmetric river map.
 Click **Start game**, choose the four slot controllers and teams, then **Begin match**.
@@ -51,7 +52,7 @@ starting; `F2` returns to the opening cover. Resource sites are visible red ring
 Extractors on those sites. Placement snaps within three cells of a site's center. The central
 crossing has wide clear lanes beside its resource sites. Team colors identify allies and opponents.
 All units/buildings are visible; no fog overlay is enabled. The roster displays active, eliminated
-and out states; [Runtime](docs/milestones/runtime.md#skirmish-configuration-and-results) owns their rules.
+and out states; [Opponents](docs/milestones/opponents.md#skirmish-configuration-and-results) owns their rules.
 
 `--legacy-map` opens the original 64 x 64 sandbox directly. For legacy/custom sandbox games,
 enemy generation defaults to one unit/second, cap 100;
@@ -71,7 +72,7 @@ These measurements do not count physical monitor scan-out;
 
 | Input | Action |
 | --- | --- |
-| `1` | Selection mode; click entities, points, routes, or regions, or drag friendly units; `Shift` toggles additions |
+| `1` | Selection mode; click entities, points, routes, or regions, or drag friendly units; a drag started on the map can finish over the command bar but selects only units inside the canvas; `Shift` toggles additions |
 | `2` | Add line vertices; right-click to finish the route |
 | `3` | Drag a rectangular patrol area |
 | `4` | Draw a freehand patrol area |
@@ -80,7 +81,7 @@ These measurements do not count physical monitor scan-out;
 | `Y` | Create a defend automation from selected units and current target |
 | `P` | Attach every selected factory loop to the active line or area defense; start a Loop on each factory first |
 | `R` | Send only selected units below 50% health to repair, then resume work or return to their previous position |
-| `X` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/runtime.md#contact-yielding-and-hold-anchors)) |
+| `X` / `H` | Stop selected units (they can yield without returning), or establish a Hold anchor at their current position; held bodies can yield and safely return when pressure clears ([movement contract](docs/milestones/movement.md#contact-yielding-and-hold-anchors)) |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Edit the selected point, route, or region by redrawing it |
 | `Delete` | Delete one selected route or region and explicitly cancel automations using it |
@@ -110,9 +111,11 @@ factories, repair hubs and extractors; Synthesizers require no resource site. Se
 show faint red target lines that update each simulation tick, sampled like movement paths for large
 selections. Selecting a repair hub shows its repair radius; it automatically heals one friendly
 mobile unit at a time inside that circle.
+An active repair hub shows a green line to the unit it is currently healing, even without selection.
 
 The left sidebar separates unit, production, and construction automations into tabs. Each row has
-`||` to pause / `>` to resume, `X` to cancel, and `...` to open details in the right sidebar.
+`||` to pause / `>` to resume, `X` to cancel, and `...` to open a small details window immediately
+to the right of the list. Its `X` closes the window; clicking `...` again also closes it.
 
 ## Windows package
 

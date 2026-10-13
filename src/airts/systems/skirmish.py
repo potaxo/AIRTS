@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import ConstructionParameters
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

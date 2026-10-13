@@ -10,7 +10,7 @@ from tests.integration.scenarios import injected_overlap_simulation
 from airts.contracts.automations import DefendParameters
 from airts.contracts.commands import CreateDefendCommand, HoldPositionCommand
 from airts.contracts.spatial import Point, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems.movement import HOLD_TOLERANCE
 from airts.world._numeric import FloatArray, compile_numeric

@@ -9,7 +9,7 @@ from time import perf_counter
 from tests.integration.opponent_scenarios import opponent_scenario
 
 from airts.systems.opponent_ai import MAX_ORDERS, MAX_SQUAD_SIZE, MAX_TARGET_CANDIDATES
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 def test_thousand_unit_opponent_workload(

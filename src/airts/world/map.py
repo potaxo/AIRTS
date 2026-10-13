@@ -1,4 +1,4 @@
-"""Map cells, terrain and entity profiles, loading, and dynamic occupancy."""
+"""Map cells, terrain, footprints, loading, and dynamic occupancy."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import IO
 
 from airts.contracts.spatial import Point
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 Cell = tuple[int, int]
 
@@ -42,110 +44,6 @@ _MOVEMENT_COSTS = {
     Terrain.FOREST: 1.5,
     Terrain.WATER: float("inf"),
     Terrain.ROCK: float("inf"),
-}
-
-
-class EntityCategory(StrEnum):
-    UNIT = "unit"
-    BUILDING = "building"
-
-
-@dataclass(frozen=True, slots=True)
-class EntityProfile:
-    category: EntityCategory
-    max_health: int
-    vision_range: float
-    footprint: tuple[int, int]
-    movement_speed: float | None = None
-    attack_damage: int = 0
-    attack_range: float = 0.0
-    production_cost: int = 0
-    construction_cost: int = 0
-    build_speed: float = 0.0
-    build_range: float = 0.0
-    repair_range: float = 0.0
-    repair_rate: int = 0
-    income_per_second: int = 0
-
-    @property
-    def movable(self) -> bool:
-        return self.movement_speed is not None
-
-
-class EntityKind(StrEnum):
-    SCOUT = "scout"
-    LIGHT_TANK = "light_tank"
-    HEAVY_TANK = "heavy_tank"
-    BUILDER = "builder"
-    FACTORY = "factory"
-    REPAIR_HUB = "repair_hub"
-    COMMAND_CENTER = "command_center"
-    RESOURCE_GENERATOR = "resource_generator"
-    RESOURCE_EXTRACTOR = "resource_generator"  # Preserve existing map/save/command tags.
-    MATTER_SYNTHESIZER = "matter_synthesizer"
-
-    @property
-    def profile(self) -> EntityProfile:
-        return _ENTITY_PROFILES[self]
-
-    @property
-    def production_kinds(self) -> tuple[EntityKind, ...]:
-        if self is EntityKind.FACTORY:
-            return (
-                EntityKind.SCOUT,
-                EntityKind.LIGHT_TANK,
-                EntityKind.HEAVY_TANK,
-                EntityKind.BUILDER,
-            )
-        if self is EntityKind.COMMAND_CENTER:
-            return (EntityKind.BUILDER,)
-        return ()
-
-    @property
-    def movement_speed(self) -> float:
-        speed = self.profile.movement_speed
-        if speed is None:
-            raise ValueError(f"{self.value} is not movable")
-        return speed
-
-
-_ENTITY_PROFILES = {
-    EntityKind.SCOUT: EntityProfile(EntityCategory.UNIT, 60, 7.0, (1, 1), 5.0, 5, 5.0, 50),
-    EntityKind.LIGHT_TANK: EntityProfile(EntityCategory.UNIT, 100, 5.0, (1, 1), 3.5, 12, 6.0, 100),
-    EntityKind.HEAVY_TANK: EntityProfile(EntityCategory.UNIT, 160, 4.0, (1, 1), 2.5, 20, 7.0, 175),
-    EntityKind.BUILDER: EntityProfile(
-        EntityCategory.UNIT,
-        80,
-        5.0,
-        (1, 1),
-        3.0,
-        0,
-        0.0,
-        75,
-        build_speed=5.0,
-        build_range=2.5,
-        repair_range=2.5,
-        repair_rate=5,
-    ),
-    EntityKind.FACTORY: EntityProfile(
-        EntityCategory.BUILDING, 500, 5.0, (4, 4), construction_cost=400
-    ),
-    EntityKind.REPAIR_HUB: EntityProfile(
-        EntityCategory.BUILDING,
-        350,
-        4.0,
-        (3, 3),
-        construction_cost=250,
-        repair_range=6.0,
-        repair_rate=5,
-    ),
-    EntityKind.COMMAND_CENTER: EntityProfile(EntityCategory.BUILDING, 700, 7.0, (5, 5)),
-    EntityKind.RESOURCE_GENERATOR: EntityProfile(
-        EntityCategory.BUILDING, 250, 3.0, (2, 2), construction_cost=200, income_per_second=25
-    ),
-    EntityKind.MATTER_SYNTHESIZER: EntityProfile(
-        EntityCategory.BUILDING, 400, 4.0, (3, 3), construction_cost=1200, income_per_second=5
-    ),
 }
 
 

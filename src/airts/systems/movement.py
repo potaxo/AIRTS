@@ -10,11 +10,13 @@ import numpy as np
 from airts.contracts.automations import DefendParameters
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
-from airts.navigation.collision import advance_positions, collision_radius
+from airts.navigation.collision.geometry import collision_radius
+from airts.navigation.collision.solver import advance_positions
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.world._numeric import BoolArray, FloatArray, IntArray
 from airts.world.entities import Entity, UnitState
-from airts.world.map import Cell, EntityKind, footprint_cells
+from airts.world.map import Cell, footprint_cells
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -49,6 +51,7 @@ class MovementWorkspace:
                 "goals",
                 "radii",
                 "speeds",
+                "masses",
                 "recovery_targets",
                 "tolerances",
             )
@@ -361,6 +364,7 @@ def move_entities(simulation: Simulation) -> None:
                 heading_x,
                 heading_y,
                 front,
+                profile.mass,
             )
         )
     data = np.asarray(records, dtype=np.float64)
@@ -373,6 +377,8 @@ def move_entities(simulation: Simulation) -> None:
     positions[:], target_data[:], goals[:] = data[:, :2], data[:, 2:4], data[:, 4:6]
     radii, speeds = floats["radii"], floats["speeds"]
     radii[:], speeds[:] = data[:, 6], data[:, 7]
+    masses = floats["masses"]
+    masses[:] = data[:, 13]
     moving, stationary = booleans["moving"], booleans["stationary"]
     moving[:] = data[:, 8]
     np.logical_not(moving, out=stationary)
@@ -411,6 +417,7 @@ def move_entities(simulation: Simulation) -> None:
         goals,
         radii,
         speeds,
+        masses,
         order,
         moving,
         stationary,

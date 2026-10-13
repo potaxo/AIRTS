@@ -35,7 +35,7 @@ from airts.contracts.commands import (
     command_to_dict,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize(

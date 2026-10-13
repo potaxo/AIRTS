@@ -32,7 +32,7 @@ from airts.contracts.spatial import (
 from airts.simulation import Simulation
 from airts.systems.movement import start_path
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize(

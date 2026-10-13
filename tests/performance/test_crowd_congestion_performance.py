@@ -17,12 +17,13 @@ from airts.contracts.commands import (
     MoveCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 from airts.systems.movement import skip_crowded_waypoints
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 LARGE_FORMATION_UNIT_COUNT = 400
 BRIDGE_UNIT_COUNT = 400
@@ -159,8 +160,8 @@ def test_four_continuous_factories_defend_without_stutter_or_deep_overlap(
     pygame.font.init()
     app = AirtsApp(simulation)
     app.resize_layout(DYNAMIC_DEFENSE_DISPLAY_SIZE)
-    app._font = pygame.font.Font(None, round(24 * app.ui_scale))
-    app._small_font = pygame.font.Font(None, round(19 * app.ui_scale))
+    app.ui.font = pygame.font.Font(None, round(24 * app.ui_scale))
+    app.ui.small_font = pygame.font.Font(None, round(19 * app.ui_scale))
     app.selected_entities = set(defender_ids)
     surface = pygame.Surface(DYNAMIC_DEFENSE_DISPLAY_SIZE)
     app._draw(surface)

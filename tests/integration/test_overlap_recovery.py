@@ -17,13 +17,13 @@ from airts.contracts.commands import (
     StopCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import RoutingService
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world._numeric import FloatArray
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 def _assert_recovers_and_escapes(

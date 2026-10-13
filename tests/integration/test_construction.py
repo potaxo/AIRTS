@@ -28,7 +28,7 @@ from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
 from airts.systems.construction import construction_distance
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 def test_builder_construction_is_paid_timed_and_places_building_on_completion() -> None:

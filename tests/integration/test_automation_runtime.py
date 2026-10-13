@@ -34,7 +34,8 @@ from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangl
 from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def test_defenses_share_enemy_queries_by_owner_and_refresh_each_tick() -> None:

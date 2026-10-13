@@ -13,9 +13,9 @@ from tests.integration.recovery_checks import (
 
 from airts.contracts.commands import HoldPositionCommand, MoveCommand
 from airts.contracts.spatial import Point
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.systems.movement import HOLD_TOLERANCE
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize("unit_count", [100, 400, 1_000])

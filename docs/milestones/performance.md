@@ -1,78 +1,55 @@
 # Performance contract
 
-[Design](../design.md) owns scope. These are acceptance requirements, not a claim that every run
-or machine passes. Preserve workload sizes, geometry, durations, collision thresholds, and metrics.
-Exact fixtures/assertions are owned by the linked tests; historical benchmark prose is not evidence
-for the current checkout. Wall-clock and hardware acceptance is opt-in via the `performance` marker;
-default validation retains untimed workload behavior. Contributor commands belong to
-[AGENTS](../../AGENTS.md#validation).
+[Design](../design.md) owns scope. These are acceptance requirements, not evidence that the current
+checkout passes. Preserve workload sizes, geometry, durations, collision thresholds and metrics.
+Linked tests own exact fixtures/assertions. [AGENTS](../../AGENTS.md#validation) owns marker selection,
+native-Windows validation, repeated runs and artifact recording; packaging CI is functional evidence.
 
 ## FPS and rendering
 
-**Real FPS = 1000 / p99 completed-frame milliseconds.** Every 100 Real FPS gate requires p99 <=
-10 ms, using `real_fps_from_frame_times` in [metrics.py](../../src/airts/presentation/metrics.py)
-and [the shared probe](../../tests/performance/frame_pacing.py). Sustained native-4K complex battle
-has an 80 Real FPS acceptance floor (p99 <=12.5 ms), with 100 Real FPS retained as a reported
-optimization goal. Its full workload is unchanged; this explicit heavy-scene budget allows headroom
-for combat, UI updates and hardware scheduling rather than weakening ordinary rendering gates.
-Average Submit FPS/elapsed throughput is diagnostic only. Record consecutive completed frames;
-GPU tests synchronize every frame before sampling. Commands, scheduled ticks, rendering, and
-required synchronization stay inside the measured frame stream. Do not tune the percentile or
-threshold in response to a failing run. Simulation-tick budgets are separate from FPS.
-Physical monitor/compositor cadence needs external measurement; neither offscreen GPU tests nor
-application FPS prove scan-out.
+**Real FPS = 1000 / p99 completed-frame milliseconds.** Every 100 Real FPS gate requires p99 <=10 ms;
+sustained native-4K complex battle requires >=80 Real FPS (p99 <=12.5 ms) and reports 100 FPS as its
+optimization goal. Use [metrics](../../src/airts/presentation/metrics.py) and the
+[completed-frame probe](../../tests/performance/frame_pacing.py). Average Submit FPS is diagnostic.
+Commands, scheduled ticks, drawing and per-frame GPU completion stay inside consecutive samples;
+setup/JIT warm-up is outside timing. Tick budgets are separate. Never adjust thresholds/percentiles
+to pass a run. Offscreen/app FPS does not establish physical monitor scan-out.
 
-Simulation remains deterministic, single-threaded CPU work at 10 Hz. Routing, collision and
-command validation remain serial CPU work; GPU drawing never feeds back into authoritative state.
-Large-map/army construction drains initialization/previous-scene garbage before live frames;
-automatic Python garbage collection remains enabled during play. The frontend has a 1,000 FPS
-ceiling and requests VSync off. Native OpenGL 3.3 uses `OPENGL | DOUBLEBUF | RESIZABLE`, never
-`SCALED` or silent software fallback. Context failures are diagnostic. Windows verification uses
-the native WGL backend. The app retains a WSLg/Wayland compatibility branch, but repository
-development and acceptance verification use native Windows as specified in [AGENTS](../../AGENTS.md).
-Software rasterizers (including llvmpipe, softpipe, SwiftShader, GDI Generic, and Microsoft Basic
-Render Driver) cannot count as hardware evidence. Dependencies stay in [pyproject](../../pyproject.toml).
+Current simulation uses serial CPU kernels at 10 Hz; this is a baseline rather than a required
+execution strategy. Optimizations follow [engineering policy](../architecture/engineering.md#change-policy)
+and preserve gameplay safety and these gates. Large-scene construction drains old garbage before
+live frames; automatic GC remains enabled. Frontend ceiling is 1,000 FPS with VSync requested off.
+Native OpenGL 3.3 uses `OPENGL | DOUBLEBUF | RESIZABLE`, never `SCALED` or silent fallback. Hardware
+evidence uses native WGL, excluding llvmpipe, softpipe, SwiftShader, GDI Generic and Microsoft Basic
+Render Driver. WSLg/Wayland compatibility is not native-Windows acceptance evidence.
 
-OpenGL preserves every terrain/grid element, unit, building, selection, and inspected health bar.
-Large selections use tint/aggregate details and 1-32 representative routes, including the inspected
-route; visual detail reduction cannot hide units, drop ownership, or disable collision/simulation.
-Terrain uploads once per map as an RGB texture with one exact palette texel per cell and a single
-world rectangle. Native GPU clipping bounds raster work to the visible viewport; cell interiors
-use exact nearest texels, avoiding per-cell antialias seams. All eight-cell grid lines remain world
-primitives with fixed pixel widths. Camera changes reuse the texture and world buffers;
-units, buildings, representative paths,
-projectiles and traces also retain world-coordinate buffers between ticks. Zoom/pan/resize update
-GPU transform uniforms without rebuilding or uploading those buffers or the terrain cells/grid. Grid widths remain fixed in pixels. Software
-site maps cache one pixel per cell and scale a viewport-sized crop, never a full zoomed world.
-Dynamic buffers retain capacity and rebuild at tick/relevant selection or inspection changes. Normal batches are terrain, entities, bounded lines, and UI composition. GPU shapes
-include projectiles, retained traces, and assembly glow. Immutable retained traces reuse their
-packed geometry until expiry; active projectile feedback still updates every tick. Resource sites, private blueprints, placement previews, actual scaffold outlines/progress bars,
-spatial references and input drafts use cached GPU world primitives. Camera changes update their
-transform uniforms without rebuilding geometry or uploading textures. Concave region fills are
-triangulated on edit; line thickness, progress-bar height and text size stay fixed in pixels.
-Construction percentages and region names use a small cached text atlas, positioned by the GPU.
-Panel/font textures upload dirty regions; camera movement never dirties the full canvas.
-Status refreshes in three-tick buckets and explicit interaction stays immediate.
+Rendering preserves all terrain/grid elements, units, buildings, ownership, selection and inspected
+health. Large selections use tint/aggregate details and 1-32 representative routes including the
+inspected route. No visual reduction may skip units, collision or simulation.
+Terrain uploads once per map as exact nearest RGB texels on one world rectangle; all eight-cell
+grid lines remain world primitives. Camera pan/zoom/resize changes uniforms, not terrain or dynamic
+world buffers. Dynamic capacity persists; geometry rebuilds on relevant tick/selection/inspection
+changes. Software site maps scale a viewport-sized crop of a one-pixel-per-cell map.
 
-GPU interpolation mixes previous/current fixed-tick centers without per-frame buffer rebuilds or
-feedback into authoritative state. It adds at most 100 ms visual latency and resets on load/reset.
-Tick-driven overlay updates stage onto the first interpolation frame after a tick, adding at most
-one frame of text latency. Explicit software mode caches complete composed Surfaces, reconstructs
-on the following presentation call after a tick, and catches up immediately if another tick arrives.
-The interactive software backend scales a bounded logical framebuffer; a native-4K software test
-Surface does not establish native-4K interactive software rendering.
-Native OpenGL resolution presets span 1280 x 720 through 3840 x 2160; settings exposes p95 frame, render,
-simulation, and swap-wait diagnostics. Projectile cores remain small and fixed in pixel size.
+Projectiles, traces, assembly glow, resource sites, blueprints, placement/scaffold feedback, spatial
+references and drafts use cached world primitives. Immutable traces reuse geometry until expiry;
+active projectiles update per tick. Concave fills triangulate on edit. Grid/line widths, progress
+height, text and projectile cores stay fixed in pixels. Construction percentages/region names use
+a cached text atlas. Panels/font textures upload dirty regions; camera changes never dirty the
+whole canvas. Status refreshes in three-tick buckets; explicit interaction remains immediate.
+
+GPU interpolation mixes previous/current centers without per-frame rebuilds or simulation feedback,
+adds at most 100 ms visual latency, and resets on load/reset. Tick-driven overlays stage on the first
+interpolation frame after a tick (at most one frame text delay). Software caches composed Surfaces,
+rebuilds on the following presentation call and catches up if another tick arrives. Its interactive
+framebuffer is bounded; native-4K test Surfaces do not prove native-4K interactive software rendering.
+OpenGL resolution presets span 1280x720 through 3840x2160; settings reports p95 frame/render/simulation/
+swap wait. Renderer correctness and resource lifetime belong to the linked integration tests.
 
 ## Required workloads
 
-Setup/warm-up is outside timing; specified commands and ongoing work are inside. Retain all
-participants and assertions. Separate backend tests measure different costs and are not duplicates.
-Mixed behavior/timing scenarios use the same complete workload in `behavior` and `timing` variants;
-only the latter is marked `performance` and enforces wall-clock budgets. Default runs still check
-large-army ownership, clearance, progress, route budgets and collision counts. Hardware FPS tests
-and the timing-only static rendering test are explicitly marked; small renderer integration checks
-remain in default validation. Selecting a test path alone does not override marker selection.
+Behavior and timing variants retain identical full workloads; only timing enforces wall-clock
+budgets. Software and GPU gates measure different costs and remain separate.
 
 | Executable contract | Workload and gate |
 | --- | --- |
@@ -92,38 +69,20 @@ live in [presentation integration tests](../../tests/integration/test_opengl_pre
 
 ## Crowd and routing
 
-[Crowd scenarios](../../tests/performance/test_crowd_congestion_performance.py) require a 999-attacker
-focus scenario to have at least 24 attackers in range after 220 ticks, with every in-range attacker
-stopped and tick p95 <100 ms; 400 scouts around a 2 x 2 defense to settle with >=0.90 center spacing
-and tick p95 <100 ms; and all 400 scouts to cross the nine-cell bridge on a 120 x 80 map within the
-test's tick limit and overlap tolerance. Capacity-specific counts do not
-replace the independent 1,000-unit performance gates. Tiny patrols, stationary hostile anchors,
-and bridge-turn lookahead remain distinct regressions.
+| Executable contract | Additional gates and retained behavior |
+| --- | --- |
+| [Crowd](../../tests/performance/test_crowd_congestion_performance.py) | 999 attackers: >=24 in range after 220 ticks, all in-range attackers stopped, tick p95 <100 ms. 400 scouts around a 2x2 defense: >=90% spacing, tick p95 <100 ms. All 400 cross the nine-cell bridge within fixture limits. |
+| [Large army](../../tests/performance/test_large_army_performance.py) | All 1,000 gathering members receive routes within 32 ticks using the global 32-route allowance. 500-unit choke retains the 6,000 collision-pair limit. Cold/changed 320x320 targets require command <=250 ms for two scouts and <=750 ms for 1,000. Other move/patrol/repair/focus, line, choke and opposing-army cases retain full participants. |
+| [Behavior](../../tests/integration/test_large_force_behavior_regressions.py) | Identity, swept clearance, speed, front-rank continuity, 307-scout bridge progress, held-formation traffic/recovery and building clearance. Shared defense: 160 unique stations, 159 after a casualty with <=1 remap. Four factories: 132 spaced stations. |
+| [Severe recovery](../../tests/integration/test_overlap_recovery.py) / [timing](../../tests/performance/test_overlap_recovery_performance.py) | Behavior retains 100/400/1,000 bodies, 80/50/30% spacing and coincident centers, internal extraction and continued settling. Timing retains all 1,000 bodies and 300 ticks for 30% spacing/coincident centers with tick p95 <100 ms. |
 
-[Large-army scenarios](../../tests/performance/test_large_army_performance.py) additionally require
-all 1,000 units in the open gathering-dispatch fixture to receive routes within 32 ticks, retaining
-ownership, collision processing and the global 32-route-per-tick allowance. This is dispatch
-latency, not a promise that units arrive within that time. They retain 1,000-unit
-move/patrol/repair/gathering/focus commands, gathering expansion/contraction, and 500-unit line,
-repair, delayed-route, choke, opposing-army, and determinism checks. Keep per-tick route budgets
-and the 6,000 collision-pair limit in the 500-unit choke; do not omit queued members to meet timing.
-The same suite checks cold and changed gathering targets for two and 1,000 scouts on the
-320 x 320 river map, including nearby rocks: command limits are 250 ms and 750 ms respectively.
-It records each target's command duration and preserves every selected member and movement intent.
-
-[Behavior regressions](../../tests/integration/test_large_force_behavior_regressions.py) preserve
-identity (no exact position exchanges), per-tick speed bounds, unobstructed front-rank continuity,
-307-scout four-cell bridge progress, traffic past held formations with bounded displacement and
-safe anchor recovery, and building clearance. Contact and Hold behavior are defined in
-[runtime](runtime.md#contact-yielding-and-hold-anchors).
-The movement scenarios retain continuous contact clearance and per-tick speed checks; passive
-displacement and anchor recovery count toward both simulated work and collision metrics. Shared
-defenses must yield 160 unique stations; one casualty leaves 159 with at most one survivor remapped.
-Four factories must produce 132 unique, spaced stations. Reinforcements retain valid established
-stations; contraction may replace obsolete outer slots. Stable identities take precedence over
-fresh global minimum-distance matching. Dense continuous packing must preserve orders and physical
-clearance without requiring a free traffic-lattice slot. The current movement contract is
-described in [runtime](runtime.md#movement-and-combat).
+Route dispatch latency is not arrival latency. No gate permits omitted queued/stationary members
+or missing passive/recovery collision work. Reinforcements retain valid stations; contraction may
+replace obsolete outer slots. Stable identities and safe waiting take precedence over rematching
+or physically impossible passage. [Movement](movement.md) owns these gameplay rules.
+Severe-recovery evidence includes first progress, squad completion, longest stall, overlap depth/
+pairs, spatial distribution, passive settling, work counters and tick/frame tails. These preparations
+are injected separately from normal spawn/arrival behavior; preserve the fixture's complete run.
 
 ## Contact solver measurement
 
@@ -156,62 +115,20 @@ Stable regions still pay for linear state packing/indexing and local overlap dis
 run displacement certificates without an intent/correction. Report tick timing separately from
 completed-frame p99 and Real FPS. Constructor/JIT warm-up stays outside both timing streams;
 specified simulation commands, passive submission, Hold/defense recovery and replanning stay inside.
-Use identical fixture, seed, duration and timer for before/after measurements and keep raw samples
-under ignored `outputs/`. Other frame gates and the 6,000-pair choke gate remain unchanged.
 
-Movement computes front-order geometry during state packing, retaining scalar `hypot`, ordered
-Python sums and stable ID tie breaks. Defense controllers share one enemy-position snapshot/index
-per owner within the automation pass. Positions and ownership do not change during that pass;
-production/construction membership growth discards the snapshots before the next defense update.
-Snapshots never cross into the later movement/combat phases or persist between ticks or saves.
+Joint anchor projection's refinement allowance is `8 * (P + E + sum(degree_i ** 2))`, for P bodies,
+E retained edges and endpoint degrees. Each CG solve has dimension <=`min(active_edges, 2 * P)`
+and may stop on residual, a multiplier boundary or allowance exhaustion. Count actual active-set,
+edge/endpoint and sparse-product/dot visits, skipping inactive zero edges. All constraint admission,
+final scans, both contact sweeps and full swept/static certification remain measured and mandatory.
+Intermediate numerical termination cannot omit safety checks; excluded projection pairs still
+contribute their evaluated certification costs. Algorithm behavior belongs to [movement](movement.md).
 
-The [contact yielding and anchor-return contract](runtime.md#contact-yielding-and-hold-anchors)
-owns release fields, sparse joint projection, passive step-envelope exclusion and final certification.
-For a region with `P` participating bodies, `E` retained edges and endpoint degrees
-`degree_i`, its active-set refinement operation allowance is
-`8 * (P + E + sum(degree_i ** 2))`. Each CG solve has dimension at most
-`min(active_edges, 2 * P)` and can stop earlier on its residual, a nonnegative-multiplier boundary
-or the operation allowance.
-During CG, compact incidence products skip inactive edges that contribute zero; endpoint packing,
-active-set changes and all actual numerical visits remain measured. Full constraint admission,
-the final all-edge scan and swept/static certification are mandatory even after early termination;
-the numerical refinement allowance never licenses omitted safety checks. All their costs remain
-inside complete tick/frame measurements. Both contact sweeps, independently certified follower
-returns and complete displacement-envelope queries also remain measured; excluded projection pairs
-still contribute their evaluated relationships to the counters.
-Compatible-return behavior and continuation are covered by the
-[return integration matrix](../../tests/integration/test_hold_recovery_capacity.py) and
-[save/replay cases](../../tests/integration/test_hold_recovery_continuation.py); their functional
-results are separate from hardware timing acceptance.
-
-Hardware/timing acceptance runs on the designated native-Windows machine with its renderer and
-environment identified. Record repeated complete runs, including failures; do not auto-retry until
-green, discard slow frames, or select only the best run. Sustained battle reports renderer, sample
-counts, p99, Real FPS, acceptance floor and whether the optimization goal was reached as JUnit test
-properties. The sample cadence remains 100 frames per simulated second regardless of its 80 FPS
-floor, preserving 300 frames, 30 ticks and the original collision/combat/UI work. Offscreen completed
-frames are not a measurement of three seconds of physical monitor output.
-
-Fixed contact sweeps bound prediction rounds, not neighbor count. The admitted fringe queue visits
-each body at most once, but does not bound the number of pair candidates per visit; a region can
-contain the whole army. Component storage and supporting-plane workspace are linear in body count.
-Ordinary separated distributions have small local neighborhoods;
-dense chains increase those neighborhoods and may need more ticks to clear. Identical centers can
-produce quadratic candidate count, and repeated half-plane solving can be worse than quadratic in
-an extreme dense component. There is no universal linear-time claim,
-neighbor truncation, N-by-N distance matrix or wall-clock-dependent simulation budget. Safety
-certification is not omitted in those cases; blocked space may legitimately prevent passage.
-The [severe overlap integration matrix](../../tests/integration/test_overlap_recovery.py) retains
-100/400/1,000 bodies at 80%, 50%, 30% spacing and identical centers, with reachable free area,
-internal extraction and continued recovery. These preparations are explicitly injected, separately
-from the normal spawn/arrival reproduction. Compare identical seed, commands, duration and timers;
-record first meaningful advance, entire-squad escape/completion, longest stall, overlap pairs/depth
-and spatial distribution, passive displacement/settling, all work counters, tick p95/p99, and
-completed-frame p99/Real FPS. This adds evidence for recovery without changing
-any existing 1,000-unit, tick-p95, choke-pair or frame acceptance gate.
-The [recovery timing counterparts](../../tests/performance/test_overlap_recovery_performance.py)
-retain all 1,000 units and 300 ticks for 30% spacing and identical centers, including all movement,
-recovery and route work, with the same `<100 ms` tick-p95 gate in their marked timing variant.
+Buckets and scratch storage do not imply universal linear time: dense chains/coincident centers
+can produce quadratic candidates or worse refinement. Never truncate neighbors or remove safety
+certification to meet a gate. Compare tick tails separately from completed-frame tails.
+Sustained battle reports renderer, 300 completed frames/30 ticks, p99, Real FPS, floor and goal-met
+properties. Its cadence stays 100 frames per simulated second despite the 80 FPS floor.
 
 ## Visual inspection
 

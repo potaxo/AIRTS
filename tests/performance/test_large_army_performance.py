@@ -25,12 +25,13 @@ from airts.contracts.spatial import (
     PolylineTarget,
     rectangle_region,
 )
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, EntitySpec, load_map_data
+from airts.world.map import EntitySpec, load_map_data
 from airts.world.skirmish import create_skirmish_map
+from airts.world.units.catalog import EntityKind
 
 
 def _large_simulation(unit_count: int, *, with_repair_hub: bool = False) -> Simulation:

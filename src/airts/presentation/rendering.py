@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from enum import StrEnum
 from math import ceil, floor
 from typing import Protocol
@@ -12,13 +13,15 @@ from airts.contracts.spatial import Point
 from airts.presentation.palette import (
     ENTITY_COLORS,
     PROJECTILE_COLORS,
+    REPAIR_COLOR,
     TERRAIN_COLORS,
     Color,
     match_color,
 )
 from airts.simulation import Simulation
 from airts.world.entities import Entity
-from airts.world.map import EntityCategory, EntityKind
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 
 class RendererBackend(StrEnum):
@@ -64,6 +67,22 @@ def order_feedback(view: SceneView, entity: Entity) -> tuple[tuple[Point, ...], 
     if entity.pursue_target and target is not None:
         return (entity.selection_position, target.selection_position), (155, 92, 92)
     return view.simplified_path(entity), (225, 225, 225)
+
+
+def repair_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
+    """Show only the hub's authoritative, currently valid service target."""
+    for hub in simulation.entities.values():
+        if hub.kind is not EntityKind.REPAIR_HUB or not hub.is_complete:
+            continue
+        target = simulation.entities.get(hub.repair_target_id or "")
+        if (
+            target is not None
+            and target.is_movable
+            and target.owner_id == hub.owner_id
+            and target.health < target.kind.profile.max_health
+            and hub.selection_position.distance_to(target.position) <= hub.kind.profile.repair_range
+        ):
+            yield hub.selection_position, target.selection_position
 
 
 class SoftwareRenderer:
@@ -403,6 +422,10 @@ class SoftwareRenderer:
                 )
                 if len(points) >= 2:
                     paths.append((color, points))
+            paths.extend(
+                (REPAIR_COLOR, (view.screen_point(source), view.screen_point(target)))
+                for source, target in repair_links(view.simulation)
+            )
             self._path_render_key = key
             self._path_render_points = tuple(paths)
         return self._path_render_points

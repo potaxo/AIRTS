@@ -13,7 +13,8 @@ from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLRenderer
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 DISPLAY_SIZE = (3840, 2160)
 MINIMUM_REAL_FPS = 80
@@ -110,8 +111,8 @@ def _battle_app(simulation: Simulation, player_ids: tuple[str, ...]) -> AirtsApp
     pygame.font.init()
     app = AirtsApp(simulation)
     app.resize_layout(DISPLAY_SIZE)
-    app._font = pygame.font.Font(None, round(24 * app.ui_scale))
-    app._small_font = pygame.font.Font(None, round(19 * app.ui_scale))
+    app.ui.font = pygame.font.Font(None, round(24 * app.ui_scale))
+    app.ui.small_font = pygame.font.Font(None, round(19 * app.ui_scale))
     app.selected_entities = set(player_ids)
     app.inspected_entity_id = "enemy_0000"
     app.active_target = PolylineTarget((Point(36, 18), Point(44, 42)))
@@ -169,7 +170,7 @@ def test_sustained_complex_battle_meets_80_real_fps_budget(
             )
         )
         assert defend_result.accepted
-        app.selected_automation_id = defend_result.automation_id
+        app.automation_panel.selected_id = defend_result.automation_id
         assert simulation.execute(MoveCommand(enemy_ids, Point(17.5, 30.5), "enemy")).accepted
         interpolation_samples: set[float] = set()
         for frame_index in range(MEASURED_FRAMES):

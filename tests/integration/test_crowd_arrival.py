@@ -12,11 +12,12 @@ from airts.contracts.commands import (
     ResumeAutomationCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def _assert_physical_clearance(simulation: Simulation) -> None:

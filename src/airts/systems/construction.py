@@ -21,7 +21,8 @@ from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import automation_execution, movement
 from airts.world.entities import Entity, UnitState
-from airts.world.map import Cell, EntityKind, footprint_cells
+from airts.world.map import Cell, footprint_cells
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

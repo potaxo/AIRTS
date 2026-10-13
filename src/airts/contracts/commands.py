@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 
 from airts.contracts.spatial import Point, SpatialTarget, target_from_dict, target_to_dict
-from airts.world.map import EntityKind
+from airts.world.units.catalog import EntityKind
 
 
 class ControlAuthority(IntEnum):

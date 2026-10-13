@@ -19,7 +19,8 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def _river_terrain() -> dict[str, object]:

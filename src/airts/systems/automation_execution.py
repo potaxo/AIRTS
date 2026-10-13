@@ -27,12 +27,13 @@ from airts.contracts.automations import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget, SpatialTarget, distance_to_target
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import movement
 from airts.world.entities import Entity, UnitState
-from airts.world.map import EntityCategory, EntityKind
+from airts.world.units.catalog import EntityKind
+from airts.world.units.schema import EntityCategory
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

@@ -32,8 +32,9 @@ from airts.contracts.spatial import Point
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems.construction import validate_building_placement
 from airts.world.entities import Entity
-from airts.world.map import EntityKind, footprint_cells
+from airts.world.map import footprint_cells
 from airts.world.opponents import OpponentState, Squad, SquadPhase
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation

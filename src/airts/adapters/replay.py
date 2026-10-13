@@ -10,8 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v15"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v8"
+REPLAY_SCHEMA = "airts-replay-v16"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v9"
 
 
 class ReplayError(ValueError):
@@ -92,6 +92,11 @@ def load_replay(path: str | Path) -> ReplayData:
 
 def load_replay_data(raw_data: object) -> ReplayData:
     document = _mapping(raw_data, "replay document")
+    if document.get("schema") in {"airts-replay-v15", "airts-match-replay-v8"}:
+        raise ReplayError(
+            "legacy replay predates mass-weighted contact response; "
+            "replay with its original AIRTS version"
+        )
     if document.get("schema") in {
         "airts-match-replay-v1",
         "airts-match-replay-v2",

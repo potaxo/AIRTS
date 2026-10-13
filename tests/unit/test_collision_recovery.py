@@ -4,7 +4,7 @@ from math import ceil, floor, sqrt
 
 import numpy as np
 
-from airts.navigation.collision import _project_anchor_gradient, _return_anchors
+from airts.navigation.collision.returning import _project_anchor_gradient, _return_anchors
 
 
 def test_sparse_projection_releases_redundant_singular_contact_row() -> None:

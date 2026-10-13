@@ -5,13 +5,8 @@ from __future__ import annotations
 import pytest
 
 from airts.contracts.spatial import Point
-from airts.world.map import (
-    EntityCategory,
-    MapValidationError,
-    Terrain,
-    load_example_map,
-    load_map_data,
-)
+from airts.world.map import MapValidationError, Terrain, load_example_map, load_map_data
+from airts.world.units.schema import EntityCategory
 
 
 def test_bundled_map_is_a_valid_64_by_64_playable_map() -> None:

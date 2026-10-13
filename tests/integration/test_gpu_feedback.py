@@ -13,7 +13,8 @@ from airts.contracts.spatial import Point, PolygonRegion
 from airts.presentation.app import AirtsApp
 from airts.presentation.gpu_feedback import GPUFeedback, _triangles
 from airts.simulation import Simulation
-from airts.world.map import EntityKind, load_map_data
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def feedback_scene() -> AirtsApp:
@@ -72,11 +73,34 @@ def mocked_feedback() -> GPUFeedback:
     return GPUFeedback(module, context)
 
 
+def test_gpu_selection_preview_remains_visible_when_pointer_enters_command_bar() -> None:
+    app = feedback_scene()
+    app.drag_start = Point(1, 1)
+    end = (app.command_bar_rect.right - 1, app.command_bar_rect.centery)
+    feedback = mocked_feedback()
+    try:
+        with (
+            patch("airts.presentation.gpu_feedback.pygame.display.get_init", return_value=True),
+            patch("airts.presentation.gpu_feedback.pygame.mouse.get_pos", return_value=end),
+        ):
+            feedback.draw(app, app.window_size)
+        shapes = array("f")
+        shapes.frombytes(feedback.shapes.write.call_args.args[0])
+        selection = shapes[-18:]
+        pointer = app._map_point(end)
+        assert tuple(selection[:4]) == pytest.approx(
+            ((1 + pointer.x) / 2, (1 + pointer.y) / 2, (pointer.x - 1) / 2, (pointer.y - 1) / 2)
+        )
+        assert tuple(selection[14:18]) == pytest.approx((245 / 255, 245 / 255, 245 / 255, 1))
+    finally:
+        feedback.release()
+
+
 def test_camera_uses_gpu_uniforms_without_redrawing_or_uploading_world_feedback() -> None:
     pygame.font.init()
     app = feedback_scene()
-    app._small_font = pygame.font.Font(None, 19)
-    app._font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
+    app.ui.font = pygame.font.Font(None, 24)
     feedback = mocked_feedback()
     try:
         feedback.draw(app, app.WINDOW_SIZE)

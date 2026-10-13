@@ -9,7 +9,7 @@ import pytest
 
 from airts.contracts.commands import MoveCommand
 from airts.contracts.spatial import Point
-from airts.navigation.collision import collision_radius
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 
