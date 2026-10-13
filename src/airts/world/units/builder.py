@@ -12,7 +12,7 @@ PROFILE = EntityProfile(
     movement_speed=3.0,
     production_cost=75,
     build_speed=5.0,
-    build_range=2.5,
-    repair_range=2.5,
+    build_range=4.0,
+    repair_range=4.0,
     repair_rate=5,
 )

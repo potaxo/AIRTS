@@ -1,6 +1,5 @@
 """Builder repair, automatic repair capacity, synthesis and moving-target pursuit."""
 
-from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +14,7 @@ from airts.adapters.persistence import (
     save_simulation,
 )
 from airts.adapters.replay import capture_replay, run_replay
+from airts.contracts.automations import AutomationStatus, ConstructionParameters
 from airts.contracts.commands import (
     AttackCommand,
     CreateConstructionCommand,
@@ -27,10 +27,11 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLFrameBuilder
-from airts.presentation.palette import REPAIR_COLOR
-from airts.presentation.rendering import SoftwareRenderer, order_feedback
+from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import SoftwareRenderer, order_feedback, work_links
 from airts.presentation.ui import selection
 from airts.simulation import Simulation
+from airts.systems.repair import building_distance
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
@@ -144,18 +145,20 @@ def test_repair_beam_tracks_hub_service_without_selection_in_both_renderers() ->
         paths = software._representative_path_points(app)
         packed, vertices, selected_paths = OpenGLFrameBuilder._build_paths(app, (0, 0), 1.0)
         assert selected_paths == 0
+        assert not packed and vertices == 0  # GPU work beams use the thick feedback segment batch.
         if target_id is None:
             assert not paths and not packed and vertices == 0
+            assert not tuple(work_links(simulation))
         else:
             source = simulation.entities["hub"].selection_position
             target = simulation.entities[target_id].selection_position
             assert paths == ((REPAIR_COLOR, (app.screen_point(source), app.screen_point(target))),)
-            values = array("f")
-            values.frombytes(packed)
-            assert vertices == 2
-            assert tuple(values[:2]) == (source.x, source.y)
-            assert tuple(values[6:8]) == (target.x, target.y)
-            assert tuple(values[2:6]) == pytest.approx((*[v / 255 for v in REPAIR_COLOR], 1.0))
+            assert tuple(work_links(simulation)) == ((source, target),)
+            with patch("airts.presentation.rendering.pygame.draw.lines") as lines:
+                software.draw_entities(app, pygame.Surface(app.window_size))
+            lines.assert_called_once_with(
+                lines.call_args.args[0], REPAIR_COLOR, False, paths[0][1], WORK_BEAM_WIDTH
+            )
         assert simulation.export_state() == before
 
     check_beam(None)
@@ -169,7 +172,64 @@ def test_repair_beam_tracks_hub_service_without_selection_in_both_renderers() ->
     check_beam(None)
 
 
-def test_queued_construction_waits_for_direct_building_repair() -> None:
+def test_builder_repairs_from_a_clear_position_in_range_without_touching_building() -> None:
+    simulation = repair_world()
+    builder, building = simulation.entities["builder"], simulation.entities["factory"]
+    building.health = 200
+    assert simulation.execute(RepairBuildingCommand(("builder",), "factory")).accepted
+    simulation.advance(35)
+    assert building.health > 200
+    assert 2.5 < building_distance(builder.position, building) <= builder.kind.profile.repair_range
+    assert not builder.path and builder.move_target is None
+    assert not builder.occupied_cells & building.occupied_cells
+    assert (builder.position, building.selection_position) in tuple(work_links(simulation))
+    assert simulation.execute(StopCommand(("builder",))).accepted
+    assert not tuple(work_links(simulation))
+
+
+def test_factory_unit_healing_has_a_beam_only_during_service() -> None:
+    simulation = repair_world()
+    simulation.remove_entity("hub")
+    simulation.remove_entity("hostile")
+    unit = simulation.entities["a"]
+    unit.health = 20
+    assert simulation.execute(CreateRepairAndReturnCommand(("a",))).accepted
+    source = simulation.entities["factory"].selection_position
+    for _ in range(100):
+        simulation.advance()
+        if (source, unit.position) in tuple(work_links(simulation)):
+            break
+    else:
+        pytest.fail("Unit never entered factory repair service")
+    health = unit.health
+    simulation.advance()
+    assert unit.health > health
+    simulation.advance(100)
+    assert unit.health == unit.kind.profile.max_health
+    assert not tuple(work_links(simulation))
+
+
+def test_builder_construction_beam_appears_from_working_range_and_stops_on_completion() -> None:
+    simulation = repair_world()
+    builder = simulation.entities["builder"]
+    initial_position = builder.position
+    created = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.TURRET, Point(6, 4))
+    )
+    assert created.accepted
+    simulation.advance()
+    parameters = simulation.automations[created.automation_id or ""].parameters
+    assert isinstance(parameters, ConstructionParameters)
+    building = simulation.entities[parameters.site_entity_id or ""]
+    assert builder.position == initial_position
+    assert building_distance(builder.position, building) == 3.5
+    assert tuple(work_links(simulation)) == ((builder.position, building.selection_position),)
+    simulation.advance(30)
+    assert building.is_complete
+    assert not tuple(work_links(simulation))
+
+
+def test_direct_building_repair_replaces_queued_construction() -> None:
     simulation = repair_world()
     simulation.entities["factory"].health = 200
     active = simulation.execute(
@@ -184,10 +244,11 @@ def test_queued_construction_waits_for_direct_building_repair() -> None:
     assert simulation.execute(RepairBuildingCommand(("builder",), "factory")).accepted
     simulation.advance(1)
     assert simulation.entities["builder"].repair_target_id == "factory"
-    assert simulation.automations[queued.automation_id or ""].reason_code == "BUILDERS_QUEUED"
+    assert simulation.automations[queued.automation_id or ""].reason_code == "QUEUE_REPLACED"
+    assert simulation.automations[queued.automation_id or ""].status is AutomationStatus.CANCELED
     simulation.advance(160)
     assert simulation.entities["factory"].health == 500
-    assert simulation.assignments["builder"] == queued.automation_id
+    assert "builder" not in simulation.assignments
 
 
 def test_explicit_repair_and_return_shares_hub_capacity_and_returns() -> None:
@@ -282,6 +343,8 @@ def test_builder_repair_replays_combat_damage_and_restoration(patrol: bool) -> N
 
 def test_hub_radius_includes_boundary_and_excludes_unfinished_source() -> None:
     simulation = repair_world()
+    # This case isolates repair capacity from the separately covered combat support response.
+    assert simulation.remove_entity("hostile").accepted
     unit = simulation.entities["outside"]
     unit.health = 20
     assert simulation.execute(MoveCommand(("outside",), Point(29.5, 13.5))).accepted

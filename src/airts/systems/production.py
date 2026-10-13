@@ -31,6 +31,7 @@ from airts.contracts.commands import (
     ValidationFailure,
     ValidationPhase,
     error_reason,
+    validate_auto_repair,
     validate_positive,
     validate_priority,
 )
@@ -50,6 +51,9 @@ if TYPE_CHECKING:
 
 
 def create_production(simulation: Simulation, command: CreateProductionCommand) -> CommandResult:
+    failure = validate_auto_repair(command.auto_repair)
+    if failure is not None:
+        return simulation._reject_validation("create_production", failure)
     priority_failure = validate_priority(command.priority)
     count_failure = validate_positive(command.target_count, "target_count")
     if priority_failure or count_failure:
@@ -171,6 +175,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
             continuous=command.continuous,
             defend_target=command.defend_target,
             patrol_target=command.patrol_target,
+            auto_repair=command.auto_repair,
         ),
     )
     if simulation.assignments.get(command.factory_id) is not None:
@@ -552,6 +557,7 @@ def assign_produced_defender(
             DefendParameters(
                 target,
                 stations,
+                auto_repair=parameters.auto_repair,
                 gathering_point=gathering_point,
                 deployment_slots=slots,
                 assembly_radius=(slots[0].distance_to(target_center(target)) if slots else 0.0),
@@ -632,6 +638,7 @@ def attach_production_defense(
             parameters_for_defend = DefendParameters(
                 target,
                 stations,
+                auto_repair=parameters.auto_repair,
                 gathering_point=True,
                 deployment_slots=slots[: len(produced_ids)],
                 assembly_radius=max(
@@ -644,7 +651,9 @@ def attach_production_defense(
             )
         else:
             stations = build_defend_stations(target, tuple(produced_ids), simulation.game_map)
-            parameters_for_defend = DefendParameters(target, stations)
+            parameters_for_defend = DefendParameters(
+                target, stations, auto_repair=parameters.auto_repair
+            )
         defend.entity_ids = list(produced_ids)
         defend.parameters = parameters_for_defend
         for entity_id in produced_ids:
@@ -677,7 +686,7 @@ def assign_produced_patroller(
             production.priority,
             production.original_instruction,
             [entity_id],
-            PatrolParameters(target, waypoints),
+            PatrolParameters(target, waypoints, auto_repair=parameters.auto_repair),
         )
         simulation._activate(patrol, (entity_id,))
         parameters.patrol_automation_id = patrol.automation_id

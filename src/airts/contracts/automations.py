@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -17,6 +18,8 @@ from airts.contracts.spatial import (
 )
 from airts.world.map import GameMap
 from airts.world.units.catalog import EntityKind
+
+AUTO_REPAIR_HEALTH_THRESHOLD = 0.5
 
 
 class AutomationStatus(StrEnum):
@@ -82,12 +85,14 @@ class PatrolParameters:
     target: SpatialTarget
     waypoints: tuple[Point, ...]
     waypoint_indices: dict[str, int] = field(default_factory=dict)
+    auto_repair: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
             "target": target_to_dict(self.target),
             "waypoints": [[point.x, point.y] for point in self.waypoints],
             "waypoint_indices": dict(sorted(self.waypoint_indices.items())),
+            "auto_repair": self.auto_repair,
         }
 
 
@@ -98,6 +103,7 @@ class DefendParameters:
     gathering_point: bool = False
     deployment_slots: tuple[Point, ...] = ()
     assembly_radius: float = 0.0
+    auto_repair: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -108,6 +114,7 @@ class DefendParameters:
             "gathering_point": self.gathering_point,
             "deployment_slots": [[point.x, point.y] for point in self.deployment_slots],
             "assembly_radius": self.assembly_radius,
+            "auto_repair": self.auto_repair,
         }
 
 
@@ -130,6 +137,7 @@ class ProductionParameters:
     sequence: tuple[tuple[EntityKind, int], ...] = ()
     sequence_index: int = 0
     sequence_produced: int = 0
+    auto_repair: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -156,6 +164,7 @@ class ProductionParameters:
             "sequence": [[kind.value, quantity] for kind, quantity in self.sequence],
             "sequence_index": self.sequence_index,
             "sequence_produced": self.sequence_produced,
+            "auto_repair": self.auto_repair,
         }
 
     @property
@@ -562,6 +571,41 @@ def assign_formation_slots(
 
     match([key for key in positions if key not in assigned], list(free))
     return assigned
+
+
+def area_coverage_order(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    """Stable prefixes cover spatial halves before filling their finer subdivisions."""
+    pending = deque([list(points)])
+    ordered: list[Point] = []
+    origin = Point(
+        sum(p.x for p in points) / max(1, len(points)),
+        sum(p.y for p in points) / max(1, len(points)),
+    )
+    while pending:
+        group = pending.popleft()
+        if not group:
+            continue
+        minimum_x, maximum_x = min(p.x for p in group), max(p.x for p in group)
+        minimum_y, maximum_y = min(p.y for p in group), max(p.y for p in group)
+        center = Point((minimum_x + maximum_x) / 2, (minimum_y + maximum_y) / 2)
+        point = (
+            max(group, key=lambda p: (p.distance_to(origin), -p.y, -p.x))
+            if 0 < len(ordered) < 3
+            else min(group, key=lambda p: (p.distance_to(center), p.y, p.x))
+        )
+        ordered.append(point)
+        group.remove(point)
+        group.sort(
+            key=(lambda p: (p.x, p.y))
+            if maximum_x - minimum_x >= maximum_y - minimum_y
+            else (lambda p: (p.y, p.x))
+        )
+        middle = len(group) // 2
+        if middle:
+            pending.append(group[:middle])
+        if group[middle:]:
+            pending.append(group[middle:])
+    return tuple(ordered)
 
 
 def target_contains(target: SpatialTarget, point: Point) -> bool:

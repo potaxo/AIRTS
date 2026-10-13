@@ -62,6 +62,47 @@ def patrol_simulation(kind: str = "scout", *, enemy_x: float = 11.5) -> Simulati
 ROUTE = PolylineTarget((Point(4.5, 4.5), Point(20.5, 4.5)))
 
 
+@pytest.mark.parametrize("count", [48, 96])
+def test_small_crowded_patrol_keeps_turning_without_requiring_exact_endpoint_arrival(
+    count: int,
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "crowded_small_patrol",
+                "name": "Crowded small patrol",
+                "width": 50,
+                "height": 35,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"unit_{i:03d}",
+                        "kind": "scout",
+                        "position": [4.5 + i % 12 * 1.5, 4.5 + i // 12 * 1.5],
+                    }
+                    for i in range(count)
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    route = PolylineTarget(
+        (Point(27, 12), Point(29, 12), Point(29, 14), Point(27, 14), Point(27, 12))
+    )
+    result = simulation.execute(CreatePatrolCommand(ids, route))
+    assert result.accepted
+    parameters = patrol_parameters(simulation.automations[result.automation_id or ""])
+    visited = {key: set() for key in ids}
+    for _ in range(400):
+        simulation.advance()
+        for key in ids:
+            visited[key].add(parameters.waypoint_indices[key])
+        assert simulation._routes.automation_route_count <= Simulation.TOTAL_AUTOMATION_ROUTE_BUDGET
+    assert simulation.automations[result.automation_id or ""].status.value == "active"
+    assert all(len(indices) >= 3 for indices in visited.values())
+    assert all(simulation.assignments[key] == result.automation_id for key in ids)
+
+
 def test_patrol_chases_beyond_weapon_range_kills_and_replays() -> None:
     simulation = patrol_simulation()
     result = simulation.execute(CreatePatrolCommand(("unit",), ROUTE))
@@ -190,7 +231,7 @@ def test_builder_encounters_repairs_and_resumes_interrupted_leg(tmp_path: Path) 
     assert builder.repair_target_id is None
     assert builder.state is UnitState.PATROLLING
     assert any(
-        event.details["position"] == [20.5, 4.5]
+        Point(*event.details["position"]).distance_to(Point(20.5, 4.5)) <= 0.75
         for event in simulation.events.query(
             event_types=frozenset({EventType.MOVEMENT_COMPLETED}), subject_id="unit"
         )

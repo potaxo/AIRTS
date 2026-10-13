@@ -66,6 +66,12 @@ class ValidationFailure:
         }
 
 
+def validate_auto_repair(value: bool) -> ValidationFailure | None:
+    if not isinstance(value, bool):
+        return ValidationFailure(ValidationPhase.SCHEMA, "AUTO_REPAIR_NOT_BOOLEAN", "auto_repair")
+    return None
+
+
 def validate_priority(priority: int) -> ValidationFailure | None:
     if not -100 <= priority <= 100:
         return ValidationFailure(
@@ -94,6 +100,7 @@ class MoveCommand:
     target: Point
     owner_id: str = "player"
     gathering: bool = False
+    queued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +152,7 @@ class CreatePatrolCommand:
     priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
+    auto_repair: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +164,7 @@ class CreateDefendCommand:
     owner_id: str = "player"
     original_instruction: str = ""
     gathering_point: bool = False
+    auto_repair: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +180,7 @@ class CreateProductionCommand:
     continuous: bool = False
     defend_target: SpatialTarget | None = None
     patrol_target: SpatialTarget | None = None
+    auto_repair: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +299,12 @@ class DeleteSpatialReferenceCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class SetDeveloperModeCommand:
+    enabled: bool
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class SetSelectionCommand:
     entity_ids: tuple[str, ...] = ()
     point_ids: tuple[str, ...] = ()
@@ -306,6 +322,7 @@ class ModifyAutomationCommand:
     minimum_units: int | None = None
     target_count: int | None = None
     owner_id: str = "player"
+    auto_repair: bool | None = None
 
 
 Command = (
@@ -334,6 +351,7 @@ Command = (
     | DeleteRegionCommand
     | DeleteSpatialReferenceCommand
     | SetSelectionCommand
+    | SetDeveloperModeCommand
     | ModifyAutomationCommand
 )
 
@@ -347,6 +365,12 @@ class CommandResult:
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, SetDeveloperModeCommand):
+        return {
+            "type": "set_developer_mode",
+            "enabled": command.enabled,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, ReduceProductionCommand):
         return {
             "type": "reduce_production",
@@ -405,6 +429,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "target": None if command.target is None else target_to_dict(command.target),
             "minimum_units": command.minimum_units,
             "target_count": command.target_count,
+            "auto_repair": command.auto_repair,
             "owner_id": command.owner_id,
         }
     if isinstance(command, MoveCommand):
@@ -414,6 +439,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "target": [command.target.x, command.target.y],
             "owner_id": command.owner_id,
             **({"gathering": True} if command.gathering else {}),
+            **({"queued": True} if command.queued else {}),
         }
     if isinstance(command, AttackCommand | RepairBuildingCommand | ReclaimBuildingCommand):
         return {
@@ -451,6 +477,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "priority": command.priority,
             "owner_id": command.owner_id,
             "original_instruction": command.original_instruction,
+            "auto_repair": command.auto_repair,
         }
         if isinstance(command, CreateDefendCommand):
             data["gathering_point"] = command.gathering_point
@@ -467,6 +494,7 @@ def command_to_dict(command: Command) -> dict[str, object]:
                 else [command.rally_point.x, command.rally_point.y]
             ),
             "continuous": command.continuous,
+            "auto_repair": command.auto_repair,
             "defend_target": (
                 None if command.defend_target is None else target_to_dict(command.defend_target)
             ),
@@ -550,6 +578,8 @@ def command_from_dict(raw_data: object) -> Command:
     data = _mapping(raw_data, "command")
     command_type = data.get("type")
     owner_id = _string(data.get("owner_id", "player"), "owner_id")
+    if command_type == "set_developer_mode":
+        return SetDeveloperModeCommand(_boolean(data.get("enabled"), "enabled"), owner_id)
     if command_type == "create_spatial_reference":
         name = data.get("name")
         if name is not None and not isinstance(name, str):
@@ -591,6 +621,11 @@ def command_from_dict(raw_data: object) -> Command:
             _nullable_integer(data.get("minimum_units"), "minimum_units"),
             _nullable_integer(data.get("target_count"), "target_count"),
             owner_id,
+            auto_repair=(
+                None
+                if data.get("auto_repair") is None
+                else _boolean(data["auto_repair"], "auto_repair")
+            ),
         )
     if command_type == "move":
         return MoveCommand(
@@ -598,6 +633,7 @@ def command_from_dict(raw_data: object) -> Command:
             _point(data.get("target"), "target"),
             owner_id,
             gathering=_boolean(data.get("gathering", False), "gathering"),
+            queued=_boolean(data.get("queued", False), "queued"),
         )
     if command_type in {"attack", "repair_building", "reclaim_building"}:
         command_class = (
@@ -629,12 +665,18 @@ def command_from_dict(raw_data: object) -> Command:
         target = target_from_dict(data.get("target"))
         common = _automation_common(data, owner_id)
         if command_type == "create_patrol":
-            return CreatePatrolCommand(entity_ids, target, *common)
+            return CreatePatrolCommand(
+                entity_ids,
+                target,
+                *common,
+                auto_repair=_boolean(data.get("auto_repair", False), "auto_repair"),
+            )
         return CreateDefendCommand(
             entity_ids,
             target,
             *common,
             gathering_point=_boolean(data.get("gathering_point", False), "gathering_point"),
+            auto_repair=_boolean(data.get("auto_repair", False), "auto_repair"),
         )
     if command_type == "reduce_production":
         return ReduceProductionCommand(
@@ -665,6 +707,7 @@ def command_from_dict(raw_data: object) -> Command:
             continuous=_boolean(data.get("continuous", False), "continuous"),
             defend_target=defend_target,
             patrol_target=patrol_target,
+            auto_repair=_boolean(data.get("auto_repair", False), "auto_repair"),
         )
     if command_type == "create_production_batch":
         raw_sequence = _list(data.get("sequence"), "sequence")

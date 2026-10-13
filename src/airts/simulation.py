@@ -15,8 +15,10 @@ from airts.contracts.automations import (
     AutomationParameters,
     AutomationStatus,
     ConstructionParameters,
+    area_coverage_order,
     assign_formation_slots,
     target_center,
+    target_contains,
 )
 from airts.contracts.automations import (
     production_parameters as _production_parameters,
@@ -48,6 +50,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
     ValidationFailure,
@@ -108,6 +111,7 @@ class Simulation:
     DEFEND_RESPONSE_RADIUS = 4.0
     DEFEND_PURSUIT_RADIUS = 7.0
     PATROL_PURSUIT_RADIUS = 7.0
+    COMBAT_SUPPORT_RADIUS = 8.0
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
     DEFEND_FORMATION_TOLERANCE = 1.0
@@ -160,6 +164,8 @@ class Simulation:
         self.enemy_spawn_interval_ticks = enemy_spawn_interval_ticks
         self.enemy_spawn_cap = enemy_spawn_cap
         self.tick = 0
+        self.developer_mode = False
+        self.developer_income_ticks = 0
         self.entities = {
             spec.entity_id: Entity(
                 entity_id=spec.entity_id,
@@ -209,9 +215,9 @@ class Simulation:
             automation_budget=self.TOTAL_AUTOMATION_ROUTE_BUDGET,
             combat_budget=self.COMBAT_PATH_BUDGET,
         )
-        self._gathering_slot_cache: OrderedDict[tuple[SpatialTarget, float], _GatheringSlots] = (
-            OrderedDict()
-        )
+        self._gathering_slot_cache: OrderedDict[
+            tuple[SpatialTarget, float, bool], _GatheringSlots
+        ] = OrderedDict()
         self._gathering_reachable_cache: OrderedDict[SpatialTarget, BoolArray] = OrderedDict()
         warm_collision_kernel()
         warm_spatial_index()
@@ -340,6 +346,8 @@ class Simulation:
     def _execute_command(self, command: Command, *, record: bool) -> CommandResult:
         if record:
             self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
+        if isinstance(command, SetDeveloperModeCommand):
+            return command_handlers.set_developer_mode(self, command)
         if isinstance(command, CreateSpatialReferenceCommand):
             return spatial_commands.create_spatial_reference(self, command)
         if isinstance(command, EditSpatialReferenceCommand):
@@ -409,9 +417,11 @@ class Simulation:
             self._opponent_candidate_count = 0
             self._opponent_forecast_count = 0
             economy_system.generate_income(self)
+            economy_system.generate_developer_income(self)
             economy_system.spawn_ambient_enemy(self)
             if self.game_map.match_slots:
                 opponent_ai.drive_opponents(self)
+            movement_system.drive_move_queues(self)
             self._drive_automations()
             repair_system.drive_builders(self)
             reclamation_system.drive_reclamation(self)
@@ -442,6 +452,7 @@ class Simulation:
             if automation.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
                 continue
             if automation.kind in {AutomationKind.PATROL, AutomationKind.DEFEND}:
+                automation_execution.drive_auto_repair(self, automation)
                 if len(self.entities) != entity_count:
                     queries = automation_execution.AutomationQueries()
                     entity_count = len(self.entities)
@@ -571,8 +582,15 @@ class Simulation:
                 construction_system.start_next_construction(self)
 
     def _clear_removed_references(self, removed_ids: set[str]) -> None:
-        for entity in self.entities.values():
+        gatherings: dict[tuple[str, Point], list[str]] = {}
+        for key in sorted(self.entities):
+            entity = self.entities[key]
             if entity.attack_target_id in removed_ids:
+                if entity.attack_gather_point is not None:
+                    gatherings.setdefault((entity.owner_id, entity.attack_gather_point), []).append(
+                        entity.entity_id
+                    )
+                    entity.attack_gather_point = None
                 if entity.pursue_target:
                     entity.path.clear()
                     entity.move_target = None
@@ -596,6 +614,24 @@ class Simulation:
             if entity.last_attacker_id in removed_ids:
                 entity.last_attacker_id = None
                 entity.last_attacked_tick = None
+        for (_, point), ids in gatherings.items():
+            try:
+                destinations = self._allocate_destinations(tuple(ids), point, gathering=True)
+            except PathfindingError as error:
+                for key in ids:
+                    self.entities[key].state = UnitState.WAITING
+                    self.entities[key].move_queue[:] = [point]
+                    self.events.record(
+                        self.tick,
+                        EventType.PATHFINDING_FAILED,
+                        key,
+                        operation="attack_gather",
+                        reason=str(error),
+                    )
+                continue
+            for key in ids:
+                self.entities[key].move_queue[:] = [destinations[key]]
+                self.entities[key].state = UnitState.MOVING
 
     def snapshot(self) -> dict[str, object]:
         return self._domain_state() | {
@@ -632,6 +668,8 @@ class Simulation:
             },
             "visibility": self.visibility.to_dict(),
             "resources": dict(sorted(self.resources.items())),
+            "developer_mode": self.developer_mode,
+            "developer_income_ticks": self.developer_income_ticks,
             "spatial": self.spatial.to_dict(),
             "selection": self.selection.to_dict(),
             "projectiles": {
@@ -750,10 +788,11 @@ class Simulation:
         unit_radius: float,
         *,
         require_count: bool = True,
+        spread: bool = False,
     ) -> tuple[Point, ...]:
         if count <= 0:
             return ()
-        key = (target, unit_radius)
+        key = (target, unit_radius, spread)
         entry = self._gathering_slot_cache.get(key)
         if entry is not None:
             self._gathering_slot_cache.move_to_end(key)
@@ -773,6 +812,13 @@ class Simulation:
             )
             previous_radius = entry.radius if entry is not None else -1.0
             search_radius = min(map_radius, max(spacing * sqrt(count), previous_radius * 2))
+            if spread:
+                extent = (
+                    target.radius
+                    if isinstance(target, PointTarget)
+                    else max(p.distance_to(center) for p in target.points)
+                )
+                search_radius = min(map_radius, max(search_radius, extent))
             # Each disk is complete within its radius. Expanding only the missing
             # annulus preserves the full-map nearest prefix and established slots.
             while True:
@@ -812,6 +858,10 @@ class Simulation:
                     break
                 previous_radius = search_radius
                 search_radius = min(map_radius, search_radius * 2)
+            if spread:
+                interior = tuple(p for p in cached if target_contains(target, p))
+                outside = tuple(p for p in cached if not target_contains(target, p))
+                cached = area_coverage_order(interior) + outside
             if len(cached) <= self.GATHERING_CACHE_SLOT_LIMIT:
                 self._gathering_slot_cache[key] = _GatheringSlots(search_radius, cached)
                 self._gathering_slot_cache.move_to_end(key)

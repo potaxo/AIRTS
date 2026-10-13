@@ -29,6 +29,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
     command_from_dict,
@@ -41,12 +42,18 @@ from airts.world.units.catalog import EntityKind
 @pytest.mark.parametrize(
     "command",
     [
+        SetDeveloperModeCommand(True),
+        SetDeveloperModeCommand(False),
         MoveCommand(("unit",), Point(3, 4)),
         MoveCommand(("unit",), Point(3, 4), gathering=True),
         StopCommand(("unit",)),
         HoldPositionCommand(("unit",)),
         RemoveEntityCommand("unit", "DESTROYED"),
         CreatePatrolCommand(("unit",), PointTarget(Point(4, 4)), priority=4),
+        CreatePatrolCommand(("unit",), PointTarget(Point(4, 4)), auto_repair=True),
+        CreateDefendCommand(("unit",), PointTarget(Point(4, 4)), auto_repair=True),
+        CreateProductionCommand("factory", EntityKind.SCOUT, 1, auto_repair=True),
+        ModifyAutomationCommand("automation_001", auto_repair=False),
         CreateDefendCommand(
             ("unit",),
             PolylineTarget((Point(1, 1), Point(5, 1))),
@@ -91,6 +98,16 @@ def test_command_schemas_round_trip(command: Command) -> None:
     ("data", "message"),
     [
         pytest.param(
+            {"type": "set_developer_mode", "enabled": 1},
+            "enabled must be a boolean",
+            id="developer-mode-non-boolean",
+        ),
+        pytest.param(
+            {"type": "set_developer_mode"},
+            "enabled must be a boolean",
+            id="developer-mode-missing-enabled",
+        ),
+        pytest.param(
             {"type": "move", "entity_ids": ["unit"], "target": [3, 4], "gathering": 1},
             "gathering must be a boolean",
             id="malformed-move-gathering",
@@ -114,4 +131,20 @@ def test_command_schemas_round_trip(command: Command) -> None:
 )
 def test_command_schema_rejects_unknown_and_malformed_data(data: object, message: str) -> None:
     with pytest.raises(ValueError, match=message):
+        command_from_dict(data)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        CreatePatrolCommand(("unit",), PointTarget(Point(4, 4))),
+        CreateDefendCommand(("unit",), PointTarget(Point(4, 4))),
+        CreateProductionCommand("factory", EntityKind.SCOUT, 1),
+        ModifyAutomationCommand("automation_001", auto_repair=True),
+    ],
+)
+def test_auto_repair_commands_reject_non_boolean_choices(command: Command) -> None:
+    data = command_to_dict(command)
+    data["auto_repair"] = "false"
+    with pytest.raises(ValueError, match="auto_repair must be a boolean"):
         command_from_dict(data)

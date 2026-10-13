@@ -23,6 +23,7 @@ class EntityProfile:
     attack_range: float = 0.0
     projectile_speed: float = 0.0
     attack_interval_ticks: int = 10
+    combat_support: bool = False
     production_cost: int = 0
     construction_cost: int = 0
     build_speed: float = 0.0
@@ -42,6 +43,8 @@ class EntityProfile:
             raise ValueError("entity profile attack_interval_ticks must be a positive integer")
         if self.attack_damage > 0 and self.projectile_speed == 0:
             raise ValueError("armed entity profile requires a positive projectile_speed")
+        if self.combat_support and (not self.movable or self.attack_damage <= 0):
+            raise ValueError("combat support requires an armed mobile unit")
 
     @property
     def movable(self) -> bool:

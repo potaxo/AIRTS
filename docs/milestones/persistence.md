@@ -52,15 +52,26 @@ diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v13 | Current write/read format; includes construction, recovery and reclamation intent |
-| Match save v5 | Current write/read format, including command-center production and reclamation intent |
-| Sandbox replay v17 / match replay v10 | Current diagnostic formats and exact verification |
+| Sandbox save v16 | Current write/read format; includes developer mode, its income timer and per-assignment auto repair |
+| Match save v8 | Current write/read format, including developer mode, its income timer and per-assignment auto repair |
+| Sandbox replay v21 / match replay v14 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves require construction progress and site references and validate owner, kind,
 position, payment and live jobs. Match results use current command-center production rules.
 The adapter's exact tags/validators are authoritative. Legacy migration branches are removed;
 old sandbox and match saves are rejected before world reconstruction.
+
+Developer mode and its partial-second tick counter are authoritative save/snapshot state.
+Current formats require a boolean toggle and a counter within the enabled one-second interval;
+disabled mode requires a zero counter. Toggle commands remain recorded and replayable, and exact
+verification includes the bonus income events and timer. Earlier save/replay tags are rejected.
+
+Patrol, defense and production parameters require a boolean auto-repair choice. Saves retain it
+alongside emergency repair phases and suspended assignments. The new-area UI preference remains
+local presentation state. Generated automatic repair commands are regenerated during replay,
+not recorded again as external inputs; creation and toggle commands retain the player's choice.
+Earlier schema tags are explicitly rejected without migration; current replay verification remains active.
 
 Relative mass is immutable profile data resolved from the saved entity kind, not new per-entity
 state. Current saves continue with current profile physics.
@@ -72,6 +83,17 @@ control. Saves retain approaching builders and fixed turret attack orders. Sandb
 match replay v9 predate range-based repair arrival and are explicitly rejected. New kinds and cadence
 resolve through immutable profiles, while refunds/removal are regenerated from reclaim commands;
 internal removal is never recorded a second time as an external command.
+
+The current command update retains per-unit FIFO movement destinations, explicit attack gathering
+positions, and capability-based combat support. Patrol arrival and area-defense distribution change
+execution trajectories and events; older save/replay tags are rejected without migration. Current
+command recording and exact verification remain enabled, with queue/combat continuation tests.
+
+Terrain-adjusted speed derives from the saved map and immutable mobile profile each tick;
+it adds no authoritative save state. Current replay recording and exact verification remain
+active. Sandbox replay v17 and match replay v10 predate terrain-adjusted movement and are rejected
+explicitly, since their recorded trajectories and events may differ; verify those recordings
+with their original implementation.
 
 ## Save execution and management
 

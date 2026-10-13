@@ -38,6 +38,8 @@ class Entity:
     move_target: Point | None = None
     path: list[Point] = field(default_factory=list)
     path_cost: float = 0.0
+    move_queue: list[Point] = field(default_factory=list)
+    attack_gather_point: Point | None = None
     attack_target_id: str | None = None
     pursue_target: bool = False
     repair_target_id: str | None = None
@@ -111,6 +113,12 @@ class Entity:
             ),
             "path": [[point.x, point.y] for point in self.path],
             "path_cost": self.path_cost,
+            "move_queue": [[p.x, p.y] for p in self.move_queue],
+            "attack_gather_point": (
+                None
+                if self.attack_gather_point is None
+                else [self.attack_gather_point.x, self.attack_gather_point.y]
+            ),
             "attack_target_id": self.attack_target_id,
             "pursue_target": self.pursue_target,
             "repair_target_id": self.repair_target_id,

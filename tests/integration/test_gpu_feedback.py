@@ -8,10 +8,13 @@ from unittest.mock import MagicMock, patch
 import pygame
 import pytest
 
-from airts.contracts.commands import CreateConstructionCommand
+from airts.contracts.commands import CreateConstructionCommand, RepairBuildingCommand
 from airts.contracts.spatial import Point, PolygonRegion
 from airts.presentation.app import AirtsApp
+from airts.presentation.build_placement import BuildingLineDraft
 from airts.presentation.gpu_feedback import GPUFeedback, _triangles
+from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import work_links
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -92,6 +95,80 @@ def test_gpu_selection_preview_remains_visible_when_pointer_enters_command_bar()
             ((1 + pointer.x) / 2, (1 + pointer.y) / 2, (pointer.x - 1) / 2, (pointer.y - 1) / 2)
         )
         assert tuple(selection[14:18]) == pytest.approx((245 / 255, 245 / 255, 245 / 255, 1))
+    finally:
+        feedback.release()
+
+
+def test_gpu_packs_thick_builder_and_hub_work_beams_without_changing_state() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "work_beams",
+                "name": "Work beams",
+                "width": 64,
+                "height": 64,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "builder", "kind": "builder", "position": [2.5, 4.5]},
+                    {"id": "repairer", "kind": "builder", "position": [16.5, 5.5]},
+                    {"id": "factory", "kind": "factory", "position": [10, 4]},
+                    {"id": "hub", "kind": "repair_hub", "position": [20, 4]},
+                    {"id": "tank", "kind": "light_tank", "position": [18.5, 5.5]},
+                ],
+            }
+        )
+    )
+    simulation.entities["tank"].health = 20
+    simulation.entities["factory"].health = 200
+    assert simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.TURRET, Point(6, 4))
+    ).accepted
+    assert simulation.execute(RepairBuildingCommand(("repairer",), "factory")).accepted
+    simulation.advance()
+    app = AirtsApp(simulation)
+    feedback = mocked_feedback()
+    before = simulation.export_state()
+    try:
+        feedback._build(app, None)
+        values = array("f")
+        values.frombytes(feedback.lines.write.call_args.args[0])
+        beams = [
+            tuple(values[i : i + 9])
+            for i in range(0, len(values), 9)
+            if tuple(values[i + 4 : i + 7]) == pytest.approx(tuple(c / 255 for c in REPAIR_COLOR))
+        ]
+        assert len(beams) == 3
+        expected = tuple(work_links(simulation))
+        for beam, (source, target) in zip(beams, expected, strict=True):
+            assert beam[:4] == (source.x, source.y, target.x, target.y)
+            assert beam[8] == WORK_BEAM_WIDTH
+        assert simulation.export_state() == before
+    finally:
+        feedback.release()
+
+
+def test_gpu_building_line_preview_tracks_draft_without_dirtying_ui_texture() -> None:
+    app = feedback_scene()
+    app.placement_kind = EntityKind.TURRET
+    app.building_line_draft = BuildingLineDraft(
+        EntityKind.TURRET, ("builder",), Point(6, 24), Point(14, 24)
+    )
+    feedback = mocked_feedback()
+    try:
+        feedback.draw(app, app.window_size)
+        key = app._opengl_overlay_key()
+        values = array("f")
+        values.frombytes(feedback.shapes.write.call_args.args[0])
+        preview = [
+            tuple(values[i : i + 18]) for i in range(0, len(values), 18) if values[i + 13] == 3
+        ]
+        assert [v[:4] for v in preview] == [(x + 1, 25, 1, 1) for x in (6, 8, 10, 12, 14)]
+        app.building_line_draft.end = Point(10, 24)
+        feedback.draw(app, app.window_size)
+        assert app._opengl_overlay_key() == key
+        values = array("f")
+        values.frombytes(feedback.shapes.write.call_args.args[0])
+        assert sum(values[i + 13] == 3 for i in range(0, len(values), 18)) == 3
     finally:
         feedback.release()
 

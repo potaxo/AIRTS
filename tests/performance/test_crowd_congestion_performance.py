@@ -8,7 +8,7 @@ from time import perf_counter
 import pygame
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.contracts.automations import DefendParameters
+from airts.contracts.automations import AutomationStatus, DefendParameters, patrol_parameters
 from airts.contracts.commands import (
     AttackCommand,
     CreateDefendCommand,
@@ -269,7 +269,7 @@ def test_tiny_defend_area_allocates_distinct_physical_stations() -> None:
     )
 
 
-def test_tiny_patrol_area_uses_a_collision_safe_group_formation() -> None:
+def test_tiny_patrol_area_follows_route_points_and_keeps_turning_under_crowding() -> None:
     simulation, entity_ids = _crowd_simulation(128)
     target = rectangle_region(Point(60, 28), Point(62, 30))
     result = simulation.execute(CreatePatrolCommand(entity_ids, target))
@@ -280,15 +280,28 @@ def test_tiny_patrol_area_uses_a_collision_safe_group_formation() -> None:
     assert result.accepted
     assert all(destination is not None for destination in destinations)
     concrete = tuple(destination for destination in destinations if destination is not None)
+    automation = simulation.automations[result.automation_id or ""]
+    parameters = patrol_parameters(automation)
     assert len(set(concrete)) == len(entity_ids)
-    assert (
-        min(
-            first.distance_to(second)
-            for index, first in enumerate(concrete)
-            for second in concrete[index + 1 :]
-        )
-        >= MINIMUM_SETTLED_SCOUT_SPACING
-    )
+    visited = {key: set() for key in entity_ids}
+    for _ in range(400):
+        previous = {key: simulation.entities[key].position for key in entity_ids}
+        simulation.advance()
+        for key in entity_ids:
+            visited[key].add(parameters.waypoint_indices[key])
+            assert simulation.entities[key].position.distance_to(previous[key]) <= (
+                simulation.entities[key].speed * Simulation.TICK_SECONDS + 1e-8
+            )
+        index = SpatialIndex({key: simulation.entities[key].position for key in entity_ids})
+        for first, second in index.candidate_pairs(SCOUT_CONTACT_DISTANCE):
+            assert (
+                simulation.entities[first].position.distance_to(
+                    simulation.entities[second].position
+                )
+                >= SCOUT_CONTACT_DISTANCE - 1e-8
+            )
+    assert automation.status is AutomationStatus.ACTIVE
+    assert all(len(indices) >= 3 for indices in visited.values())
 
 
 def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
@@ -313,7 +326,7 @@ def test_crowded_waypoint_lookahead_preserves_the_bridge_turn() -> None:
     assert mover.path[0] == Point(57.5, 35.5)
 
 
-def test_large_scout_move_flows_past_a_yielding_enemy_heavy_without_jitter() -> None:
+def test_large_scout_move_flows_past_a_yielding_friendly_heavy_without_jitter() -> None:
     scout_count = 152
     scout_ids = tuple(f"scout_{index:04d}" for index in range(scout_count))
     simulation = Simulation(
@@ -337,7 +350,7 @@ def test_large_scout_move_flows_past_a_yielding_enemy_heavy_without_jitter() -> 
                     {
                         "id": "stationary_heavy",
                         "kind": "heavy_tank",
-                        "owner": "enemy",
+                        "owner": "player",
                         "position": [17.5, 20.5],
                     },
                 ],

@@ -147,6 +147,8 @@ def activate(
     suspend: bool = False,
     assign_entities: bool = True,
 ) -> None:
+    if assign_entities and not suspend:
+        construction.cancel_queued_construction(simulation, entity_ids)
     simulation.automations[automation.automation_id] = automation
     simulation._rebuild_live_automations((*simulation._live_automation_candidates, automation))
     simulation._next_automation_number += 1
@@ -278,11 +280,16 @@ def assign(
 
 
 def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) -> None:
+    construction.cancel_queued_construction(simulation, entity_ids)
     affected: dict[str, set[str]] = {}
     previous: dict[str, tuple[str | None, str | None]] = {}
     for entity_id in entity_ids:
         automation_id = simulation.assignments.pop(entity_id, None)
         entity = simulation.entities[entity_id]
+        entity.move_queue.clear()
+        entity.attack_gather_point = None
+        entity.attack_target_id = None
+        entity.pursue_target = False
         if entity.kind is EntityKind.BUILDER:
             entity.repair_target_id = None
             entity.reclaim_target_id = None

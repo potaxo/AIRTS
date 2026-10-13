@@ -54,6 +54,7 @@ from airts.contracts.commands import (
     MoveCommand,
     PauseAutomationCommand,
     RemoveEntityCommand,
+    SetDeveloperModeCommand,
     SetSelectionCommand,
 )
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
@@ -61,8 +62,83 @@ from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
 from airts.simulation import Simulation
 from airts.world.entities import UnitState
-from airts.world.map import GameMap, load_example_map
+from airts.world.map import GameMap, load_example_map, load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+@pytest.mark.parametrize("match", [False, True], ids=["sandbox", "match"])
+def test_developer_mode_save_retains_partial_second_and_replays(
+    match: bool, tmp_path: Path
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "developer_mode_save",
+                "name": "Developer mode save",
+                "width": 32,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "player_center", "kind": "command_center", "position": [0, 0]},
+                    {
+                        "id": "enemy_center",
+                        "kind": "command_center",
+                        "owner": "enemy",
+                        "position": [24, 0],
+                    },
+                ],
+                **(
+                    {
+                        "match_slots": [
+                            {"owner": "player", "controller": "player", "team": 1},
+                            {"owner": "enemy", "controller": "ai", "team": 2},
+                        ]
+                    }
+                    if match
+                    else {}
+                ),
+            }
+        )
+    )
+    simulation.advance(3)
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    simulation.advance(7)
+    balance = simulation.resources["player"]
+    path = tmp_path / "developer-mode.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    assert restored.developer_mode
+    assert restored.developer_income_ticks == 7
+    assert restored.export_state() == simulation.export_state()
+    for instance in (simulation, restored):
+        instance.advance(2)
+        assert instance.resources["player"] == balance
+        instance.advance()
+        assert instance.resources["player"] == balance + 2000
+        assert instance.execute(SetDeveloperModeCommand(False)).accepted
+        instance.advance(20)
+        assert instance.resources["player"] == balance + 2000
+    assert restored.export_state() == simulation.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+@pytest.mark.parametrize(
+    ("mode", "ticks"),
+    [(1, 0), (None, 0), (True, True), (True, -1), (True, 10), (True, 6), (False, 1)],
+)
+def test_save_rejects_invalid_developer_income_state(mode: object, ticks: object) -> None:
+    simulation = builder_factory_simulation()
+    simulation.advance(5)
+    state = simulation.export_state()
+    state.update(developer_mode=mode, developer_income_ticks=ticks)
+    with pytest.raises(PersistenceError, match="developer"):
+        load_simulation_data(
+            {
+                "schema": SAVE_SCHEMA,
+                "map": simulation.game_map.to_dict(),
+                "state": state,
+            }
+        )
 
 
 def test_save_capture_defers_packed_history_and_isolated_state_survives_play(
@@ -432,6 +508,41 @@ def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) ->
         )
 
 
+@pytest.mark.parametrize(
+    "entity_id,field,value",
+    [
+        ("builder", "move_queue", None),
+        ("builder", "move_queue", [[-1, 4]]),
+        ("builder", "move_queue", [[20.5, 20.5]]),
+        ("builder", "move_queue", [[float("nan"), 4]]),
+        ("factory", "move_queue", [[12, 12]]),
+        ("scout", "attack_gather_point", [12, 12]),
+        ("builder", "attack_gather_point", [12, 12]),
+    ],
+)
+def test_save_rejects_invalid_movement_queue_and_attack_gathering_intent(
+    entity_id: str, field: str, value: object
+) -> None:
+    simulation = builder_factory_simulation()
+    state = simulation.export_state()
+    state["entities"][entity_id][field] = value
+    with pytest.raises(PersistenceError):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+def test_save_rejects_direct_queue_conflicting_with_automation_control() -> None:
+    simulation = builder_factory_simulation()
+    assert simulation.execute(CreatePatrolCommand(("scout",), PointTarget(Point(12, 12)))).accepted
+    state = simulation.export_state()
+    state["entities"]["scout"]["move_queue"] = [[14, 14]]
+    with pytest.raises(PersistenceError, match="conflicts with automation control"):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
 def test_modified_automation_round_trips_without_a_new_lifecycle_transition(
     make_map: Callable[[int], GameMap], tmp_path: Path
 ) -> None:
@@ -679,6 +790,40 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
     ]
 
     _assert_continues_identically(simulation, restored, 25)
+
+
+def test_terrain_speed_continues_after_save_and_replay(tmp_path: Path) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "saved_terrain_speed",
+                "name": "Saved terrain speed",
+                "width": 24,
+                "height": 12,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [[4, 0, 3, 12, "forest"], [7, 0, 4, 12, "road"]],
+                },
+                "entities": [{"id": "unit", "kind": "scout", "position": [2.5, 5.5]}],
+            }
+        )
+    )
+    destination = Point(20.5, 5.5)
+    assert simulation.execute(MoveCommand(("unit",), destination)).accepted
+    simulation.advance(7)
+    path = tmp_path / "terrain-speed.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    for current in (simulation, restored):
+        unit = current.entities["unit"]
+        start = unit.position
+        assert current.game_map.terrain_at(start).value == "forest"
+        current.advance()
+        assert unit.position.distance_to(start) == pytest.approx(1 / 3)
+    _assert_continues_identically(simulation, restored, 40)
+    assert simulation.entities["unit"].position == destination
+    assert not simulation.entities["unit"].path
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
 def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:

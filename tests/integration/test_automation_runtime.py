@@ -38,6 +38,54 @@ from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
 
+def test_defend_dispatch_from_shared_anchor_cell_reaches_assigned_station() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "same_cell_defense_anchor",
+                "name": "Same-cell defense anchor",
+                "width": 12,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": [[5, 0, 1, 12, "forest"]]},
+                "entities": [
+                    {"id": "first", "kind": "scout", "position": [2.5, 4.5]},
+                    {"id": "second", "kind": "scout", "position": [4.75, 4.5]},
+                ],
+            }
+        )
+    )
+    anchor, destination = Point(4.25, 4.5), Point(6.75, 4.5)
+    result = simulation.execute(
+        CreateDefendCommand(("first", "second"), PolylineTarget((anchor, destination)))
+    )
+    assert result.accepted and result.automation_id is not None
+    automation = simulation.automations[result.automation_id]
+    assert isinstance(automation.parameters, DefendParameters)
+    assert automation.parameters.stations == {"first": anchor, "second": destination}
+    unit = simulation.entities["second"]
+    assert simulation.game_map.cell_for(unit.position) == simulation.game_map.cell_for(anchor)
+    assert unit.position != anchor
+
+    simulation.advance()
+
+    event = next(
+        event
+        for event in simulation.events.events
+        if event.event_type is EventType.PATH_COMPUTED and event.subject_id == "second"
+    )
+    cells = event.details["cells"]
+    assert cells == [[4, 4], [5, 4], [6, 4]]
+    assert event.details["cost"] == sum(
+        simulation.game_map.terrain_at_cell(tuple(cell)).movement_cost for cell in cells[1:]
+    )
+    for _ in range(40):
+        simulation.advance()
+    assert automation.status is AutomationStatus.ACTIVE
+    assert simulation.assignments["second"] == automation.automation_id
+    assert unit.defend_arrived and not unit.path
+    assert unit.position.distance_to(destination) <= simulation.DEFEND_STATION_TOLERANCE
+
+
 def test_defenses_share_enemy_queries_by_owner_and_refresh_each_tick() -> None:
     simulation = Simulation(
         load_map_data(
@@ -326,6 +374,90 @@ def test_defend_distributes_units_across_exact_area_stations() -> None:
     assert all(
         simulation.entities[entity_id].state is UnitState.DEFENDING for entity_id in stations
     )
+
+
+def test_direct_movement_queue_gets_route_admission_before_background_defenses() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "human_queue_admission",
+                "name": "Human queue admission",
+                "width": 80,
+                "height": 40,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"scout_{i:03d}",
+                        "kind": "scout",
+                        "position": [2.5 + i % 16, 2.5 + i // 16],
+                    }
+                    for i in range(160)
+                ]
+                + [{"id": "builder", "kind": "builder", "position": [30.5, 5.5]}],
+            }
+        )
+    )
+    scouts = tuple(key for key in simulation.entities if key != "builder")
+    target = rectangle_region(Point(50, 20), Point(76, 36))
+    for group in (scouts[:80], scouts[80:]):
+        assert simulation.execute(CreateDefendCommand(group, target)).accepted
+    assert simulation.execute(MoveCommand(("builder",), Point(30.8, 5.5), queued=True)).accepted
+    assert simulation.execute(MoveCommand(("builder",), Point(35.5, 5.5), queued=True)).accepted
+    simulation.advance(2)
+    assert simulation.entities["builder"].move_target == Point(35.5, 5.5)
+    assert simulation.entities["builder"].path
+    assert simulation._routes.automation_route_count <= Simulation.TOTAL_AUTOMATION_ROUTE_BUDGET
+
+
+def test_area_defense_covers_interior_and_extent_while_gathering_stays_compact() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "area_coverage",
+                "name": "Area coverage",
+                "width": 50,
+                "height": 40,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {
+                        "id": f"unit_{i:02d}",
+                        "kind": "scout",
+                        "position": [2.5 + i % 4, 2.5 + i // 4],
+                    }
+                    for i in range(16)
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    target = rectangle_region(Point(20, 10), Point(44, 34))
+    result = simulation.execute(CreateDefendCommand(ids, target))
+    assert result.accepted
+    stations = simulation.automations[result.automation_id or ""].parameters
+    assert isinstance(stations, DefendParameters)
+    points = tuple(stations.stations.values())
+    assert all(target.contains(p) for p in points)
+    assert max(p.x for p in points) - min(p.x for p in points) > 20
+    assert max(p.y for p in points) - min(p.y for p in points) > 18
+    assert (
+        max(
+            min(Point(x, y).distance_to(p) for p in points)
+            for x in range(20, 45, 6)
+            for y in range(10, 35, 6)
+        )
+        < 8
+    )
+    assert any(p.distance_to(target.centroid) < 2 for p in points)
+    assert all(
+        any((p.x >= 32) == right and (p.y >= 22) == bottom for p in points)
+        for right in (False, True)
+        for bottom in (False, True)
+    )
+    result = simulation.execute(CreateDefendCommand(ids, target, gathering_point=True))
+    assert result.accepted
+    compact = simulation.automations[result.automation_id or ""].parameters
+    assert isinstance(compact, DefendParameters)
+    assert max(p.distance_to(target.centroid) for p in compact.stations.values()) < 4
 
 
 def test_gathering_reinforcement_fills_center_before_outer_slots() -> None:

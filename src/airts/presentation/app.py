@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from enum import StrEnum
 from logging import getLogger
-from math import hypot
+from math import floor, hypot
 from pathlib import Path
 from time import perf_counter
 
@@ -15,9 +15,12 @@ import pygame
 
 from airts.adapters.persistence import PersistenceError, capture_save, load_simulation, write_save
 from airts.contracts.automations import (
+    AUTO_REPAIR_HEALTH_THRESHOLD,
     AutomationKind,
     ConstructionParameters,
     DefendParameters,
+    PatrolParameters,
+    ProductionParameters,
     target_center,
 )
 from airts.contracts.commands import (
@@ -40,6 +43,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
 )
@@ -54,7 +58,7 @@ from airts.contracts.spatial import (
     rectangle_region,
     simplify_freehand,
 )
-from airts.presentation.build_placement import BuildingLineDraft
+from airts.presentation.build_placement import BuildingLineDraft, building_line_previews
 from airts.presentation.camera import Camera
 from airts.presentation.lobby import Lobby
 from airts.presentation.metrics import PresentationMetrics, PresentationProfiler
@@ -670,8 +674,8 @@ class AirtsApp:
         if self.left_panel_rect.collidepoint(position) or self.right_panel_rect.collidepoint(
             position
         ):
-            if button == 1:
-                self._handle_panel_click(position)
+            if button in {1, 3}:
+                self._handle_panel_click(position, button=button)
             return
         if self.command_bar_rect.collidepoint(position):
             if button == 1:
@@ -680,6 +684,10 @@ class AirtsApp:
         if not self._in_canvas(position):
             return
         point = self._map_point(position)
+        try:
+            shift_down = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        except pygame.error:
+            shift_down = False
         if button == 1 and self.reclaim_mode:
             targets = sorted(
                 (distance, entity.entity_id)
@@ -765,6 +773,10 @@ class AirtsApp:
                 self.notice = "Enemy units cannot receive orders."
                 return
             entity_ids = tuple(sorted(self.selected_entities))
+            if shift_down:
+                result = self.simulation.execute(MoveCommand(entity_ids, point, queued=True))
+                self.notice = "Movement waypoint queued." if result.accepted else result.reason
+                return
             hits = sorted(
                 (distance, entity.entity_id)
                 for entity in self.simulation.entities.values()
@@ -798,7 +810,11 @@ class AirtsApp:
                 if self.simulation.entities[key].kind is EntityKind.BUILDER
             )
             command: AttackCommand | MoveCommand | RepairBuildingCommand
-            if enemy_id is not None:
+            if gathering:
+                assert last_move_click is not None
+                point = last_move_click[1]
+                command = MoveCommand(entity_ids, point, gathering=True)
+            elif enemy_id is not None:
                 armed = tuple(
                     key
                     for key in entity_ids
@@ -814,14 +830,10 @@ class AirtsApp:
                 and hit.health < hit.kind.profile.max_health
             ):
                 command = RepairBuildingCommand(repair_builders, hit.entity_id)
-            elif gathering:
-                assert last_move_click is not None
-                point = last_move_click[1]
-                command = MoveCommand(entity_ids, point, gathering=True)
             else:
                 command = MoveCommand(entity_ids, point)
             result = self.simulation.execute(command)
-            if result.accepted and isinstance(command, MoveCommand) and not gathering:
+            if result.accepted and not gathering:
                 self._last_move_click = (entity_ids, point, click_tick)
             self.notice = "Command issued." if result.accepted else result.reason
             return
@@ -918,7 +930,7 @@ class AirtsApp:
     def _queue_building_line(self, draft: BuildingLineDraft) -> None:
         accepted = 0
         rejected = 0
-        for position in draft.positions():
+        for position, _ in building_line_previews(self.simulation, draft):
             result = self.simulation.execute(
                 CreateConstructionCommand(
                     draft.builder_ids[0],
@@ -976,9 +988,7 @@ class AirtsApp:
                     and click_tick - self._last_entity_click[1] <= self.DOUBLE_CLICK_MS
                 ):
                     entity = self.simulation.entities[clicked]
-                    self._select_all_visible_kind(
-                        entity.kind, hostile=self.simulation.are_hostile(entity.owner_id, "player")
-                    )
+                    self._select_all_visible_kind(entity.kind, owner_id=entity.owner_id)
                     self._last_entity_click = None
                     return
                 self._last_entity_click = (clicked, click_tick)
@@ -1131,15 +1141,11 @@ class AirtsApp:
         self._selection_changed()
         self.notice = f"Selected {len(self.selected_entities)} {kind.value} unit(s)."
 
-    def _select_all_visible_kind(self, kind: EntityKind, *, hostile: bool = False) -> None:
+    def _select_all_visible_kind(self, kind: EntityKind, *, owner_id: str = "player") -> None:
         self.selected_entities = {
             entity_id
             for entity_id, entity in self.simulation.entities.items()
-            if (
-                self.simulation.are_hostile(entity.owner_id, "player")
-                if hostile
-                else entity.owner_id == "player"
-            )
+            if entity.owner_id == owner_id
             and entity.kind is kind
             and self.canvas_rect.collidepoint(self.screen_point(entity.selection_position))
         }
@@ -1147,7 +1153,9 @@ class AirtsApp:
             next(iter(self.selected_entities)) if len(self.selected_entities) == 1 else None
         )
         self._selection_changed()
-        self.notice = f"Selected all visible {'enemy ' if hostile else ''}{kind.value} units."
+        self.notice = (
+            f"Selected all visible {'enemy ' if owner_id != 'player' else ''}{kind.value} units."
+        )
 
     def _name_selected_region(self) -> None:
         if len(self.selected_regions) != 1:
@@ -1204,7 +1212,11 @@ class AirtsApp:
             self.notice = "Draw a point, line, rectangle, or freehand area first."
             return
         result = self.simulation.execute(
-            CreatePatrolCommand(tuple(sorted(self.selected_entities)), self.active_target)
+            CreatePatrolCommand(
+                tuple(sorted(self.selected_entities)),
+                self.active_target,
+                auto_repair=self.automation_panel.new_area_auto_repair,
+            )
         )
         if result.accepted:
             self.automation_panel.selected_id = result.automation_id
@@ -1218,7 +1230,11 @@ class AirtsApp:
             self.notice = "Draw a spatial target before creating a defense automation."
             return
         result = self.simulation.execute(
-            CreateDefendCommand(tuple(sorted(self.selected_entities)), self.active_target)
+            CreateDefendCommand(
+                tuple(sorted(self.selected_entities)),
+                self.active_target,
+                auto_repair=self.automation_panel.new_area_auto_repair,
+            )
         )
         self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
         if result.accepted:
@@ -1239,7 +1255,11 @@ class AirtsApp:
             return
         results = [
             self.simulation.execute(
-                ModifyAutomationCommand(loop.automation_id, target=self.active_target)
+                ModifyAutomationCommand(
+                    loop.automation_id,
+                    target=self.active_target,
+                    auto_repair=self.automation_panel.new_area_auto_repair,
+                )
             )
             for loop in loops
             if loop is not None
@@ -1281,7 +1301,9 @@ class AirtsApp:
             for entity_id in sorted(self.selected_entities)
             if self.simulation.entities[entity_id].is_movable
         )
-        result = self.simulation.execute(CreateRepairAndReturnCommand(units, health_threshold=0.5))
+        result = self.simulation.execute(
+            CreateRepairAndReturnCommand(units, health_threshold=AUTO_REPAIR_HEALTH_THRESHOLD)
+        )
         self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
         if result.accepted:
             self.automation_panel.selected_id = result.automation_id
@@ -1489,6 +1511,28 @@ class AirtsApp:
             if action == "close_automation_details":
                 self.automation_panel.details_open = False
                 return
+            if action == "toggle_new_area_auto_repair":
+                self.automation_panel.new_area_auto_repair = (
+                    not self.automation_panel.new_area_auto_repair
+                )
+                enabled = self.automation_panel.new_area_auto_repair
+                self.notice = f"New areas: auto repair {'ON' if enabled else 'OFF'} below 50% HP."
+                return
+            if action.startswith("toggle_auto_repair:"):
+                automation_id = action.partition(":")[2]
+                automation = self.simulation.automations.get(automation_id)
+                if automation is None or not isinstance(
+                    automation.parameters,
+                    PatrolParameters | DefendParameters | ProductionParameters,
+                ):
+                    return
+                result = self.simulation.execute(
+                    ModifyAutomationCommand(
+                        automation_id, auto_repair=not automation.parameters.auto_repair
+                    )
+                )
+                self.notice = "Auto repair updated." if result.accepted else result.reason
+                return
             if action.startswith("automation_group:"):
                 group = action.partition(":")[2]
                 self.automation_panel.group = None if group == "units" else AutomationKind(group)
@@ -1561,10 +1605,25 @@ class AirtsApp:
             }[action]()
             return
 
+    @property
+    def developer_mode(self) -> bool:
+        return self.simulation.developer_mode
+
     def _handle_settings_click(self, position: tuple[int, int]) -> bool:
         for rectangle, action in self._settings_buttons:
             if not rectangle.collidepoint(position):
                 continue
+            if action == "developer_mode":
+                result = self.simulation.execute(SetDeveloperModeCommand(not self.developer_mode))
+                if result.accepted:
+                    self.notice = (
+                        "Developer mode ON: +2000 resources per game second."
+                        if self.developer_mode
+                        else "Developer mode OFF."
+                    )
+                else:
+                    self.notice = f"Developer mode change failed: {result.reason}"
+                return True
             if action == "resolution_lower":
                 self._request_resolution_step(-1)
                 return True
@@ -1576,11 +1635,29 @@ class AirtsApp:
             return True
         return False
 
-    def _handle_panel_click(self, position: tuple[int, int]) -> None:
+    def _handle_panel_click(self, position: tuple[int, int], *, button: int = 1) -> None:
         for rectangle, kind in self._type_buttons:
             if rectangle.collidepoint(position):
-                self._filter_selection_to_kind(kind)
+                if button == 1:
+                    self._filter_selection_to_kind(kind)
+                elif (
+                    button == 3
+                    and self.selected_entities
+                    and all(
+                        self.simulation.entities[key].owner_id == "player"
+                        for key in self.selected_entities
+                    )
+                ):
+                    self.selected_entities = {
+                        key
+                        for key in self.selected_entities
+                        if self.simulation.entities[key].kind is not kind
+                    }
+                    self._selection_changed()
+                    self.notice = f"Selected {len(self.selected_entities)} unit(s)."
                 return
+        if button != 1:
+            return
         self._handle_command_click(position)
         for rectangle, action, automation_id in self.automation_panel.buttons:
             if not rectangle.collidepoint(position):
@@ -1616,6 +1693,13 @@ class AirtsApp:
             screen.get_size(),
             self.simulation.tick,
             self._opengl_overlay_key(),
+            None
+            if self.building_line_draft is None
+            else (
+                self.building_line_draft.kind,
+                self.building_line_draft.start,
+                self.building_line_draft.end,
+            ),
             self.drag_start,
             pygame.mouse.get_pos() if self.drag_start is not None else None,
         )
@@ -1661,10 +1745,10 @@ class AirtsApp:
             self._software_renderer.draw_map(self, screen)
             self._draw_resource_sites(screen)
             self._draw_spatial_input(screen)
-            self._draw_construction(screen)
             self._draw_assembly_glows(screen)
             self._software_renderer.draw_entities(self, screen)
             self._software_renderer.draw_projectiles(self, screen)
+            self._draw_construction(screen)
             screen.set_clip(previous_clip)
             self._draw_interface(screen)
         finally:
@@ -1788,19 +1872,14 @@ class AirtsApp:
             None,
             None,
             self.automation_panel.scroll,
-            self.settings_open,
+            (self.settings_open, self.developer_mode),
             self.help_open,
-            (
-                self.placement_kind,
-                self.reclaim_mode,
-                None
-                if self.building_line_draft is None
-                else (self.building_line_draft.start, self.building_line_draft.end),
-            ),
+            (self.placement_kind, self.reclaim_mode),
             (
                 self.automation_panel.group,
                 self.automation_panel.details_open,
                 self.production_detail_kind,
+                self.automation_panel.new_area_auto_repair,
             ),
             tuple(self.left_panel_rect),
             tuple(self.right_panel_rect),
@@ -1891,6 +1970,7 @@ class AirtsApp:
             self.automation_panel.selected_id = None
 
     def _draw_construction(self, screen: pygame.Surface) -> None:
+        kind: EntityKind | None
         construction_automations = tuple(
             automation
             for automation in self.simulation.live_automations
@@ -1943,24 +2023,15 @@ class AirtsApp:
                 overlay.blit(label, (rectangle.x, rectangle.y - label.get_height()))
 
         mouse = pygame.mouse.get_pos() if pygame.display.get_init() else (-1, -1)
-        previews: tuple[tuple[Point, bool], ...] = ()
-        if self.building_line_draft is not None:
-            previews = tuple(
-                (
-                    point,
-                    construction.validate_building_placement(
-                        self.simulation, self.building_line_draft.kind, point, owner_id="player"
-                    )
-                    is None,
-                )
-                for point in self.building_line_draft.positions()
-            )
-        elif self.placement_kind is not None and self.canvas_rect.collidepoint(mouse):
-            preview = self._construction_preview_at(self._map_point(mouse))
-            if preview is not None:
-                previews = (preview,)
-        if self.placement_kind is not None:
-            width, height = self.placement_kind.profile.footprint
+        pointer = self._map_point(mouse) if self.canvas_rect.collidepoint(mouse) else None
+        previews = self._construction_previews(pointer)
+        preview_kind = (
+            self.building_line_draft.kind
+            if self.building_line_draft is not None
+            else self.placement_kind
+        )
+        if preview_kind is not None:
+            width, height = preview_kind.profile.footprint
             for position, valid in previews:
                 rectangle = pygame.Rect(
                     self.screen_point(position),
@@ -1971,10 +2042,16 @@ class AirtsApp:
                 pygame.draw.rect(overlay, (*color, 245), rectangle, 3)
         screen.blit(overlay, (0, 0))
 
+    def _construction_previews(self, pointer: Point | None) -> tuple[tuple[Point, bool], ...]:
+        if self.building_line_draft is not None:
+            return building_line_previews(self.simulation, self.building_line_draft)
+        preview = self._construction_preview_at(pointer) if pointer is not None else None
+        return (preview,) if preview is not None else ()
+
     def _construction_preview_at(self, point: Point) -> tuple[Point, bool] | None:
         if self.placement_kind is None:
             return None
-        position = Point(float(int(point.x)), float(int(point.y)))
+        position = Point(float(floor(point.x)), float(floor(point.y)))
         sites = self.simulation.game_map.resource_sites
         if self.placement_kind is EntityKind.RESOURCE_GENERATOR and sites:
             nearest = min(sites, key=lambda site: point.distance_to(Point(site.x + 1, site.y + 1)))
@@ -2046,6 +2123,7 @@ class AirtsApp:
             if entity_id in self.simulation.entities
             and (
                 self.simulation.entities[entity_id].path
+                or self.simulation.entities[entity_id].move_queue
                 or self.simulation.entities[entity_id].pursue_target
             )
         )
@@ -2062,6 +2140,7 @@ class AirtsApp:
             and inspected in self.simulation.entities
             and (
                 self.simulation.entities[inspected].path
+                or self.simulation.entities[inspected].move_queue
                 or self.simulation.entities[inspected].pursue_target
             )
             and inspected not in representatives
@@ -2074,7 +2153,7 @@ class AirtsApp:
 
     @staticmethod
     def simplified_path(entity: Entity) -> tuple[Point, ...]:
-        points = (entity.position, *entity.path)
+        points = (entity.position, *entity.path, *entity.move_queue)
         if len(points) <= 2:
             return points
         simplified = [points[0]]

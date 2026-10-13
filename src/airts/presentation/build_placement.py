@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from math import floor
 
 from airts.contracts.spatial import Point
+from airts.simulation import Simulation
+from airts.systems.construction import validate_building_placement
 from airts.world.units.catalog import EntityKind
 
 
@@ -16,6 +18,18 @@ class BuildingLineDraft:
 
     def positions(self) -> tuple[Point, ...]:
         return building_line(self.kind, self.start, self.end)
+
+
+def building_line_previews(
+    simulation: Simulation, draft: BuildingLineDraft
+) -> tuple[tuple[Point, bool], ...]:
+    return tuple(
+        (
+            point,
+            validate_building_placement(simulation, draft.kind, point, owner_id="player") is None,
+        )
+        for point in draft.positions()
+    )
 
 
 def building_line(kind: EntityKind, start: Point, end: Point) -> tuple[Point, ...]:

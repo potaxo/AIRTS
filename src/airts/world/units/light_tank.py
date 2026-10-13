@@ -11,6 +11,7 @@ PROFILE = EntityProfile(
     mass=3.0,
     movement_speed=3.5,
     attack_damage=12,
+    combat_support=True,
     attack_range=6.0,
     projectile_speed=10.0,
     production_cost=100,

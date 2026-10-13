@@ -9,6 +9,9 @@ import pygame
 
 from airts.contracts.automations import AutomationKind, ConstructionParameters
 from airts.contracts.spatial import Point, PointTarget, PolygonRegion, SpatialTarget
+from airts.presentation.build_placement import BuildingLineDraft
+from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import work_links
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
 from airts.world.units.catalog import EntityKind
@@ -55,10 +58,13 @@ class FeedbackView(Protocol):
     def placement_kind(self) -> EntityKind | None: ...
 
     @property
+    def building_line_draft(self) -> BuildingLineDraft | None: ...
+
+    @property
     def ui(self) -> UiPainter: ...
 
     def _map_point(self, position: tuple[int, int]) -> Point: ...
-    def _construction_preview_at(self, point: Point) -> tuple[Point, bool] | None: ...
+    def _construction_previews(self, pointer: Point | None) -> tuple[tuple[Point, bool], ...]: ...
 
 
 def _triangles(region: PolygonRegion) -> list[Point]:
@@ -215,6 +221,13 @@ class GPUFeedback:
             app.drag_start,
             app.mode,
             app.placement_kind,
+            None
+            if app.building_line_draft is None
+            else (
+                app.building_line_draft.kind,
+                app.building_line_draft.start,
+                app.building_line_draft.end,
+            ),
             pointer,
             id(app.ui.small_font),
         )
@@ -352,11 +365,14 @@ class GPUFeedback:
                 pixels=(0, 2.5),
             )
             labels.append((f"{round(progress * 100)}%", entity.position, False))
-        if app.placement_kind is not None and pointer is not None:
-            preview = app._construction_preview_at(pointer)
-            if preview is not None:
-                position, valid = preview
-                w, h = app.placement_kind.profile.footprint
+        kind = (
+            app.building_line_draft.kind
+            if app.building_line_draft is not None
+            else app.placement_kind
+        )
+        if kind is not None:
+            for position, valid in app._construction_previews(pointer):
+                w, h = kind.profile.footprint
                 color = (95, 224, 145) if valid else (235, 88, 88)
                 shape(
                     Point(position.x + w / 2, position.y + h / 2),
@@ -403,6 +419,8 @@ class GPUFeedback:
                 (245, 245, 245),
                 1,
             )
+        for source, destination in work_links(app.simulation):
+            line((source, destination), REPAIR_COLOR, width=WORK_BEAM_WIDTH)
         self._write(self.shapes, shapes)
         self._write(self.lines, lines)
         self._write(self.triangles, triangles)

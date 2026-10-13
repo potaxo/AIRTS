@@ -9,19 +9,26 @@ from tests.integration.opponent_scenarios import opening_army, opponent_scenario
 
 from airts.adapters.persistence import PersistenceError, capture_save, load_simulation_data
 from airts.adapters.replay import capture_replay, run_replay
-from airts.contracts.automations import ConstructionParameters, RepairParameters, RepairPhase
+from airts.contracts.automations import (
+    AutomationStatus,
+    ConstructionParameters,
+    RepairParameters,
+    RepairPhase,
+)
 from airts.contracts.commands import (
     AttackCommand,
     CreateConstructionCommand,
+    CreatePatrolCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
     ReclaimBuildingCommand,
+    RepairBuildingCommand,
     StopCommand,
     command_from_dict,
     command_to_dict,
 )
-from airts.contracts.spatial import Point
+from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
 from airts.presentation.rendering import RendererBackend
 from airts.presentation.ui import selection
@@ -64,6 +71,98 @@ def restored(simulation: Simulation) -> Simulation:
             "state": save.state | {"events": [e.to_dict() for e in save.events]},
         }
     )
+
+
+@pytest.mark.parametrize("order", ["move", "patrol", "stop"])
+def test_new_order_detaches_only_selected_builder_from_active_and_queued_construction(
+    order: str,
+) -> None:
+    simulation = world()
+    simulation.resources["player"] = 2_000
+    jobs = []
+    for point in (Point(40, 20), Point(40, 24)):
+        created = simulation.execute(
+            CreateConstructionCommand(
+                "builder",
+                EntityKind.FACTORY,
+                point,
+                builder_ids=("builder", "builder2"),
+                queued=bool(jobs),
+            )
+        )
+        assert created.accepted
+        jobs.append(created.automation_id)
+    command = (
+        MoveCommand(("builder",), Point(6.5, 4.5))
+        if order == "move"
+        else CreatePatrolCommand(("builder",), PolylineTarget((Point(4.5, 4.5), Point(8.5, 4.5))))
+        if order == "patrol"
+        else StopCommand(("builder",))
+    )
+    assert simulation.execute(command).accepted
+    for job_id in jobs:
+        job = simulation.automations[job_id or ""]
+        assert job.entity_ids == ["builder2"]
+        assert job.status is not AutomationStatus.CANCELED
+    simulation = restored(simulation)
+    simulation.advance(350)
+    assert all("builder" not in simulation.automations[job_id or ""].entity_ids for job_id in jobs)
+    assert all(
+        simulation.automations[job_id or ""].status is AutomationStatus.COMPLETED for job_id in jobs
+    )
+
+
+@pytest.mark.parametrize("work", ["repair", "reclaim"])
+def test_first_queued_move_replaces_an_approaching_builders_direct_work(work: str) -> None:
+    simulation = world()
+    simulation.entities["factory"].health = 200
+    command = (
+        RepairBuildingCommand(("builder",), "factory")
+        if work == "repair"
+        else ReclaimBuildingCommand(("builder",), "factory")
+    )
+    assert simulation.execute(command).accepted
+    simulation.advance()
+    builder = simulation.entities["builder"]
+    assert builder.path
+    assert simulation.execute(MoveCommand(("builder",), Point(6.5, 4.5), queued=True)).accepted
+    assert builder.repair_target_id is None and builder.reclaim_target_id is None
+    assert builder.move_target == Point(6.5, 4.5)
+    simulation.advance(80)
+    assert builder.position == Point(6.5, 4.5)
+    assert simulation.entities["factory"].health == 200
+
+
+def test_queued_movement_runs_fifo_survives_save_and_replays_and_can_be_replaced() -> None:
+    simulation = world()
+    waypoints = (Point(8.5, 4.5), Point(8.5, 18.5), Point(4.5, 18.5))
+    assert simulation.execute(MoveCommand(("builder",), waypoints[0])).accepted
+    simulation.advance(2)
+    for point in waypoints[1:]:
+        command = MoveCommand(("builder",), point, queued=True)
+        assert command_from_dict(command_to_dict(command)) == command
+        assert simulation.execute(command).accepted
+    loaded = restored(simulation)
+    for _ in range(200):
+        simulation.advance()
+        loaded.advance()
+    assert simulation.entities["builder"].position == waypoints[-1]
+    completed = [
+        event.details["position"]
+        for event in simulation.events.events
+        if event.subject_id == "builder" and event.event_type.value == "movement_completed"
+    ]
+    assert completed == [[p.x, p.y] for p in waypoints]
+    assert simulation.export_state() == loaded.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+    assert simulation.execute(MoveCommand(("builder",), Point(20.5, 18.5), queued=True)).accepted
+    assert simulation.execute(MoveCommand(("builder",), Point(24.5, 18.5), queued=True)).accepted
+    pending = list(simulation.entities["builder"].move_queue)
+    assert not simulation.execute(MoveCommand(("builder", "missing"), Point(10, 10))).accepted
+    assert simulation.entities["builder"].move_queue == pending
+    assert simulation.execute(StopCommand(("builder",))).accepted
+    assert not simulation.entities["builder"].move_queue
+    assert not simulation.entities["builder"].path
 
 
 def test_remote_reclaim_save_override_single_refund_and_replay() -> None:
@@ -270,7 +369,14 @@ def test_shift_drag_previews_then_enqueues_spaced_buildings_and_skips_invalid_si
         app._handle_mouse_motion(end, (True, False, False))
     assert len(app.simulation.command_history) == before
     assert app.building_line_draft is not None
+    before_preview = app.simulation.export_state()
+    previews = app._construction_previews(None)
+    assert [point for point, valid in previews if valid] == [
+        Point(x, 10) for x in (8, 10, 16, 18, 20)
+    ]
+    assert [point for point, valid in previews if not valid] == [Point(x, 10) for x in (12, 14)]
     app._draw_construction(pygame.Surface(app.window_size))
+    assert app.simulation.export_state() == before_preview
     app._handle_mouse_up(1, end)
     jobs = [
         a

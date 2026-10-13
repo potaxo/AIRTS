@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import ceil, floor
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import AutomationStatus, RepairParameters
@@ -72,6 +73,26 @@ def building_distance(point: Point, building: Entity) -> float:
     return point.distance_to(nearest)
 
 
+def builder_repair_points(
+    simulation: Simulation, builder: Entity, building: Entity
+) -> tuple[Point, ...]:
+    radius = builder.kind.profile.repair_range
+    width, height = building.kind.profile.footprint
+    blocked = simulation._building_cells()
+    return tuple(
+        point
+        for y in range(
+            floor(building.position.y - radius), ceil(building.position.y + height + radius)
+        )
+        for x in range(
+            floor(building.position.x - radius), ceil(building.position.x + width + radius)
+        )
+        if (x, y) not in blocked
+        and simulation.game_map.is_cell_passable((x, y))
+        and building_distance(point := Point(x + 0.5, y + 0.5), building) <= radius
+    )
+
+
 def drive_builders(simulation: Simulation) -> None:
     builders = [
         entity
@@ -100,7 +121,7 @@ def drive_builders(simulation: Simulation) -> None:
             try:
                 point, path = simulation._routes.shared_path_to_any(
                     builder.position,
-                    simulation._interaction_points(target),
+                    builder_repair_points(simulation, builder, target),
                     simulation._building_cells(),
                 )
             except PathfindingError as error:

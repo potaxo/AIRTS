@@ -5,13 +5,18 @@ from __future__ import annotations
 from math import ceil, floor, hypot, isclose
 from typing import TYPE_CHECKING
 
-from airts.contracts.automations import AutomationKind
+from airts.contracts.automations import (
+    AutomationKind,
+    AutomationStatus,
+    defend_parameters,
+    patrol_parameters,
+)
 from airts.contracts.commands import RemoveEntityCommand
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point
+from airts.contracts.spatial import Point, distance_to_target
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import movement
+from airts.systems import automation_execution, movement
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
 
 if TYPE_CHECKING:
@@ -40,6 +45,7 @@ def drive_combat(simulation: Simulation) -> None:
     pending_routes: list[str] = []
     blocked_routes: set[str] = set()
     interaction_cache: dict[str, frozenset[tuple[int, int]]] = {}
+    fired: dict[str, str] = {}
     for owner_id, owned in positions_by_owner.items():
         armed = []
         query_list = []
@@ -127,6 +133,8 @@ def drive_combat(simulation: Simulation) -> None:
         if attacker.attack_cooldown > 0:
             attacker.attack_cooldown -= 1
         ordered_target = simulation.entities.get(attacker.attack_target_id or "")
+        if ordered_target is not None and attacker.attack_gather_point is not None:
+            attacker.attack_gather_point = ordered_target.selection_position
         if ordered_target is None or not simulation.are_hostile(
             ordered_target.owner_id, attacker.owner_id
         ):
@@ -209,6 +217,7 @@ def drive_combat(simulation: Simulation) -> None:
             speed=speed,
         )
         simulation.projectiles[projectile_id] = projectile
+        fired[entity_id] = firing_target.entity_id
         attacker.attack_cooldown = attacker.kind.profile.attack_interval_ticks
         simulation.events.record(
             simulation.tick,
@@ -219,6 +228,101 @@ def drive_combat(simulation: Simulation) -> None:
             damage=projectile.damage,
             position=[projectile.position.x, projectile.position.y],
         )
+    _join_nearby_combat(simulation, positions_by_owner, positions, fired)
+
+
+def _join_nearby_combat(
+    simulation: Simulation,
+    positions_by_owner: dict[str, dict[str, Point]],
+    positions: dict[str, Point],
+    fired: dict[str, str],
+) -> None:
+    if not fired:
+        return
+    sources_by_owner: dict[str, dict[str, Point]] = {}
+    for key in fired:
+        source_owner = simulation.entities[key].owner_id
+        sources_by_owner.setdefault(source_owner, {})[key] = positions[key]
+    for owner in sorted(positions_by_owner):
+        owned = positions_by_owner[owner]
+        sources = {
+            key: point
+            for source_owner, shots in sources_by_owner.items()
+            if not simulation.are_hostile(source_owner, owner)
+            for key, point in shots.items()
+        }
+        if not sources:
+            continue
+        eligible = []
+        for key in sorted(owned):
+            entity = simulation.entities[key]
+            if (
+                key not in fired
+                and entity.kind.profile.combat_support
+                and entity.is_complete
+                and not entity.pursue_target
+                and entity.hold_anchor is None
+            ):
+                assigned = simulation.assignments.get(key)
+                if assigned is not None:
+                    automation = simulation.automations[assigned]
+                    if automation.status is not AutomationStatus.ACTIVE or automation.kind not in {
+                        AutomationKind.PATROL,
+                        AutomationKind.DEFEND,
+                    }:
+                        continue
+                eligible.append(key)
+        ids = tuple(eligible)
+        if not ids:
+            continue
+        nearby = SpatialIndex(sources).nearest_many(
+            tuple((positions[key], simulation.COMBAT_SUPPORT_RADIUS) for key in ids)
+        )
+        for key, source in zip(ids, nearby, strict=True):
+            if source is None:
+                continue
+            entity = simulation.entities[key]
+            target = simulation.entities[fired[source]]
+            if not simulation.are_hostile(target.owner_id, owner):
+                continue
+            assigned = simulation.assignments.get(key)
+            if assigned is not None:
+                automation = simulation.automations[assigned]
+                if automation.status is not AutomationStatus.ACTIVE:
+                    continue
+                if automation.kind is AutomationKind.PATROL:
+                    parameters = patrol_parameters(automation)
+                    if (
+                        distance_to_target(target.selection_position, parameters.target)
+                        > simulation.PATROL_PURSUIT_RADIUS
+                    ):
+                        continue
+                    automation_execution.interrupt_patrol(entity, parameters)
+                elif automation.kind is AutomationKind.DEFEND:
+                    station = defend_parameters(automation).stations[key]
+                    if (
+                        target.selection_position.distance_to(station)
+                        > simulation.DEFEND_PURSUIT_RADIUS
+                    ):
+                        continue
+                    entity.clear_recovery_request()
+                else:
+                    continue
+            elif entity.move_target is not None:
+                entity.move_queue.insert(0, entity.move_target)
+            entity.path.clear()
+            entity.move_target = None
+            entity.attack_target_id = target.entity_id
+            entity.pursue_target = True
+            entity.state = UnitState.ATTACKING
+            movement.reset_movement_liveness(entity)
+            simulation.events.record(
+                simulation.tick,
+                EventType.COMBAT_SUPPORT_JOINED,
+                key,
+                source_id=source,
+                target_id=target.entity_id,
+            )
 
 
 def drive_projectiles(simulation: Simulation) -> None:

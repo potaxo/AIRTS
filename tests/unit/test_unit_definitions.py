@@ -34,6 +34,23 @@ def test_armed_definition_cannot_silently_disable_projectiles() -> None:
     assert EntityKind.BUILDER.profile.projectile_speed == 0.0
 
 
+def test_automatic_support_is_an_explicit_combat_capability() -> None:
+    for kind in (
+        EntityKind.SCOUT,
+        EntityKind.LIGHT_TANK,
+        EntityKind.HEAVY_TANK,
+        EntityKind.ARTILLERY,
+    ):
+        assert kind.profile.combat_support
+    assert not EntityKind.BUILDER.profile.combat_support
+    # An armed auxiliary profile still opts out unless it explicitly enables support.
+    assert not replace(
+        EntityKind.BUILDER.profile, attack_damage=1, projectile_speed=1
+    ).combat_support
+    with pytest.raises(ValueError, match="combat support requires an armed mobile unit"):
+        replace(EntityKind.BUILDER.profile, combat_support=True)
+
+
 @pytest.mark.parametrize("interval", [0, -1, True, 2.5])
 def test_attack_interval_requires_positive_integer_ticks(interval: int) -> None:
     with pytest.raises(ValueError, match="attack_interval_ticks must be a positive integer"):

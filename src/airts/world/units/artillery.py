@@ -11,6 +11,7 @@ PROFILE = EntityProfile(
     mass=5,
     movement_speed=2,
     attack_damage=40,
+    combat_support=True,
     attack_range=12,
     projectile_speed=6,
     attack_interval_ticks=25,

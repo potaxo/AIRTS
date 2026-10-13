@@ -18,12 +18,15 @@ class MenusView(Protocol):
     ui: UiPainter
     window_size: tuple[int, int]
 
+    @property
+    def developer_mode(self) -> bool: ...
+
 
 def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
     x = view.command_bar_rect.x + 14
-    y = view.command_bar_rect.y - 208
+    y = view.command_bar_rect.y - 244
     view._settings_buttons.clear()
-    pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 202), border_radius=4)
+    pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 238), border_radius=4)
     view.ui.small_text(
         screen,
         f"Resolution {view.window_size[0]} x {view.window_size[1]}",
@@ -55,6 +58,12 @@ def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
         (111, 221, 151),
     )
     y += 122
+    toggle = pygame.Rect(x + 8, y, 252, 24)
+    state = "ON" if view.developer_mode else "OFF"
+    view.ui.button(screen, toggle, f"Developer mode: {state}")
+    view._settings_buttons.append((toggle, "developer_mode"))
+    view.ui.small_text(screen, "+2000 player resources / second", (x + 10, y + 26), (166, 191, 215))
+    y += 46
     for action, label in (("saves", "Save manager"), ("new", "New game")):
         rectangle = pygame.Rect(x + 8, y, 252, 24)
         view.ui.button(screen, rectangle, label)
@@ -67,7 +76,7 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
         view.canvas_rect.x + 40,
         80,
         max(320, view.canvas_rect.width - 80),
-        260,
+        288,
     )
     pygame.draw.rect(screen, (28, 34, 42), rectangle, border_radius=4)
     pygame.draw.rect(screen, (104, 126, 149), rectangle, 1, border_radius=4)
@@ -78,7 +87,8 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
         "Single right-click preserves formation; double right-click gathers.",
         "WASD Camera   T Patrol   Y Defend   X Stop   H Hold",
         "R Repair   Space Pause   Wheel Zoom",
-        "Shift multi-select   N Name   E Edit   U Retarget   [ ] Priority",
+        "Shift+Right-click Queue move   Shift+Left-click/drag Select",
+        "N Name   E Edit   U Retarget   [ ] Priority",
         "Choose a selected type in the right rail to show its actions.",
     )
     for index, line in enumerate(lines):

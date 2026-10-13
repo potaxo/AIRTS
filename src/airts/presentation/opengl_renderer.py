@@ -15,12 +15,11 @@ from airts.presentation.gpu_feedback import FeedbackView, GPUFeedback
 from airts.presentation.palette import (
     ENTITY_COLORS,
     PROJECTILE_COLORS,
-    REPAIR_COLOR,
     TERRAIN_COLORS,
     Color,
     match_color,
 )
-from airts.presentation.rendering import SceneView, order_feedback, repair_links
+from airts.presentation.rendering import SceneView, order_feedback
 from airts.simulation import Simulation
 from airts.world.entities import ProjectileTrace
 from airts.world.units.catalog import EntityKind
@@ -528,14 +527,6 @@ class OpenGLFrameBuilder:
                     color,
                 )
             path_count += 1
-        for source, target in repair_links(app.simulation):
-            for point in (source, target):
-                _append_line_vertex(
-                    values,
-                    origin_x + point.x * tile_size,
-                    origin_y + point.y * tile_size,
-                    _float_color(REPAIR_COLOR),
-                )
         return values.tobytes(), len(values) // LINE_FLOATS, path_count
 
     def _build_projectiles(

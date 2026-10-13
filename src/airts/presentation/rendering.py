@@ -9,17 +9,27 @@ from typing import Protocol
 
 import pygame
 
+from airts.contracts.automations import (
+    AutomationStatus,
+    ConstructionParameters,
+    RepairParameters,
+    RepairPhase,
+)
 from airts.contracts.spatial import Point
 from airts.presentation.palette import (
     ENTITY_COLORS,
     PROJECTILE_COLORS,
     REPAIR_COLOR,
     TERRAIN_COLORS,
+    WORK_BEAM_WIDTH,
     Color,
     match_color,
 )
 from airts.simulation import Simulation
-from airts.world.entities import Entity
+from airts.systems.construction import construction_distance
+from airts.systems.repair import building_distance
+from airts.systems.repair_positions import in_service_range
+from airts.world.entities import Entity, UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
@@ -69,20 +79,70 @@ def order_feedback(view: SceneView, entity: Entity) -> tuple[tuple[Point, ...], 
     return view.simplified_path(entity), (225, 225, 225)
 
 
-def repair_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
-    """Show only the hub's authoritative, currently valid service target."""
-    for hub in simulation.entities.values():
-        if hub.kind is not EntityKind.REPAIR_HUB or not hub.is_complete:
+def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
+    """Read active construction/repair endpoints without changing domain state."""
+    source: Entity | None
+    for worker in simulation.entities.values():
+        if (
+            worker.kind is not EntityKind.REPAIR_HUB and worker.kind is not EntityKind.BUILDER
+        ) or not worker.is_complete:
             continue
-        target = simulation.entities.get(hub.repair_target_id or "")
+        target = simulation.entities.get(worker.repair_target_id or "")
         if (
             target is not None
-            and target.is_movable
-            and target.owner_id == hub.owner_id
+            and target.owner_id == worker.owner_id
             and target.health < target.kind.profile.max_health
-            and hub.selection_position.distance_to(target.position) <= hub.kind.profile.repair_range
+            and (
+                worker.kind is EntityKind.REPAIR_HUB
+                and target.is_movable
+                and worker.selection_position.distance_to(target.position)
+                <= worker.kind.profile.repair_range
+                or worker.kind is EntityKind.BUILDER
+                and target.category is EntityCategory.BUILDING
+                and target.is_complete
+                and worker.state is UnitState.REPAIRING
+                and not worker.path
+                and building_distance(worker.position, target) <= worker.kind.profile.repair_range
+            )
         ):
-            yield hub.selection_position, target.selection_position
+            yield worker.selection_position, target.selection_position
+    for automation in simulation.live_automations:
+        parameters = automation.parameters
+        if (
+            isinstance(parameters, ConstructionParameters)
+            and automation.status is AutomationStatus.ACTIVE
+        ):
+            target = simulation.entities.get(parameters.site_entity_id or "")
+            if target is None or target.is_complete:
+                continue
+            for key in automation.entity_ids:
+                source = simulation.entities.get(key)
+                if (
+                    source is not None
+                    and simulation.assignments.get(key) == automation.automation_id
+                    and source.state is UnitState.BUILDING
+                    and construction_distance(source.position, parameters)
+                    <= source.kind.profile.build_range
+                ):
+                    yield source.selection_position, target.selection_position
+        elif isinstance(parameters, RepairParameters):
+            for key, phase in parameters.phases.items():
+                target = simulation.entities.get(key)
+                source = simulation.entities.get(parameters.destinations.get(key, ""))
+                if (
+                    phase is RepairPhase.REPAIRING
+                    and simulation.assignments.get(key) == automation.automation_id
+                    and source is not None
+                    and target is not None
+                    and source.kind is not EntityKind.REPAIR_HUB
+                    and source.is_complete
+                    and source.owner_id == target.owner_id
+                    and target.state is UnitState.REPAIRING
+                    and target.health < target.kind.profile.max_health
+                    and not target.path
+                    and in_service_range(simulation, target, source)
+                ):
+                    yield source.selection_position, target.selection_position
 
 
 class SoftwareRenderer:
@@ -175,7 +235,9 @@ class SoftwareRenderer:
     def draw_entities(self, view: SceneView, screen: pygame.Surface) -> None:
         colors = ENTITY_COLORS
         for color, points in self._representative_path_points(view):
-            pygame.draw.lines(screen, color, False, points, 1)
+            pygame.draw.lines(
+                screen, color, False, points, WORK_BEAM_WIDTH if color == REPAIR_COLOR else 1
+            )
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
         selected_entities = view.selected_entities
@@ -424,7 +486,7 @@ class SoftwareRenderer:
                     paths.append((color, points))
             paths.extend(
                 (REPAIR_COLOR, (view.screen_point(source), view.screen_point(target)))
-                for source, target in repair_links(view.simulation)
+                for source, target in work_links(view.simulation)
             )
             self._path_render_key = key
             self._path_render_points = tuple(paths)

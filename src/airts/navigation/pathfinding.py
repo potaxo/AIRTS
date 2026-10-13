@@ -123,6 +123,18 @@ class RoutingService:
         self._obstacle_masks.clear()
         self._connected_regions.clear()
 
+    def movement_costs_at(self, positions: FloatArray) -> FloatArray:
+        """Batch-sample the shared static terrain costs at continuous body centers."""
+        if not np.all(
+            (positions[:, 0] >= 0)
+            & (positions[:, 0] < self.game_map.width)
+            & (positions[:, 1] >= 0)
+            & (positions[:, 1] < self.game_map.height)
+        ):
+            raise ValueError("movement position outside map")
+        cells = positions.astype(np.int64)
+        return self._cost_grid[cells[:, 1], cells[:, 0]]
+
     def can_reach_any(
         self, start: Point, goals: tuple[Point, ...], blocked: frozenset[Cell]
     ) -> bool:

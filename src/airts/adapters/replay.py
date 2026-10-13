@@ -10,8 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v17"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v10"
+REPLAY_SCHEMA = "airts-replay-v21"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v14"
 
 
 class ReplayError(ValueError):
@@ -92,6 +92,11 @@ def load_replay(path: str | Path) -> ReplayData:
 
 def load_replay_data(raw_data: object) -> ReplayData:
     document = _mapping(raw_data, "replay document")
+    if document.get("schema") in {"airts-replay-v17", "airts-match-replay-v10"}:
+        raise ReplayError(
+            "legacy replay predates terrain-adjusted movement speed; "
+            "replay with its original AIRTS version"
+        )
     if document.get("schema") in {"airts-replay-v16", "airts-match-replay-v9"}:
         raise ReplayError(
             "legacy replay predates repair-area arrival and building reclamation; replay with its original AIRTS version"

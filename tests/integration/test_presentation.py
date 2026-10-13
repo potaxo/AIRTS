@@ -26,6 +26,8 @@ from airts.contracts.commands import (
     CreateConstructionCommand,
     CreateDefendCommand,
     CreateProductionCommand,
+    MoveCommand,
+    SetDeveloperModeCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
 from airts.navigation.collision.geometry import collision_radius
@@ -427,6 +429,8 @@ def test_selection_drag_outside_canvas_excludes_offscreen_units(
 
 def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() -> None:
     app = AirtsApp(interaction_simulation(), renderer_backend=RendererBackend.SOFTWARE)
+    assert app.simulation.execute(SetDeveloperModeCommand(True)).accepted
+    before = app.simulation.resources["player"]
     pygame.font.init()
     app.ui.font = pygame.font.Font(None, 24)
     app.ui.small_font = pygame.font.Font(None, 19)
@@ -457,6 +461,8 @@ def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() ->
     assert ticks[:2] == [0, 0]
     assert 1 <= ticks[2] <= 2
     assert not app.paused
+    assert app.simulation.resources["player"] == before
+    assert app.simulation.developer_income_ticks == ticks[2]
 
 
 def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -> None:
@@ -528,6 +534,47 @@ def test_single_kind_selection_opens_details_and_type_choice_filters_selection()
     assert app.simulation.selection.entity_ids == ("builder", "builder_2")
 
 
+def test_right_click_type_row_removes_own_kind_and_preserves_active_orders() -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.selected_entities = {"builder", "builder_2", "scout", "tank"}
+    app._selection_changed()
+    assert app.simulation.execute(
+        MoveCommand(tuple(sorted(app.selected_entities)), Point(12, 12))
+    ).accepted
+    entity_states = {key: entity.to_dict() for key, entity in app.simulation.entities.items()}
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
+    screen = pygame.Surface(app.window_size)
+    try:
+        for kind, expected in (
+            (EntityKind.BUILDER, {"scout", "tank"}),
+            (EntityKind.SCOUT, {"tank"}),
+        ):
+            app._draw_interface(screen)
+            row = next(rect for rect, row_kind in app._type_buttons if row_kind is kind)
+            app._handle_mouse_down(3, row.center)
+            app._handle_mouse_up(3, row.center)
+            assert app.selected_entities == expected
+            assert set(app.simulation.selection.entity_ids) == expected
+            assert {
+                key: entity.to_dict() for key, entity in app.simulation.entities.items()
+            } == entity_states
+        assert app.inspected_kind is EntityKind.LIGHT_TANK
+        assert app.inspected_entity_id == "tank"
+        with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
+            app._draw_interface(screen)
+        assert any("HP 100/100" in call.args[1] for call in text.call_args_list)
+        assert not app._type_buttons
+        before = app.simulation.command_count
+        pause = next(rect for rect, action in app._command_buttons if action == "pause_game")
+        app._handle_mouse_down(3, pause.center)
+        assert not app.paused
+        assert app.simulation.command_count == before
+    finally:
+        pygame.font.quit()
+
+
 def test_escape_returns_to_select_mode_and_detaches_every_selection() -> None:
     app = AirtsApp(builder_factory_simulation())
     app.selected_entities = {"builder", "builder_2"}
@@ -592,6 +639,12 @@ def enemy_selection_app() -> AirtsApp:
                             "position": [35.5, 30.5],
                         },
                         {
+                            "id": "scout_3",
+                            "kind": "scout",
+                            "owner": "enemy",
+                            "position": [40.5, 35.5],
+                        },
+                        {
                             "id": "builder",
                             "kind": "builder",
                             "owner": "enemy",
@@ -637,6 +690,10 @@ def test_enemy_box_counts_visible_hostiles_and_keeps_commands_player_only(
         builder_button = next(
             rect for rect, kind in app._type_buttons if kind is EntityKind.BUILDER
         )
+        before = app.simulation.command_count
+        app._handle_mouse_down(3, builder_button.center)
+        assert app.selected_entities == {"scout_1", "scout_2", "builder"}
+        assert app.simulation.command_count == before
         app._handle_panel_click(builder_button.center)
         app._draw_interface(surface)
         assert app.selected_entities == {"builder"}
@@ -684,19 +741,25 @@ def test_player_selection_takes_precedence_over_enemy_units(
         pygame.font.quit()
 
 
-def test_double_click_enemy_selects_same_kind_across_hostile_owners_in_canvas(
+@pytest.mark.parametrize(
+    ("clicked_id", "expected"),
+    [("scout_1", {"scout_1", "scout_3"}), ("scout_2", {"scout_2"})],
+)
+def test_double_click_enemy_selects_same_kind_and_owner_in_canvas(
     enemy_selection_app: AirtsApp,
+    clicked_id: str,
+    expected: set[str],
 ) -> None:
     app = enemy_selection_app
     try:
         app.selected_entities = {"player"}
         app._selection_changed()
-        point = app.simulation.entities["scout_1"].position
+        point = app.simulation.entities[clicked_id].position
         with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
             app._select_entities(point, point)
-            assert app.selected_entities == {"scout_1"}
+            assert app.selected_entities == {clicked_id}
             app._select_entities(point, point)
-        assert app.selected_entities == {"scout_1", "scout_2"}
+        assert app.selected_entities == expected
         assert app.inspected_kind is EntityKind.SCOUT
         assert app.simulation.selection.entity_ids == ()
         app._handle_key(pygame.K_ESCAPE)
@@ -742,19 +805,67 @@ def test_right_click_preserves_formation_and_double_click_gathers(
         assert second["target"] == first["target"]
 
 
-def test_double_right_click_on_enemy_keeps_attack_behavior() -> None:
+def test_double_right_click_on_enemy_gathers_instead_of_attacking() -> None:
     app = AirtsApp(interaction_simulation())
     app.selected_entities = {"unit", "tank"}
     screen = app.screen_point(app.simulation.entities["enemy"].position)
     origin_x, origin_y = app.map_origin
     local = (screen[0] - origin_x, screen[1] - origin_y)
-    for _ in range(2):
+    with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
         app._handle_mouse_down(3, local)
         command = app.simulation.command_history[-1]["command"]
         assert isinstance(command, dict)
         assert command["type"] == "attack"
         assert command["target_entity_id"] == "enemy"
-        assert app._last_move_click is None
+        app._handle_mouse_down(3, local)
+    command = app.simulation.command_history[-1]["command"]
+    assert isinstance(command, dict)
+    assert command["type"] == "move" and command["gathering"] is True
+    assert all(not app.simulation.entities[key].pursue_target for key in app.selected_entities)
+
+
+@pytest.mark.parametrize(
+    "repeat_target", [False, True], ids=["different-points", "rapid-same-point"]
+)
+def test_shift_right_click_queues_waypoints_without_changing_selection_or_attacking(
+    repeat_target: bool,
+) -> None:
+    app = AirtsApp(interaction_simulation())
+    app.selected_entities = {"unit", "tank"}
+    points = (Point(8.5, 8.5), app.simulation.entities["enemy"].position, Point(6.5, 12.5))
+    if repeat_target:
+        points = (app.simulation.entities["enemy"].position,) * 3
+    origin_x, origin_y = app.map_origin
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
+        for point in points:
+            screen = app.screen_point(point)
+            local = (screen[0] - origin_x, screen[1] - origin_y)
+            app._handle_mouse_down(3, local)
+    assert app.selected_entities == {"unit", "tank"}
+    commands = [entry["command"] for entry in app.simulation.command_history]
+    assert len(commands) == 3
+    assert all(command["type"] == "move" and command["queued"] for command in commands)
+    assert not any(command.get("gathering", False) for command in commands)
+    assert all(len(app.simulation.entities[key].move_queue) == 2 for key in app.selected_entities)
+    assert all(app.simulation.entities[key].path for key in app.selected_entities)
+    assert not any(app.simulation.entities[key].pursue_target for key in app.selected_entities)
+
+
+@pytest.mark.parametrize("clicked", ["unit", "tank"])
+def test_shift_left_click_toggles_selection_without_issuing_movement(clicked: str) -> None:
+    app = AirtsApp(interaction_simulation())
+    app.selected_entities = {"unit"}
+    screen = app.screen_point(app.simulation.entities[clicked].position)
+    origin_x, origin_y = app.map_origin
+    local = (screen[0] - origin_x, screen[1] - origin_y)
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
+        app._handle_mouse_down(1, local)
+        app._handle_mouse_up(1, local)
+    assert app.selected_entities == ({"unit", "tank"} if clicked == "tank" else set())
+    assert all(
+        entry["command"]["type"] == "set_selection" for entry in app.simulation.command_history
+    )
+    assert not any(entity.move_queue or entity.path for entity in app.simulation.entities.values())
 
 
 @pytest.mark.parametrize("friendly_id", ["unit", "factory"], ids=["unit", "building"])
@@ -919,6 +1030,42 @@ def test_save_and_load_failures_leave_current_world_available(tmp_path: Path) ->
     app._load_game(tmp_path / "missing.json")
     assert app.simulation is original
     assert app.save_panel.open
+
+
+@pytest.mark.parametrize("size", [(1280, 720), (3840, 2160)])
+def test_settings_developer_mode_toggle_controls_income_and_refreshes_overlay(
+    size: tuple[int, int],
+) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    pygame.font.init()
+    try:
+        app.ui.font = pygame.font.Font(None, 24)
+        app.ui.small_font = pygame.font.Font(None, 19)
+        surface = pygame.Surface(size)
+        app.resize_layout(size)
+        app.settings_open = True
+        app._draw(surface)
+        buttons = {action: rectangle for rectangle, action in app._settings_buttons}
+        toggle = buttons["developer_mode"]
+        assert surface.get_rect().contains(toggle)
+        assert not toggle.colliderect(buttons["saves"])
+        assert not app.developer_mode
+        previous = app._opengl_overlay_key()
+        before = app.simulation.resources["player"]
+        app._handle_mouse_down(1, toggle.center)
+        assert app.developer_mode and app.settings_open
+        assert app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key()) is None
+        app.simulation.advance(10)
+        assert app.simulation.resources["player"] == before + 2000
+        app._draw(surface)
+        app._handle_mouse_down(1, toggle.center)
+        assert not app.developer_mode
+        app.simulation.advance(20)
+        assert app.simulation.resources["player"] == before + 2000
+        app._new_game()
+        assert not app.developer_mode
+    finally:
+        pygame.font.quit()
 
 
 def test_settings_menu_requests_a_higher_explicit_resolution() -> None:

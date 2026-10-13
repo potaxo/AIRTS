@@ -126,7 +126,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
     if detail_kind is EntityKind.BUILDER:
         view.ui.small_text(
             screen,
-            f"Build range {profile.build_range}  Work {profile.build_speed}/tick",
+            f"Build {profile.build_range:g} | Repair {profile.repair_range:g} | Work {profile.build_speed:g}/tick",
             (x, y - 10),
             (105, 222, 172),
         )
@@ -239,7 +239,9 @@ def draw_unit_details(
             f"Fire interval {profile.attack_interval_ticks / Simulation.TICKS_PER_SECOND:g}s"
         )
     if kind is EntityKind.BUILDER:
-        lines.append(f"Build range {profile.build_range} | Work {profile.build_speed}/tick")
+        lines.append(
+            f"Build {profile.build_range:g} | Repair {profile.repair_range:g} | Work {profile.build_speed:g}/tick"
+        )
     for line in lines:
         view.ui.small_text(screen, line, (x, y), (180, 198, 214))
         y += 20

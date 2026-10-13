@@ -22,13 +22,18 @@ Exact schemas/profiles live in their code owners.
 
 [commands.py](../../src/airts/contracts/commands.py) owns tagged commands, validation and control claims;
 [automations.py](../../src/airts/contracts/automations.py) owns parameters and legal lifecycle transitions.
-Move, stop, hold, attack, spatial edits, and automation actions share the same validation rules.
+Move (including FIFO queued waypoints), stop, hold, attack, spatial edits, and automation actions
+share the same validation rules.
 Failures identify their operation, subject, and reason; no invalid proposal silently changes state.
 
 A unit has at most one active controlling assignment and may retain a suspended assignment during
 explicit repair. Direct control detaches units, records override, and leaves remaining members
 working. Creating a new patrol/defend on explicitly selected units replaces their older ordinary
 assignment even at lower priority. Background claims use emergency status, priority, and recency.
+Replacement also removes selected builders from waiting construction jobs while preserving other
+builders' membership and progress. Rejected commands retain prior intent. Queued movement appends
+to direct movement; the first queued move replaces another controlling order. New ordinary orders
+clear selected units' movement queues.
 Empty ordinary work is canceled; valid future-unit sources may wait. Terminal work leaves live UI.
 Manual factory override pauses its controller; resume must reclaim the factory.
 
@@ -69,6 +74,11 @@ extractor price for one fifth of its match income, with a four-minute payback af
 Only completed income buildings earn resources. There is no resource-production action or economy hotkey
 in the UI. The historical economy command remains a balance-target tracker for existing callers
 and supported saves; it does not enable or accelerate income.
+Developer mode is a player-only setting submitted through `SetDeveloperModeCommand`, defaulting
+to off for new simulations. Economy credits an additional 2,000 resources after each ten enabled
+ticks (one game second), independently of building income. A changed toggle resets the partial
+interval; repeating the same setting preserves it. Pause and completed matches advance no ticks.
+Resource events identify the bonus as `DEVELOPER_MODE_INCOME`.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
 disables ambient spawning by default; [README](../../README.md#run) owns CLI defaults and controls.
 
@@ -102,7 +112,8 @@ Builders travel even without funds, then wait in range for money or mobile occup
 Placement is revalidated on arrival; a blueprint covered by a real building fails and the queue
 continues. Only when work starts does a job charge once and publish an unfinished building into
 authoritative occupancy. Each assigned builder contributes
-only within its build range of the footprint and outside it. Builders route to the perimeter first.
+only within its build range of the footprint and outside it. Builders stop at clear positions within
+that range rather than requiring contact with the perimeter.
 Multiple builders accelerate one job without duplicating cost or the building. Unfinished
 buildings are visible and attackable, block movement, and cannot produce income/units or repair.
 Their health grows with work while retaining accumulated damage. Destruction fails the associated
@@ -148,6 +159,7 @@ and friendly hits take precedence over generous enemy click areas. Accepted acti
 Enemy box/double-click selections are presentation-only inspections; domain grounding retains only
 owned entities. Player entities take precedence in mixed boxes and combined selections. Hostility
 uses team relationships, and enemy inspection never grants command authority.
+Double-click expansion is scoped to the clicked entity's owner, kind and canvas bounds.
 
 Camera motion uses presentation elapsed time and remains available while paused; focus loss stops
 held motion, naming/modals suppress it, and pan/zoom stay within the map (small maps center).

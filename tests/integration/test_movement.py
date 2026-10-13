@@ -22,6 +22,100 @@ from airts.systems.movement import position_clear
 from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_map_data
 from airts.world.skirmish import create_skirmish_map
+from airts.world.units.catalog import EntityKind
+
+
+@pytest.mark.parametrize("kind", [EntityKind.SCOUT, EntityKind.HEAVY_TANK, EntityKind.BUILDER])
+@pytest.mark.parametrize(
+    ("terrain", "speed_ratio"),
+    [("grass", 1.0), ("forest", 2 / 3), ("road", 4 / 3), ("bridge", 1.25)],
+)
+def test_terrain_changes_actual_movement_speed(
+    kind: EntityKind, terrain: str, speed_ratio: float
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "terrain_speed",
+                "name": "Terrain speed",
+                "width": 24,
+                "height": 12,
+                "terrain": {"default": terrain},
+                "entities": [{"id": "unit", "kind": kind.value, "position": [2.5, 5.5]}],
+            }
+        )
+    )
+    unit = simulation.entities["unit"]
+    assert simulation.execute(MoveCommand(("unit",), Point(20.5, 5.5))).accepted
+    start = unit.position
+    simulation.advance()
+    assert unit.position.distance_to(start) == pytest.approx(
+        unit.speed * Simulation.TICK_SECONDS * speed_ratio
+    )
+    assert simulation.occupancy.cells_for("unit") == unit.occupied_cells
+
+
+def test_terrain_speed_updates_when_entering_and_leaving_forest() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "terrain_boundary",
+                "name": "Terrain boundary",
+                "width": 24,
+                "height": 12,
+                "terrain": {"default": "grass", "rectangles": [[4, 0, 2, 12, "forest"]]},
+                "entities": [{"id": "unit", "kind": "scout", "position": [2.5, 5.5]}],
+            }
+        )
+    )
+    unit = simulation.entities["unit"]
+    assert simulation.execute(MoveCommand(("unit",), Point(20.5, 5.5))).accepted
+    samples: dict[str, list[float]] = {"grass": [], "forest": []}
+    for _ in range(24):
+        start = unit.position
+        terrain = simulation.game_map.terrain_at(start).value
+        simulation.advance()
+        distance = unit.position.distance_to(start)
+        samples[terrain].append(distance)
+        limit = 1 / 3 if terrain == "forest" else 0.5
+        assert distance <= limit + 1e-8
+    assert unit.position.x > 6
+    assert max(samples["forest"]) == pytest.approx(1 / 3)
+    assert samples["grass"][0] == pytest.approx(0.5)
+    assert samples["grass"][-1] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(("terrain", "maximum_step"), [("forest", 1 / 6), ("road", 1 / 3)])
+def test_hold_return_obeys_terrain_adjusted_passive_speed(
+    terrain: str, maximum_step: float
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "terrain_hold_return",
+                "name": "Terrain Hold return",
+                "width": 24,
+                "height": 12,
+                "terrain": {"default": terrain},
+                "entities": [{"id": "unit", "kind": "scout", "position": [5.5, 5.5]}],
+            }
+        )
+    )
+    unit = simulation.entities["unit"]
+    anchor = unit.position
+    assert simulation.execute(HoldPositionCommand(("unit",))).accepted
+    unit.position = Point(7.5, 5.5)
+    simulation.occupancy.move("unit", unit.occupied_cells, frozenset(simulation.entities))
+    start = unit.position
+    simulation.advance()
+    assert 0 < unit.position.distance_to(start) <= maximum_step + 1e-8
+    for _ in range(40):
+        start = unit.position
+        simulation.advance()
+        assert unit.position.distance_to(start) <= maximum_step + 1e-8
+    assert unit.state is UnitState.HOLDING
+    assert unit.hold_anchor == anchor
+    assert unit.position.distance_to(anchor) <= 0.04
 
 
 def test_move_from_injected_overlapping_selection_allocates_compatible_destinations() -> None:
@@ -249,9 +343,12 @@ def _advance_with_clearance(simulation: Simulation, ticks: int = 1) -> None:
         simulation.advance()
         for index, entity in enumerate(units):
             start = before[entity.entity_id]
-            assert (
-                entity.position.distance_to(start) <= entity.speed * Simulation.TICK_SECONDS + 1e-8
+            step_limit = (
+                entity.speed
+                * Simulation.TICK_SECONDS
+                / simulation.game_map.terrain_at(start).movement_cost
             )
+            assert entity.position.distance_to(start) <= step_limit + 1e-8
             assert position_clear(
                 entity.position,
                 collision_radius(entity.kind),
@@ -298,7 +395,8 @@ def _displace_holder_for_recovery(simulation: Simulation, position: Point) -> No
 
 
 @pytest.mark.parametrize("vertical", [False, True], ids=["horizontal", "vertical"])
-def test_opposing_steps_cannot_tunnel_or_exceed_speed(vertical: bool) -> None:
+@pytest.mark.parametrize("terrain", ["grass", "forest", "road"])
+def test_opposing_steps_cannot_tunnel_or_exceed_speed(vertical: bool, terrain: str) -> None:
     def coordinates(x: float, y: float) -> list[float]:
         return [y, x] if vertical else [x, y]
 
@@ -309,7 +407,7 @@ def test_opposing_steps_cannot_tunnel_or_exceed_speed(vertical: bool) -> None:
                 "name": "Crossing",
                 "width": 12,
                 "height": 12,
-                "terrain": {"default": "grass"},
+                "terrain": {"default": terrain},
                 "entities": [
                     {"id": "a", "kind": "scout", "position": coordinates(4.5, 5.5)},
                     {"id": "b", "kind": "scout", "position": coordinates(5.8, 5.5)},

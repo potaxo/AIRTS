@@ -13,6 +13,13 @@ separated destination slots. Explicit `gathering` allocates slots around the tar
 in supported histories use formation preservation. Mobile units are local colliders, not whole-cell
 static walls; occupied destinations may wait. Groups share an approach route before branching.
 
+Actual travel speed is the mobile profile's base speed divided by terrain movement cost.
+Grass retains base speed; forest uses two thirds, road four thirds and bridge five quarters.
+Each tick samples the terrain under the unit's original center once; entering another terrain
+changes its speed allowance on the next tick. Travel, collision yielding and Hold/defense return
+share this adjusted allowance, with the existing lower cap for passive movement. Static terrain
+clearance remains mandatory; water and rock remain impassable.
+
 Static routing uses four-neighbor weighted reverse Dijkstra fields and a bounded LRU cache keyed
 by destinations and building obstacles. Fields retain an indexed-heap frontier and expand until
 the requested start is settled. Connectivity validation avoids materializing unused paths.
@@ -33,11 +40,17 @@ These are current execution details, subject to the [engineering change policy](
 - Armed patrollers interrupt for the nearest hostile in their own vision, retain pursuit, then
   resume the interrupted leg after destruction or departure beyond the patrol margin. That margin
   is measured outside the point disk, polyline or filled polygon, not from the moving unit.
+- Patrol members advance independently when near their current route point, without waiting for
+  exact arrival or the rest of the army. Each leg keeps separated approach destinations, with a
+  shared maximum unit radius, and turns near its assigned destination rather than parking there.
+  Route admission rotates within the existing budgets, including small regions.
 - Builders patrol to repair the nearest damaged, completed owned building within their vision
   and patrol margin, then resume after full repair or removal. Ownership remains active throughout
   either interruption; pause, cancel and manual replacement stop it through the command boundary.
-- Line defenses spread stations along the line; area defenses separate stations, expanding small
-  gathering areas into hexagonal slots with a unit-width aisle. Same-owner defenses sharing a target
+- Line defenses spread stations along the line; ordinary area defenses cover the filled region
+  with spatially distributed stations. Explicit gathering keeps its compact center-first layout.
+  Area defenses expand small gathering areas into hexagonal slots with a unit-width aisle.
+  Same-owner defenses sharing a target
   retain unique stations across membership changes. Ordinary defenses may expand unsafe deployment
   slots without changing their gathering flag; those stations survive saving.
 - Ordinary patrol/defense dispatch admits 16 routes per controller per tick; gathering defenses
@@ -47,6 +60,17 @@ These are current execution details, subject to the [engineering change policy](
   Actual pursuit can interrupt travel and explicit attack pursuit stops at weapon range. Ordered
   targets persist until destruction or replacement; a stale firing destination can refresh after
   one second of route travel, within the combat budget. Mixed selections attack with armed members.
+- Destroyed explicit attack targets turn surviving mobile attackers' orders into gathering at the
+  target's last known position. Patrol/defense encounters instead resume their existing assignment.
+- Actual firing recruits nearby allied units whose profiles explicitly enable combat support.
+  Builders and auxiliary profiles default to no support. Hold, paused work and emergency repair
+  retain control; patrol/defense support retains its pursuit boundary. Direct moving supporters
+  resume their route and queued destinations after the target disappears. Recruitment takes effect
+  after the firing pass, so it cannot cascade into additional shots in that same pass.
+- Direct movement queues execute FIFO per unit, preserving ordered destinations across saves.
+  The first leg starts through the command boundary; subsequent legs claim the shared routing
+  allowance before background automations, preventing busy defenses from starving player orders.
+  Route failures wait with a diagnostic and retain the pending destination for retry or replacement.
 - In the current combat pass, route admission rotates with the tick and firing uses stable entity
   order. Same-target/range firing rings are shared only within that pass. Projectile impacts remove
   casualties immediately in projectile-ID order; references, affected defense stations and builder
@@ -156,9 +180,16 @@ may leave a blocked component; this is not proof that free space is physically a
 
 ## Repair
 
-Repair-and-return is explicit: select health strictly below the command threshold, prefer hubs,
-then resume suspended work or return to the prior position. Low health alone does not override
-automation. API threshold defaults and rates/ranges live in code; the UI shortcut belongs to
+Repair-and-return selects health strictly below the command threshold, prefers hubs,
+then resumes suspended work or returns to the prior position. Patrol/defense assignments can opt
+into automatic repair; disabled assignments never retreat solely because of low health. Enabled
+assignments check once per simulated second using the UI repair threshold and shared automation
+route allowance, submitting emergency repair through the same validated command boundary.
+Only currently controlled members qualify; paused assignments and members already repairing are
+excluded. Full health resumes the suspended assignment. Disabling the option stops new retreats
+without canceling repairs already underway. Unavailable facilities reject the individual repair
+with the ordinary diagnostic; other members continue their work and later checks retry.
+API threshold defaults and rates/ranges live in code; UI switches and the shortcut belong to
 [README](../../README.md#controls).
 Completed hubs heal one friendly mobile target at a time within their center-based radius,
 retaining it until full health, departure or destruction, then choosing the nearest wounded body
@@ -170,8 +201,9 @@ short terrain-certified segments connect the chosen local slot without per-unit 
 When a source has no reachable slot, another eligible source is tried; total lack of capacity waits
 and retries within the existing global route allowance. A pushed unit outside range resumes travel.
 [repair_positions.py](../../src/airts/systems/repair_positions.py) owns service geometry and capacity.
-Factory/command-center destinations retain explicit service. Direct builder repair approaches a
-damaged completed owned building within footprint-based range; replacement/automation assignment
+Factory/command-center destinations retain explicit service. Direct builder repair routes to clear
+cells within its footprint-based working range of a damaged completed owned building, without
+requiring an adjacent cell; replacement/automation assignment
 cancels it, and queued construction waits. Repairs cost no resources.
 
 Armed completed buildings use the shared projectile combat pass but never pursue or move. Unfinished

@@ -61,6 +61,27 @@ def generate_income(simulation: Simulation) -> None:
         )
 
 
+def generate_developer_income(simulation: Simulation) -> None:
+    """Credit only the player after each full enabled second of simulation time."""
+
+    if not simulation.developer_mode:
+        return
+    simulation.developer_income_ticks += 1
+    if simulation.developer_income_ticks < simulation.TICKS_PER_SECOND:
+        return
+    simulation.developer_income_ticks = 0
+    amount = 2000
+    simulation.resources["player"] += amount
+    simulation.events.record(
+        simulation.tick,
+        EventType.RESOURCE_CHANGED,
+        "player",
+        amount=amount,
+        balance=simulation.resources["player"],
+        reason="DEVELOPER_MODE_INCOME",
+    )
+
+
 def spawn_ambient_enemy(simulation: Simulation) -> None:
     """Create a seeded enemy tank on the right side at the configured interval."""
 

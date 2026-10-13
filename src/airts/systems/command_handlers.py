@@ -9,6 +9,7 @@ from airts.contracts.automations import (
     DefendParameters,
     EconomyParameters,
     PatrolParameters,
+    ProductionParameters,
     ReinforcementParameters,
     RepairParameters,
     RepairPhase,
@@ -32,10 +33,12 @@ from airts.contracts.commands import (
     HoldPositionCommand,
     ModifyAutomationCommand,
     MoveCommand,
+    SetDeveloperModeCommand,
     StopCommand,
     ValidationFailure,
     ValidationPhase,
     error_reason,
+    validate_auto_repair,
     validate_positive,
     validate_priority,
 )
@@ -54,6 +57,23 @@ from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+def set_developer_mode(simulation: Simulation, command: SetDeveloperModeCommand) -> CommandResult:
+    if type(command.enabled) is not bool:
+        return simulation._reject_validation(
+            "set_developer_mode",
+            ValidationFailure(ValidationPhase.SCHEMA, "ENABLED_MUST_BE_BOOLEAN", "enabled"),
+        )
+    if command.owner_id != "player" or command.owner_id not in simulation.resources:
+        return simulation._reject_validation(
+            "set_developer_mode",
+            ValidationFailure(ValidationPhase.OWNERSHIP, "DEVELOPER_MODE_PLAYER_ONLY", "owner_id"),
+        )
+    if simulation.developer_mode != command.enabled:
+        simulation.developer_mode = command.enabled
+        simulation.developer_income_ticks = 0
+    return simulation._accept("set_developer_mode")
 
 
 def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) -> CommandResult:
@@ -76,6 +96,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
             command.target,
             command.minimum_units,
             command.target_count,
+            command.auto_repair,
         )
     ):
         return simulation._reject_validation(
@@ -91,6 +112,19 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
         failure = validate_priority(command.priority)
         if failure is not None:
             return simulation._reject_validation("modify_automation", failure)
+    if command.auto_repair is not None:
+        failure = validate_auto_repair(command.auto_repair)
+        if failure is not None:
+            return simulation._reject_validation("modify_automation", failure)
+        if not isinstance(
+            automation.parameters, PatrolParameters | DefendParameters | ProductionParameters
+        ):
+            return simulation._reject_validation(
+                "modify_automation",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "AUTO_REPAIR_NOT_EDITABLE", "auto_repair"
+                ),
+            )
     new_parameters: PatrolParameters | DefendParameters | None = None
     production_target: PolygonRegion | PolylineTarget | None = None
     if command.target is not None:
@@ -104,7 +138,10 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                     ValidationFailure(ValidationPhase.PATH, error_reason(error), "target"),
                 )
             indices = {entity_id: 0 for entity_id in automation.entity_ids}
-            new_parameters = PatrolParameters(command.target, waypoints, indices)
+            assert isinstance(automation.parameters, PatrolParameters)
+            new_parameters = PatrolParameters(
+                command.target, waypoints, indices, auto_repair=automation.parameters.auto_repair
+            )
         elif automation.kind is AutomationKind.DEFEND:
             existing_defend = defend_parameters(automation)
             try:
@@ -126,6 +163,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                 command.target,
                 stations,
                 gathering_point=existing_defend.gathering_point,
+                auto_repair=existing_defend.auto_repair,
                 deployment_slots=slots,
                 assembly_radius=(
                     max(point.distance_to(target_center(command.target)) for point in slots)
@@ -203,6 +241,29 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                     ValidationPhase.SCHEMA, "TARGET_COUNT_BELOW_PRODUCED", "target_count"
                 ),
             )
+    if command.auto_repair is not None:
+        assert isinstance(
+            automation.parameters, PatrolParameters | DefendParameters | ProductionParameters
+        )
+        automation.parameters.auto_repair = command.auto_repair
+        if new_parameters is not None:
+            new_parameters.auto_repair = command.auto_repair
+        if isinstance(automation.parameters, ProductionParameters):
+            for linked_id in (
+                automation.parameters.defend_automation_id,
+                automation.parameters.patrol_automation_id,
+            ):
+                linked = simulation.automations.get(linked_id or "")
+                if linked is not None and not linked.status.terminal:
+                    assert isinstance(linked.parameters, PatrolParameters | DefendParameters)
+                    linked.parameters.auto_repair = command.auto_repair
+                    linked.modified_tick = simulation.tick
+                    simulation.events.record(
+                        simulation.tick,
+                        EventType.AUTOMATION_MODIFIED,
+                        linked.automation_id,
+                        parameters=linked.parameters.to_dict(),
+                    )
     if production_target is not None:
         production.attach_production_defense(simulation, automation, production_target)
     if command.title is not None:
@@ -266,6 +327,52 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
         destinations = simulation._allocate_destinations(
             command.entity_ids, command.target, gathering=command.gathering
         )
+        if command.queued:
+            for key in command.entity_ids:
+                entity = simulation.entities[key]
+                start = (
+                    entity.move_queue[-1]
+                    if entity.move_queue
+                    else entity.move_target
+                    if not entity.pursue_target and entity.move_target
+                    else entity.position
+                )
+                simulation._routes.shared_path(
+                    start, destinations[key], simulation._building_cells()
+                )
+            continuing = frozenset(
+                key
+                for key in command.entity_ids
+                if key not in simulation.assignments
+                and not simulation.entities[key].pursue_target
+                and simulation.entities[key].repair_target_id is None
+                and simulation.entities[key].reclaim_target_id is None
+                and (simulation.entities[key].path or simulation.entities[key].move_queue)
+            )
+            replacing = tuple(key for key in command.entity_ids if key not in continuing)
+            paths = (
+                movement.plan_group_paths(
+                    simulation, replacing, {key: destinations[key] for key in replacing}
+                )
+                if replacing
+                else {}
+            )
+            automation_control.manual_override_many(simulation, replacing)
+            for key in replacing:
+                entity = simulation.entities[key]
+                movement.start_path(
+                    simulation,
+                    entity,
+                    destinations[key],
+                    paths[key],
+                    "human_queue",
+                    UnitState.MOVING,
+                )
+            for key in command.entity_ids:
+                if key in continuing:
+                    simulation.entities[key].move_queue.append(destinations[key])
+                    simulation.entities[key].state = UnitState.MOVING
+            return simulation._accept("move")
         paths = movement.plan_group_paths(simulation, command.entity_ids, destinations)
     except PathfindingError as error:
         return simulation._reject_validation(
@@ -321,6 +428,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
         entity.move_target = None
         movement.reset_movement_liveness(entity)
         entity.attack_target_id = target.entity_id
+        entity.attack_gather_point = target.selection_position if entity.is_movable else None
         entity.pursue_target = entity.is_movable
         entity.state = UnitState.ATTACKING
     return simulation._accept("attack")
@@ -346,6 +454,9 @@ def stop(
 
 
 def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> CommandResult:
+    failure = validate_auto_repair(command.auto_repair)
+    if failure is not None:
+        return simulation._reject_validation("create_patrol", failure)
     failure = validate_automation_common(
         simulation,
         command.entity_ids,
@@ -371,7 +482,7 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
         command.priority,
         command.original_instruction,
         list(command.entity_ids),
-        PatrolParameters(command.target, waypoints),
+        PatrolParameters(command.target, waypoints, auto_repair=command.auto_repair),
     )
     failure = simulation._validate_claims(automation, command.entity_ids, replace_existing=True)
     if failure is not None:
@@ -381,6 +492,9 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
 
 
 def create_defend(simulation: Simulation, command: CreateDefendCommand) -> CommandResult:
+    failure = validate_auto_repair(command.auto_repair)
+    if failure is not None:
+        return simulation._reject_validation("create_defend", failure)
     failure = validate_automation_common(
         simulation,
         command.entity_ids,
@@ -429,6 +543,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
             command.target,
             stations,
             gathering_point=command.gathering_point,
+            auto_repair=command.auto_repair,
             deployment_slots=slots,
             assembly_radius=(
                 max(point.distance_to(target_center(command.target)) for point in slots)
@@ -701,7 +816,8 @@ def _allocate_defend_stations(
     *,
     gathering_point: bool,
 ) -> tuple[dict[str, Point], tuple[Point, ...], bool]:
-    if not gathering_point:
+    spread = not gathering_point and not isinstance(target, PolylineTarget)
+    if not gathering_point and not spread:
         stations = build_defend_stations(target, entity_ids, simulation.game_map)
         if (
             len(entity_ids) < 2
@@ -715,7 +831,7 @@ def _allocate_defend_stations(
         ):
             return stations, (), False
     radius = max(collision_radius(simulation.entities[key].kind) for key in entity_ids)
-    slots = simulation._gathering_slots(target, len(entity_ids), radius)
+    slots = simulation._gathering_slots(target, len(entity_ids), radius, spread=spread)
     stations = assign_formation_slots(
         {key: simulation.entities[key].position for key in entity_ids}, slots, target_center(target)
     )

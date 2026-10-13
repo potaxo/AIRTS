@@ -6,6 +6,7 @@ from airts.world.units.catalog import EntityKind
 type Color = tuple[int, int, int]
 
 REPAIR_COLOR: Color = (105, 232, 172)
+WORK_BEAM_WIDTH = 3
 
 TEAM_COLORS: dict[int, Color] = {
     1: (92, 220, 145),

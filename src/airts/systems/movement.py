@@ -377,6 +377,8 @@ def move_entities(simulation: Simulation) -> None:
     positions[:], target_data[:], goals[:] = data[:, :2], data[:, 2:4], data[:, 4:6]
     radii, speeds = floats["radii"], floats["speeds"]
     radii[:], speeds[:] = data[:, 6], data[:, 7]
+    # Sample original centers in one batch; the solver shares this cap for all motion.
+    speeds /= simulation._routes.movement_costs_at(positions)
     masses = floats["masses"]
     masses[:] = data[:, 13]
     moving, stationary = booleans["moving"], booleans["stationary"]
@@ -494,6 +496,41 @@ def move_entities(simulation: Simulation) -> None:
             _finish_path(simulation, entity)
 
 
+def drive_move_queues(simulation: Simulation) -> None:
+    pending = sorted(
+        key
+        for key, entity in simulation.entities.items()
+        if entity.move_queue and not entity.path and not entity.pursue_target
+    )
+    if not pending:
+        return
+    offset = simulation.tick % len(pending)
+    allowance = simulation._routes.automation_allowance(simulation.GATHERING_PATH_BUDGET)
+    for key in pending[offset:] + pending[:offset]:
+        if not allowance.claim():
+            break
+        entity = simulation.entities[key]
+        target = entity.move_queue[0]
+        try:
+            route = simulation._routes.shared_path(
+                entity.position, target, simulation._building_cells()
+            )
+        except PathfindingError as error:
+            if entity.state is not UnitState.WAITING:
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.PATHFINDING_FAILED,
+                    key,
+                    operation="queued_move",
+                    reason=str(error),
+                    target=[target.x, target.y],
+                )
+            entity.state = UnitState.WAITING
+            continue
+        entity.move_queue.pop(0)
+        start_path(simulation, entity, target, route, "human_queue", UnitState.MOVING)
+
+
 def _finish_path(simulation: Simulation, entity: Entity) -> None:
     if entity.path:
         return
@@ -559,7 +596,8 @@ def plan_group_paths(
             continue
         shared = simulation._routes.shared_path(start, anchor, blocked)
         for index, point in enumerate(shared.waypoints):
-            last = index + 1
+            # A distinct anchor in the start cell has a waypoint but no cell transition.
+            last = min(index + 1, len(shared.cells) - 1)
             assert shared.prefix_costs is not None
             branch = simulation._routes.segment_path(
                 point,

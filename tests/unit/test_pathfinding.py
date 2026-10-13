@@ -4,12 +4,34 @@ from collections.abc import Callable
 from heapq import heappop, heappush
 from random import Random
 
+import numpy as np
 import pytest
 
 from airts.contracts.spatial import Point
 from airts.navigation.collision.geometry import constrained_step
 from airts.navigation.pathfinding import PathfindingError, RoutingService, passable_segment_cells
 from airts.world.map import GameMap, load_map_data
+
+
+def test_batch_terrain_costs_sample_centers_and_reject_invalid_coordinates() -> None:
+    game_map = load_map_data(
+        {
+            "id": "terrain_cost_sampling",
+            "name": "Terrain cost sampling",
+            "width": 4,
+            "height": 2,
+            "terrain": {"rows": [["grass", "forest", "road", "bridge"], ["water"] * 4]},
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.5, 0.5]}],
+        }
+    )
+    router = RoutingService(game_map)
+    positions = np.array([[0.1, 0.8], [1.9, 0.1], [2.0, 0.5], [3.5, 0.5], [0.5, 1.5]])
+    np.testing.assert_array_equal(
+        router.movement_costs_at(positions), [1.0, 1.5, 0.75, 0.8, float("inf")]
+    )
+    for point in [(-0.1, 0.5), (4.0, 0.5), (0.5, -0.1), (0.5, 2.0), (float("nan"), 0.5)]:
+        with pytest.raises(ValueError, match="movement position outside map"):
+            router.movement_costs_at(np.array([point]))
 
 
 def test_weighted_routes_match_independent_forward_search() -> None:

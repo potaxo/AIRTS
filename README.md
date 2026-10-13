@@ -51,8 +51,9 @@ Use **Settings > New game** or `F2` to return to the cover and configure another
 
 The left panel shows resources, notices, pause/help controls, and your automations. The right
 **Selection** panel shows selected entities and their available actions. With a mixed selection,
-click a type row to narrow the selection to that type and reveal its controls. The bottom command
-bar shows actions available for the current selection and spatial target, plus **Settings**.
+left-click a type row to narrow the selection to that type and reveal its controls; right-click
+a type row in a mixed selection of your units to remove that type from the selection. The bottom
+command bar shows actions available for the current selection and spatial target, plus **Settings**.
 
 ## Controls
 
@@ -61,12 +62,13 @@ bar shows actions available for the current selection and spatial target, plus *
 | Input | Action |
 | --- | --- |
 | `1` | Selection mode: click an entity, point, route, or region; drag to select units |
-| `Shift` + selection | Toggle additions to the selection |
+| `Shift` + left-click or selection drag | Toggle additions to the selection |
+| `Shift` + right-click with selected units | Append a movement waypoint; units follow clicks in order, including clicks on enemies |
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
-| Double-click enemy entity | Inspect all hostile entities of that type currently inside the canvas |
+| Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
 | Right-click ground or a friendly entity | Move selected units while preserving their formation |
-| Double right-click at the same destination | Gather selected units around the destination |
-| Right-click an enemy | Order selected armed units to pursue and attack it; double right-click still attacks |
+| Double right-click at the same destination, including an enemy | Gather selected units around the destination |
+| Right-click an enemy | Order selected armed units to pursue and attack it; surviving attackers gather at its last location after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
 | Middle-drag | Pan the map |
@@ -99,7 +101,15 @@ Select units, draw or select a spatial target, then create the automation. The l
 failure/waiting reasons, membership, or progress. Click `...` again or its close button to close.
 Scroll with the wheel over the panel or its scrollbar.
 
-Direct orders override the selected units' current automation; other members can keep working.
+In **Units**, the separate **New area repair** row chooses whether new patrols, defenses,
+and `P` production defenses automatically retreat for repairs. It defaults to OFF. Open `...`
+to toggle auto repair for an existing assignment. Enabled assignments send units strictly below
+50% health (the same threshold as `R`) for repairs, then resume their original work at full health.
+Changing the new-area switch does not change existing assignments; disabling an assignment's
+switch prevents future automatic retreats and lets repairs already underway finish.
+
+Direct orders override the selected units' current automation and pending construction/movement
+queues; other members keep working. Shift movement appends to an existing direct movement route.
 Production linked to a defense sends existing and future units to that target: an area gathers
 them, while a line distributes them along it.
 
@@ -130,6 +140,9 @@ defense turrets. Command centers are starting buildings and cannot be constructe
 | `Shift` + left-drag | Preview a line spaced by building footprints; release to queue valid sites in order |
 | Right-click during placement | Cancel the unsubmitted preview and close placement, preserving accepted jobs |
 
+The building-line preview uses the submitted grid origins and footprints: green shadows mark valid
+sites, and red shadows mark sites that will be skipped. The complete line updates while dragging.
+
 On the river map, extractors must occupy resource sites; clicking within three cells of a site's
 center snaps placement to it. Completed extractors earn income automatically. Matter Synthesizers
 can be built on ordinary valid terrain and provide a more expensive, lower-output alternative.
@@ -153,8 +166,10 @@ at long range.
 | Right-click while choosing a reclaim target | Cancel target selection |
 
 A completed repair hub automatically heals one mobile unit of the same owner at a time within its radius.
-Select the hub to see that radius; a green line identifies its current patient even without
-selection. Units on repair orders stop at clear positions within range instead of all converging
+Select the hub to see that radius. Thick green lines connect builders to buildings while constructing
+or repairing, and repair facilities to units while healing, even without selection. Builders work
+within the build/repair ranges shown in their details, without needing to touch the building.
+Units on repair orders stop at clear positions within range instead of all converging
 on the hub's center. Selected attackers show red target lines; large selections sample those lines
 and movement routes.
 
@@ -218,6 +233,10 @@ timeline, and exact reproduction across versions or hardware is not guaranteed. 
 [replay policy](docs/milestones/persistence.md#save-reliability-and-replay-policy).
 
 **Settings** offers resolution presets and p95 frame/render/present-wait/simulation timings.
+Its **Developer mode** toggle starts OFF. When ON, it adds 2,000 resources to the player for
+each full second of game time, in addition to building income. Pausing suspends this income;
+turning it OFF stops the bonus and clears the partial second. Saves retain the toggle and timer;
+a new game starts with it OFF.
 **Real FPS** uses rolling p99 completed-frame time; **Submit FPS** is an average diagnostic.
 Neither measures physical monitor scan-out. Performance requirements and acceptance workloads
 are defined in the [performance contract](docs/milestones/performance.md).

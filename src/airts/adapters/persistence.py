@@ -53,8 +53,8 @@ from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v13"
-MATCH_SAVE_SCHEMA = "airts-match-save-v5"
+SAVE_SCHEMA = "airts-save-v16"
+MATCH_SAVE_SCHEMA = "airts-match-save-v8"
 
 
 class PersistenceError(ValueError):
@@ -192,6 +192,12 @@ def load_simulation_data(raw_data: object) -> Simulation:
     _validate_construction_sites(simulation)
     simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
+    if any(
+        entity.entity_id in simulation.assignments
+        and (entity.move_queue or entity.attack_gather_point is not None)
+        for entity in simulation.entities.values()
+    ):
+        raise PersistenceError("direct movement or attack intent conflicts with automation control")
     for entity in simulation.entities.values():
         if entity.kind is not EntityKind.BUILDER or (
             entity.repair_target_id is None and entity.reclaim_target_id is None
@@ -214,6 +220,17 @@ def load_simulation_data(raw_data: object) -> Simulation:
     _validate_recovery_request_owners(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
     simulation.resources = _load_resources(state.get("resources"), simulation)
+    simulation.developer_mode = _boolean(state.get("developer_mode"), "state.developer_mode")
+    simulation.developer_income_ticks = _integer(
+        state.get("developer_income_ticks"), "state.developer_income_ticks", minimum=0
+    )
+    if (
+        simulation.developer_income_ticks >= Simulation.TICKS_PER_SECOND
+        or simulation.developer_income_ticks > tick
+        or (not simulation.developer_mode and simulation.developer_income_ticks != 0)
+        or (simulation.developer_mode and "player" not in simulation.resources)
+    ):
+        raise PersistenceError("invalid developer mode income state")
     simulation.spatial = _load_spatial(state.get("spatial"), simulation, tick)
     simulation.selection = _load_selection(state.get("selection"), simulation)
     event_log = EventLog()
@@ -540,6 +557,16 @@ def _load_entities(
             None if move_target_raw is None else _point(move_target_raw, "entity.move_target")
         )
         path = [_point(item, "entity.path item") for item in _list(entity.get("path"), "path")]
+        move_queue = [
+            _point(item, "entity.move_queue item")
+            for item in _list(entity.get("move_queue"), "entity.move_queue")
+        ]
+        attack_gather_raw = entity.get("attack_gather_point")
+        attack_gather_point = (
+            None
+            if attack_gather_raw is None
+            else _point(attack_gather_raw, "entity.attack_gather_point")
+        )
         path_cost = _number(entity.get("path_cost"), "entity.path_cost", minimum=0.0)
         progress_target_raw = entity.get("progress_target")
         progress_target = (
@@ -613,6 +640,17 @@ def _load_entities(
         )
         if pursue_target and attack_target_id is None:
             raise PersistenceError(f"entity {entity_id} cannot pursue without an attack target")
+        if attack_gather_point is not None and (
+            not pursue_target
+            or not kind.profile.movable
+            or kind.profile.attack_damage <= 0
+            or not game_map.contains(attack_gather_point)
+        ):
+            raise PersistenceError(f"entity {entity_id} has an invalid attack gathering intent")
+        if move_queue and (hold_anchor is not None or not kind.profile.movable):
+            raise PersistenceError(f"entity {entity_id} cannot carry a movement queue")
+        if any(not game_map.is_passable(point) for point in move_queue):
+            raise PersistenceError(f"entity {entity_id} has an invalid queued movement target")
         if hold_anchor is not None and (path or move_target is not None or pursue_target):
             raise PersistenceError(
                 "Hold recovery cannot carry an ordinary movement or pursuit order"
@@ -653,6 +691,8 @@ def _load_entities(
             move_target=move_target,
             path=path,
             path_cost=path_cost,
+            move_queue=move_queue,
+            attack_gather_point=attack_gather_point,
             attack_target_id=attack_target_id,
             repair_target_id=_nullable_string(
                 entity.get("repair_target_id"), "entity.repair_target_id"
@@ -989,7 +1029,12 @@ def _load_automation_parameters(
         }
         if any(index >= len(waypoints) for index in indices.values()):
             raise PersistenceError("patrol has an invalid waypoint index")
-        return PatrolParameters(target, waypoints, indices)
+        return PatrolParameters(
+            target,
+            waypoints,
+            indices,
+            auto_repair=_boolean(data.get("auto_repair"), "patrol.auto_repair"),
+        )
     if kind is AutomationKind.DEFEND:
         try:
             target = target_from_dict(data.get("target"))
@@ -1036,6 +1081,7 @@ def _load_automation_parameters(
             gathering_point,
             deployment_slots,
             assembly_radius,
+            auto_repair=_boolean(data.get("auto_repair"), "defend.auto_repair"),
         )
     if kind is AutomationKind.PRODUCTION:
         try:
@@ -1108,6 +1154,7 @@ def _load_automation_parameters(
             ),
             cost_paid=_boolean(data.get("cost_paid"), "production.cost_paid"),
             continuous=continuous,
+            auto_repair=_boolean(data.get("auto_repair"), "production.auto_repair"),
             defend_target=defend_target,
             defend_automation_id=_nullable_string(
                 data.get("defend_automation_id"),

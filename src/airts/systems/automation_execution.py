@@ -7,6 +7,7 @@ from math import hypot
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
+    AUTO_REPAIR_HEALTH_THRESHOLD,
     Automation,
     AutomationKind,
     AutomationStatus,
@@ -25,8 +26,15 @@ from airts.contracts.automations import (
 from airts.contracts.automations import (
     patrol_parameters as _patrol_parameters,
 )
+from airts.contracts.commands import CreateRepairAndReturnCommand
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point, PointTarget, SpatialTarget, distance_to_target
+from airts.contracts.spatial import (
+    Point,
+    PointTarget,
+    PolylineTarget,
+    SpatialTarget,
+    distance_to_target,
+)
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
@@ -110,6 +118,31 @@ def scheduled_entity_ids(simulation: Simulation, automation: Automation) -> tupl
     stable_offset = sum(ord(character) for character in automation.automation_id)
     offset = (simulation.tick + stable_offset) % len(entity_ids)
     return tuple(entity_ids[offset:] + entity_ids[:offset])
+
+
+def drive_auto_repair(simulation: Simulation, automation: Automation) -> None:
+    parameters = automation.parameters
+    assert isinstance(parameters, PatrolParameters | DefendParameters)
+    if not parameters.auto_repair or simulation.tick % simulation.TICKS_PER_SECOND != 1:
+        return
+    allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
+    for entity_id in scheduled_entity_ids(simulation, automation):
+        if simulation.assignments.get(entity_id) != automation.automation_id:
+            continue
+        entity = simulation.entities[entity_id]
+        if entity.health >= entity.kind.profile.max_health * AUTO_REPAIR_HEALTH_THRESHOLD:
+            continue
+        if not allowance.claim():
+            break
+        simulation._execute_command(
+            CreateRepairAndReturnCommand(
+                (entity_id,),
+                health_threshold=AUTO_REPAIR_HEALTH_THRESHOLD,
+                owner_id=automation.owner_id,
+                original_instruction=f"Auto repair for {automation.automation_id}",
+            ),
+            record=False,
+        )
 
 
 def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:
@@ -300,6 +333,8 @@ def initialize_runtime_entity(
     entity.recovery_blocked_cells = None
     entity.recovery_retry_tick = entity.contact_wait_ticks = 0
     entity.move_target = None
+    entity.move_queue.clear()
+    entity.attack_gather_point = None
     entity.attack_target_id = None
     entity.pursue_target = False
     movement.reset_movement_liveness(entity)
@@ -322,7 +357,7 @@ def initialize_runtime_entity(
         entity.state = UnitState.IDLE
 
 
-def _interrupt_patrol(entity: Entity, parameters: PatrolParameters) -> None:
+def interrupt_patrol(entity: Entity, parameters: PatrolParameters) -> None:
     # Dispatch advances the cursor. Rewind once to resume the interrupted leg.
     if entity.path or entity.move_target is not None:
         parameters.waypoint_indices[entity.entity_id] = (
@@ -343,6 +378,7 @@ def drive_patrol(
     parameters = _patrol_parameters(automation)
     ordered = sorted(automation.entity_ids)
     indices = {key: index for index, key in enumerate(ordered)}
+    radius = max(collision_radius(simulation.entities[key].kind) for key in ordered)
     _, enemy_index = queries.patrol_index(simulation, automation.owner_id, parameters.target)
     enemies = queries.patrol_enemies[automation.owner_id]
     responding = tuple(
@@ -398,7 +434,7 @@ def drive_patrol(
                 movement.reset_movement_liveness(entity)
             target_id = repair_targets.get(key)
             if target_id is not None:
-                _interrupt_patrol(entity, parameters)
+                interrupt_patrol(entity, parameters)
                 entity.repair_target_id = target_id
                 entity.state = UnitState.REPAIRING
                 simulation.events.record(
@@ -435,7 +471,7 @@ def drive_patrol(
                 continue
             target_id = targets.get(key)
             if target_id is not None:
-                _interrupt_patrol(entity, parameters)
+                interrupt_patrol(entity, parameters)
                 entity.attack_target_id = target_id
                 entity.pursue_target = True
                 entity.state = UnitState.ATTACKING
@@ -450,7 +486,29 @@ def drive_patrol(
         entity.state = UnitState.PATROLLING
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
     for key in scheduled_entity_ids(simulation, automation):
+        if simulation.assignments.get(key) != automation.automation_id:
+            continue
         entity = simulation.entities[key]
+        if entity.path and not entity.pursue_target and entity.repair_target_id is None:
+            previous_index = (parameters.waypoint_indices.get(key, 0) - 1) % len(
+                parameters.waypoints
+            )
+            anchor = parameters.waypoints[previous_index]
+            next_anchor = parameters.waypoints[(previous_index + 1) % len(parameters.waypoints)]
+            tolerance = min(
+                max(0.75, collision_radius(entity.kind) * 2),
+                anchor.distance_to(next_anchor) * 0.35,
+            )
+            if entity.position.distance_to(entity.move_target or anchor) <= tolerance:
+                entity.path.clear()
+                entity.move_target = None
+                movement.reset_movement_liveness(entity)
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.MOVEMENT_COMPLETED,
+                    key,
+                    position=[entity.position.x, entity.position.y],
+                )
         if (
             entity.path
             or entity.pursue_target
@@ -463,9 +521,7 @@ def drive_patrol(
         waypoint_index = parameters.waypoint_indices.get(key, 0)
         anchor = parameters.waypoints[waypoint_index]
         target = (
-            simulation._gathering_slots(
-                PointTarget(anchor), len(ordered), collision_radius(entity.kind)
-            )[indices[key]]
+            simulation._gathering_slots(PointTarget(anchor), len(ordered), radius)[indices[key]]
             if len(ordered) > 1
             else anchor
         )
@@ -694,7 +750,11 @@ def coordinate_shared_defend_stations(
         slots: tuple[Point, ...] = ()
     else:
         slots = simulation._gathering_slots(
-            target, len(ids), max(collision_radius(simulation.entities[key].kind) for key in ids)
+            target,
+            len(ids),
+            max(collision_radius(simulation.entities[key].kind) for key in ids),
+            spread=not any(_defend_parameters(a).gathering_point for a in automations)
+            and not isinstance(target, PolylineTarget),
         )
         stations = assign_formation_slots(
             {key: simulation.entities[key].position for key in ids},

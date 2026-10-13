@@ -12,6 +12,8 @@ from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     ConstructionParameters,
+    DefendParameters,
+    PatrolParameters,
     ProductionParameters,
 )
 from airts.presentation.ui.drawing import UiPainter
@@ -30,6 +32,7 @@ class AutomationPanelState:
     selected_id: str | None = None
     details_open: bool = False
     group: AutomationKind | None = AutomationKind.PRODUCTION
+    new_area_auto_repair: bool = False
     scroll: int = 0
     buttons: list[tuple[pygame.Rect, str, str]] = field(default_factory=list)
     content_bottom: int = 0
@@ -163,6 +166,20 @@ def draw_panel(
             (tab, f"automation_group:{group.value if group is not None else 'units'}")
         )
     y += 34
+    if view.automation_panel.group is None:
+        repair = pygame.Rect(x, y, panel.width - 32, round(28 * view.ui_scale))
+        enabled = view.automation_panel.new_area_auto_repair
+        view.ui.button(
+            screen,
+            repair,
+            view.ui.fit_small_text(
+                f"New area repair: {'ON' if enabled else 'OFF'} (<50%)", repair.width - 8
+            ),
+        )
+        if enabled:
+            pygame.draw.rect(screen, (111, 221, 151), repair, 2, border_radius=4)
+        view._command_buttons.append((repair, "toggle_new_area_auto_repair"))
+        y += repair.height + round(8 * view.ui_scale)
     view.automation_panel.buttons.clear()
     live_automations = panel_rows(view)
     live_ids = {automation.automation_id for automation in live_automations}
@@ -273,6 +290,8 @@ def details_lines(view: AutomationsView) -> list[str]:
         )
     else:
         lines.append(f"Units {len(automation.entity_ids)} | Priority {automation.priority}")
+    if isinstance(parameters, PatrolParameters | DefendParameters | ProductionParameters):
+        lines.append(f"Auto repair: {'ON' if parameters.auto_repair else 'OFF'} | HP <50% (R)")
     return lines
 
 
@@ -286,6 +305,11 @@ def details_rect(view: AutomationsView) -> pygame.Rect | None:
         round(340 * view.ui_scale), view.right_panel_rect.left - view.left_panel_rect.right - 16
     )
     height = round(64 * view.ui_scale) + max(20, round(20 * view.ui_scale)) * len(lines)
+    automation = view.simulation.automations[view.automation_panel.selected_id or ""]
+    if isinstance(
+        automation.parameters, PatrolParameters | DefendParameters | ProductionParameters
+    ):
+        height += round(36 * view.ui_scale)
     row_y = next(
         (
             rectangle.y
@@ -316,3 +340,14 @@ def draw_details(view: AutomationsView, screen: pygame.Surface) -> None:
     for line in details_lines(view):
         view.ui.small_text(screen, view.ui.fit_small_text(line, width), (x, y), (180, 198, 214))
         y += max(20, round(20 * view.ui_scale))
+    automation = view.simulation.automations[view.automation_panel.selected_id or ""]
+    if isinstance(
+        automation.parameters, PatrolParameters | DefendParameters | ProductionParameters
+    ):
+        repair = pygame.Rect(x, y + 4, width, round(28 * view.ui_scale))
+        view.ui.button(
+            screen,
+            repair,
+            f"Auto repair: {'ON' if automation.parameters.auto_repair else 'OFF'} (<50%)",
+        )
+        view._command_buttons.append((repair, f"toggle_auto_repair:{automation.automation_id}"))

@@ -13,6 +13,7 @@ from tests.integration.scenarios import (
 )
 
 from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import capture_replay, run_replay
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
@@ -24,17 +25,113 @@ from airts.contracts.commands import (
     CreateEconomyCommand,
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
+    HoldPositionCommand,
     MoveCommand,
     RemoveEntityCommand,
+    SetDeveloperModeCommand,
 )
 from airts.contracts.events import EventType
-from airts.contracts.spatial import Point, PointTarget
+from airts.contracts.spatial import Point, PointTarget, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems import automation_execution
 from airts.world.entities import Projectile, UnitState
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+def support_world() -> Simulation:
+    return Simulation(
+        load_map_data(
+            {
+                "id": "nearby_support",
+                "name": "Nearby support",
+                "width": 40,
+                "height": 30,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "shooter", "kind": "scout", "position": [12.5, 10.5]},
+                    {"id": "support", "kind": "scout", "position": [5.5, 10.5]},
+                    {"id": "builder", "kind": "builder", "position": [7.5, 10.5]},
+                    {"id": "distant", "kind": "scout", "position": [1.5, 1.5]},
+                    {"id": "held", "kind": "scout", "position": [6.5, 8.5]},
+                    {"id": "enemy", "kind": "builder", "owner": "enemy", "position": [16.5, 10.5]},
+                ],
+            }
+        )
+    )
+
+
+def test_support_requires_an_actual_shot_and_preserves_builder_and_auxiliary_exclusion() -> None:
+    simulation = support_world()
+    simulation.entities["shooter"].attack_cooldown = 3
+    simulation.advance()
+    assert not simulation.entities["support"].pursue_target
+    assert not simulation.events.query(event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}))
+    simulation.advance(2)
+    assert simulation.entities["support"].pursue_target
+
+
+@pytest.mark.parametrize("order", ["idle", "move", "patrol", "defend"])
+def test_actual_shot_enlists_nearby_combat_units_and_preserves_their_work(
+    order: str, tmp_path: Path
+) -> None:
+    simulation = support_world()
+    support = simulation.entities["support"]
+    destination = Point(5.5, 24.5)
+    assert simulation.execute(HoldPositionCommand(("held",))).accepted
+    if order == "move":
+        assert simulation.execute(MoveCommand(("support",), destination)).accepted
+    elif order == "patrol":
+        assert simulation.execute(
+            CreatePatrolCommand(("support",), PolylineTarget((Point(5.5, 10.5), Point(22.5, 10.5))))
+        ).accepted
+    elif order == "defend":
+        assert simulation.execute(
+            CreateDefendCommand(("support",), PointTarget(Point(10, 10.5)))
+        ).accepted
+    assignment = simulation.assignments.get("support")
+    simulation.advance()
+    assert support.pursue_target and support.attack_target_id == "enemy"
+    assert simulation.events.query(
+        event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}), subject_id="support"
+    )
+    assert not simulation.entities["builder"].pursue_target
+    assert not simulation.entities["distant"].pursue_target
+    assert simulation.entities["held"].hold_anchor == Point(6.5, 8.5)
+    assert simulation.assignments.get("support") == assignment
+    save_simulation(simulation, tmp_path / "support.json")
+    loaded = load_simulation(tmp_path / "support.json")
+    for world in (simulation, loaded):
+        assert world.remove_entity("enemy").accepted
+        world.advance(120)
+    if order == "move":
+        assert support.position == destination
+    assert simulation.export_state() == loaded.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+def test_destroyed_ordered_target_converts_survivors_to_gathering_and_continues_after_save(
+    tmp_path: Path,
+) -> None:
+    simulation = support_world()
+    ids = ("shooter", "support")
+    assert simulation.execute(AttackCommand(ids, "enemy")).accepted
+    simulation.advance()
+    save_simulation(simulation, tmp_path / "attack.json")
+    loaded = load_simulation(tmp_path / "attack.json")
+    for world in (simulation, loaded):
+        for _ in range(160):
+            world.advance()
+            if "enemy" not in world.entities:
+                break
+        assert "enemy" not in world.entities
+        assert all(world.entities[key].move_queue for key in ids)
+        assert all(world.entities[key].state is UnitState.MOVING for key in ids)
+        world.advance(120)
+        assert all(world.entities[key].position.distance_to(Point(16.5, 10.5)) < 2 for key in ids)
+    assert simulation.export_state() == loaded.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
 def test_unreachable_attackers_leave_route_allowance_for_reachable_members() -> None:
@@ -434,6 +531,53 @@ def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities(
     simulation.advance(8)
     assert EntityKind.HEAVY_TANK.profile.max_health - simulation.entities["target"].health == damage
     assert simulation.entities["bystander"].health == EntityKind.HEAVY_TANK.profile.max_health
+
+
+def test_developer_mode_bonus_is_player_only_and_resets_when_disabled() -> None:
+    simulation = interaction_simulation()
+    assert not simulation.developer_mode
+    enemy_balance = simulation.resources["enemy"]
+    simulation.advance(3)
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    simulation.advance(9)
+    assert simulation.resources["player"] == 1500  # Ordinary extractor income only.
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted  # Preserve timer.
+    simulation.advance()
+    assert simulation.resources["player"] == 3500
+    simulation.advance(20)
+    assert simulation.resources["player"] == 9500
+    assert simulation.resources["enemy"] == enemy_balance
+    bonuses = [
+        event
+        for event in simulation.events.events
+        if event.details.get("reason") == "DEVELOPER_MODE_INCOME"
+    ]
+    assert [event.tick for event in bonuses] == [13, 23, 33]
+    assert all(event.details["amount"] == 2000 for event in bonuses)
+
+    simulation.advance(9)
+    assert simulation.execute(SetDeveloperModeCommand(False)).accepted
+    assert simulation.developer_income_ticks == 0
+    simulation.advance(20)
+    assert simulation.resources["player"] == 12500  # Normal income continues.
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    simulation.advance(9)
+    assert simulation.resources["player"] == 13500
+    simulation.advance()
+    assert simulation.resources["player"] == 15500
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+def test_developer_mode_rejects_other_owners_without_changing_the_setting() -> None:
+    simulation = interaction_simulation()
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    simulation.advance(4)
+    for owner_id in ("enemy", "unknown"):
+        result = simulation.execute(SetDeveloperModeCommand(False, owner_id))
+        assert not result.accepted
+        assert result.reason == "DEVELOPER_MODE_PLAYER_ONLY"
+        assert simulation.developer_mode
+        assert simulation.developer_income_ticks == 4
 
 
 def test_resource_generators_produce_without_an_automation() -> None:

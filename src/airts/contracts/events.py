@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 class EventType(StrEnum):
+    COMBAT_SUPPORT_JOINED = "combat_support_joined"
     COMMAND_ACCEPTED = "command_accepted"
     COMMAND_REJECTED = "command_rejected"
     VALIDATION_FAILED = "validation_failed"
