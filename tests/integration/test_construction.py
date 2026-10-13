@@ -209,7 +209,9 @@ def test_shift_construction_appends_fifo_jobs_and_keeps_placement_active() -> No
 
     with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
         app._handle_mouse_down(1, app.screen_point(Point(12, 12)))
+        app._handle_mouse_up(1, app.screen_point(Point(12, 12)))
         app._handle_mouse_down(1, app.screen_point(Point(16, 16)))
+        app._handle_mouse_up(1, app.screen_point(Point(16, 16)))
 
     constructions = [
         automation
@@ -269,7 +271,9 @@ def test_right_click_exits_shift_construction_without_moving_builders() -> None:
     app.placement_kind = EntityKind.RESOURCE_GENERATOR
     with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
         app._handle_mouse_down(1, app.screen_point(Point(6, 10)))
+        app._handle_mouse_up(1, app.screen_point(Point(6, 10)))
         app._handle_mouse_down(1, app.screen_point(Point(16, 16)))
+        app._handle_mouse_up(1, app.screen_point(Point(16, 16)))
     assignments = dict(app.simulation.assignments)
     command_count = len(app.simulation.command_history)
 

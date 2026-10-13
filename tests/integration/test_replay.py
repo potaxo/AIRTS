@@ -217,8 +217,6 @@ def test_replay_records_authoritative_entity_removal(tmp_path: Path) -> None:
     assert replayed.automations[production.automation_id or ""].status.value == "failed"
 
 
-@pytest.mark.parametrize("version", [6, 7, 8, 9, 10, 11, 12], ids=lambda version: f"v{version}")
-def test_replay_rejects_unsupported_previous_schemas(version: int) -> None:
-    schema = f"airts-replay-v{version}"
-    with pytest.raises(ReplayError, match=f"unsupported replay schema: {schema}"):
-        load_replay_data({"schema": schema})
+def test_replay_rejects_an_unknown_schema() -> None:
+    with pytest.raises(ReplayError, match="unsupported replay schema"):
+        load_replay_data({"schema": "unsupported"})

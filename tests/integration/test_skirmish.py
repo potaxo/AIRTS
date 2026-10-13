@@ -9,12 +9,13 @@ import pygame
 import pytest
 
 from airts.adapters.persistence import (
+    MATCH_SAVE_SCHEMA,
     PersistenceError,
     load_simulation,
     load_simulation_data,
     save_simulation,
 )
-from airts.adapters.replay import ReplayError, capture_replay, load_replay_data, run_replay
+from airts.adapters.replay import capture_replay, load_replay_data, run_replay
 from airts.contracts.automations import ConstructionParameters
 from airts.contracts.commands import (
     AttackCommand,
@@ -367,7 +368,7 @@ def test_save_rejects_wrong_match_result(tmp_path: Path) -> None:
         load_simulation(path)
 
 
-def test_command_center_preserves_recovery_and_legacy_save_migrates_result() -> None:
+def test_command_center_production_survives_current_save() -> None:
     simulation = match_simulation()
     for entity in tuple(simulation.entities.values()):
         if entity.owner_id in {"player", "ai_c"} and entity.kind in {
@@ -379,9 +380,8 @@ def test_command_center_preserves_recovery_and_legacy_save_migrates_result() -> 
     assert owner_status(simulation, "player") == "active"
     assert simulation.match_result is None
     state = simulation.export_state()
-    state["match_result"] = 2
     document = {
-        "schema": "airts-match-save-v3",
+        "schema": MATCH_SAVE_SCHEMA,
         "map": simulation.game_map.to_dict(),
         "state": state,
     }
@@ -394,7 +394,3 @@ def test_command_center_preserves_recovery_and_legacy_save_migrates_result() -> 
         entity.kind is EntityKind.BUILDER and entity.owner_id == "player"
         for entity in restored.entities.values()
     )
-    legacy_replay = capture_replay(simulation).to_dict()
-    legacy_replay["schema"] = "airts-match-replay-v3"
-    with pytest.raises(ReplayError, match="older opponent policy or elimination rules"):
-        load_replay_data(legacy_replay)

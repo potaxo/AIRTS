@@ -1,7 +1,7 @@
 # Persistence and replay diagnostics
 
 [persistence.py](../../src/airts/adapters/persistence.py) and
-[replay.py](../../src/airts/adapters/replay.py) own JSON schemas, field validation and migrations.
+[replay.py](../../src/airts/adapters/replay.py) own JSON schemas and field validation.
 This document owns reliability and compatibility policy; [design](../design.md) owns release priorities.
 
 ## Save reliability and replay policy
@@ -32,8 +32,7 @@ and released phase. A pathless Hold return can own progress toward its anchor. R
 be null or non-boolean integers within the saved tick; release requires a request. Restored recovery
 owners must be movable Hold units or valid unpaused arrived defenders. Progress must agree with
 its anchor or ordinary next waypoint; malformed intent is rejected, not normalized away.
-The additive `repair_target_id` defaults to null in supported older saves; patrol interruptions
-reuse attack/repair targets and waypoint cursors.
+Patrol interruptions reuse attack/repair targets and waypoint cursors.
 
 Spatial buckets, numeric scratch, contact graphs/directions/leaders, navigation fields, per-tick
 diagnostics and unfinished-automation query indexes rebuild from authoritative state. Presentation
@@ -42,40 +41,57 @@ Complete path events pack integer coordinates in memory and materialize `cells: 
 for inspection/export. Loading compacts paths again without changing their payload.
 [events.py](../../src/airts/contracts/events.py) owns event queries and JSON Lines export.
 
-## Supported formats and migrations
+## Supported formats
+
+Only the latest save formats are supported. Prefer the current implementation and optimization
+without preserving backward compatibility or maintaining migrations. Older saves may become
+unloadable after an update; reject outdated schema tags explicitly. Change the current schema tag
+when the authoritative shape or required semantics change. Current-format saves must still restore
+coherent state, and malformed data must fail with useful diagnostics. Replay remains a current-format
+diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v12 | Current write/read format; includes physical construction and recovery state |
-| Sandbox saves v7-v9 | Recorded position becomes the unavailable historical Hold anchor; contact state starts fresh; return request/phase starts null/false |
-| Sandbox save v10 | Retains anchors/contact/defense arrival state; initializes return request/phase to null/false |
-| Sandbox save v11 | Requires recovery request/phase; migrates historical construction |
-| Match save v4 | Current write/read format, including command-center production eligibility |
-| Match saves v1-v2 | Start with empty opponent memory; survivors regroup on the next decision |
-| Match save v3 | Retains opponent memory |
-| Sandbox replay v16 / match replay v9 | Current diagnostic formats and exact verification, including mass-weighted contact response |
+| Sandbox save v13 | Current write/read format; includes construction, recovery and reclamation intent |
+| Match save v5 | Current write/read format, including command-center production and reclamation intent |
+| Sandbox replay v17 / match replay v10 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
-Sandbox v7/v8 traffic reservations are validated and discarded, and obsolete movement state resets.
-Older saves without physical construction restore recorded paid cost/work and create scaffolds
-when builders reach valid sites; existing entities migrate as complete. Current saves require
-construction progress and site references and validate owner, kind, position, payment and live jobs.
-Match v2/v3 already retain physical construction. Match v1-v3 results are first checked under their
-old factory/builder rule, then recomputed with command-center production; an old concluded match
-can resume when both teams remain viable. Existing event history is retained.
-
-Retired `congestion_stopped: false` and `blocked_ticks: {}` remain in JSON for compatibility;
-supported input validates/discards historical values so they cannot suppress current movement.
-Re-saving writes sandbox v12 or match v4. Migration uses current gameplay rules and does not
-promise previous implementations' future trajectories. The adapter's exact tags/validators are
-authoritative when changing compatibility.
+Current saves require construction progress and site references and validate owner, kind,
+position, payment and live jobs. Match results use current command-center production rules.
+The adapter's exact tags/validators are authoritative. Legacy migration branches are removed;
+old sandbox and match saves are rejected before world reconstruction.
 
 Relative mass is immutable profile data resolved from the saved entity kind, not new per-entity
-state. The contact/UI module extraction and mass response add no save fields: current and supported
-older saves retain their existing migration paths and continue with current profile physics.
+state. Current saves continue with current profile physics.
 Sandbox replay v15 and match replay v8 predate mass-weighted response and are rejected with an
 explicit contact-physics diagnostic; use the original implementation to verify their expectations.
 Current replay recording/verification remains enabled, with no automatic replay migration.
+Reclaim targets are authoritative entity references and cannot conflict with repair or automation
+control. Saves retain approaching builders and fixed turret attack orders. Sandbox replay v16 and
+match replay v9 predate range-based repair arrival and are explicitly rejected. New kinds and cadence
+resolve through immutable profiles, while refunds/removal are regenerated from reclaim commands;
+internal removal is never recorded a second time as an external command.
+
+## Save execution and management
+
+The UI captures authoritative state between ticks. Background writing reads only that captured
+state and the append-only frozen event records; it never reads or mutates the live simulation.
+Packed path events expand one at a time during encoding. Compact JSON is encoded in bounded
+sections instead of pretty-printing the entire document through Python's incremental encoder.
+All events and commands remain in the save and replay diagnostics are unchanged.
+
+Writes use a unique temporary file in the destination directory, flush and synchronize it, then
+atomically replace the destination. Failure before replacement preserves the existing save;
+temporary files are cleaned up and errors are shown. The UI admits one save at a time, blocks
+load/overwrite/delete while writing, and completes a pending write before normal window exit.
+CLI saves remain synchronous and use the same snapshot and atomic writer.
+
+The modal save browser lists file names, modification times and sizes without parsing every save.
+It pauses the world while open, preserves the player's pause setting on close, and supports new
+timestamped saves, overwrite, load, delete, refresh and scrolling. Overwrite, load and delete require
+an explicit in-page confirmation. A failed load keeps the current world and page intact.
+[README](../../README.md#controls) owns entry points, paths and shortcuts.
 
 ## Validation and user entry points
 

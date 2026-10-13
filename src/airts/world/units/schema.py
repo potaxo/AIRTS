@@ -22,6 +22,7 @@ class EntityProfile:
     attack_damage: int = 0
     attack_range: float = 0.0
     projectile_speed: float = 0.0
+    attack_interval_ticks: int = 10
     production_cost: int = 0
     construction_cost: int = 0
     build_speed: float = 0.0
@@ -37,6 +38,8 @@ class EntityProfile:
             raise ValueError("entity profile collision_radius must be finite and positive")
         if not isfinite(self.projectile_speed) or self.projectile_speed < 0:
             raise ValueError("entity profile projectile_speed must be finite and nonnegative")
+        if type(self.attack_interval_ticks) is not int or self.attack_interval_ticks <= 0:
+            raise ValueError("entity profile attack_interval_ticks must be a positive integer")
         if self.attack_damage > 0 and self.projectile_speed == 0:
             raise ValueError("armed entity profile requires a positive projectile_speed")
 

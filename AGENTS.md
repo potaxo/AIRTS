@@ -40,9 +40,12 @@ Follow [product priorities](docs/design.md#product-priorities) and
 [save/replay policy](docs/milestones/persistence.md#save-reliability-and-replay-policy) when changing
 execution. Exact replay equality is not a prerequisite for authorized gameplay or performance
 changes; handle affected diagnostics and tests under the engineering change policy.
-Fix root causes and provide useful diagnostics. For a requested rewrite, define replacement scope
-and compatibility/save migration and replay diagnostic impact in the owning document as part of the
-work; ask only for consequential choices that the request and existing contracts do not resolve.
+Fix root causes and provide useful diagnostics. Prioritize the latest implementation and optimization;
+do not preserve old save compatibility or add save migrations. Follow the current-format-only
+[save policy](docs/milestones/persistence.md#supported-formats).
+For a requested rewrite, define replacement scope, save schema/rejection policy and replay diagnostic
+impact in the owning document as part of the work; ask only for consequential choices that the request
+and existing contracts do not resolve.
 
 ## Git and outputs
 

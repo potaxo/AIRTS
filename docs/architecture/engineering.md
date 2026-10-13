@@ -18,7 +18,7 @@ to change, not line count; avoid facade forwarders, generic managers and transit
 | `systems/` | Command application, automation, movement, combat, repair, economy, production, construction and results |
 | `adapters/` | Versioned persistence and replay diagnostics |
 | `presentation/` | Window/input, lobby, UI, software/GPU rendering and frame metrics |
-| `presentation/ui/` | Font/text primitives (`drawing`), selection/production controls (`selection`), automation inspection/scroll (`automations`) and settings/help (`menus`) |
+| `presentation/ui/` | Font/text primitives (`drawing`), selection/production controls (`selection`), automation inspection/scroll (`automations`), settings/help (`menus`) and save browser (`saves`) |
 | `data/` | Bundled maps; package-data configuration belongs to `pyproject.toml` |
 
 Runtime dependencies point inward: **presentation/adapters -> facade -> systems -> navigation/world**.
@@ -33,7 +33,9 @@ Internal calls import their owner directly. JSON tags carry data, not Python mod
 Each mobile kind has one keyword-based immutable profile; buildings share the same schema.
 The explicit catalog owns tag/profile and producer bindings, never dynamic plugin discovery.
 Armed profiles require positive projectile speed; collision radii and relative mass must be finite
-and positive. Each mobile profile declares its mass; buildings remain hard obstacles regardless of mass.
+and positive; weapon intervals are positive integer ticks. Each mobile profile declares its mass;
+buildings remain hard obstacles regardless of mass. The catalog's `BUILDABLE_KINDS` is shared by
+construction validation and the Builder controls. Artillery and turrets have independent definitions.
 Add a kind through its definition, catalog/producer binding and presentation palette; opponent
 composition remains an explicit AI policy. Simulation behavior stays in shared systems, not
 per-kind executors. Images/colors belong to presentation.
@@ -42,6 +44,9 @@ Command validation and precedence belong at the control boundary; spatial target
 Navigation owns contact geometry; movement owns intent/recovery lifecycle and all position/occupancy
 submission. Adapters restore authoritative recovery state; scratch, graphs and leaders are derived.
 Automation schema, control and execution remain separate responsibilities.
+`repair_positions.py` owns service geometry/capacity without importing repair controllers;
+`reclamation.py` owns builder approach and the single removal/refund transaction. Building-line
+draft geometry belongs to `presentation/build_placement.py` and emits ordinary construction commands.
 
 SoftwareRenderer owns scene caches and reads SceneView; the app owns input drafts, overlays and
 composition. Camera owns zoom/offset and bounded transforms independently of input. UI panels use
@@ -74,7 +79,7 @@ tradeoff; proposals are not requirements. New durable concerns may get a focused
 directly from design. Use its task index to read only relevant documents or sections.
 
 Cleanup preserves commands, schemas, observable behavior and hardware thresholds. A movement
-rewrite defines replacement scope, save migration and replay impact under
+rewrite defines replacement scope, current save format/rejection and replay impact under
 [persistence policy](../milestones/persistence.md#save-reliability-and-replay-policy).
 Do not add unrelated restructuring or a second public facade.
 
@@ -103,6 +108,10 @@ Use helpers rather than importing discovered tests: [scenarios](../../tests/inte
 [recovery oracle](../../tests/integration/recovery_checks.py), and `tests/scout_scenario.py` own shared inputs.
 
 Persistence tests retain distinct patrol, repair, queues, spawn and defense continuation cases.
+Save/replay tests cover current formats and meaningful corruption/failure paths. Keep a generic
+unsupported-format check rather than enumerating historical versions or freezing retired-field
+compatibility and old-version diagnostic wording. Remove superseded tests when their behavior is
+retired, and keep shared contracts in the lowest useful suite instead of repeating smoke assertions.
 Current exact continuation/replay comparisons may become meaningful restoration, gameplay and
 concurrency checks when an intentional execution change needs that; preserve unique failure coverage
 and document diagnostic support. Do not silently skip failures. Renderer startup uses small worlds;

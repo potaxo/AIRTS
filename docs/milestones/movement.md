@@ -163,9 +163,21 @@ automation. API threshold defaults and rates/ranges live in code; the UI shortcu
 Completed hubs heal one friendly mobile target at a time within their center-based radius,
 retaining it until full health, departure or destruction, then choosing the nearest wounded body
 with stable ID ties. Builders qualify; repair-and-return cannot bypass range or concurrent capacity.
+Travel stops as soon as a unit is in service range with disc clearance, even while its old path
+has remaining waypoints. Overlapping arrivals choose another clear slot; traveling repair destinations
+avoid both present occupants and other incoming destinations. Static area goals share a routing field;
+short terrain-certified segments connect the chosen local slot without per-unit full-map fields.
+When a source has no reachable slot, another eligible source is tried; total lack of capacity waits
+and retries within the existing global route allowance. A pushed unit outside range resumes travel.
+[repair_positions.py](../../src/airts/systems/repair_positions.py) owns service geometry and capacity.
 Factory/command-center destinations retain explicit service. Direct builder repair approaches a
 damaged completed owned building within footprint-based range; replacement/automation assignment
 cancels it, and queued construction waits. Repairs cost no resources.
+
+Armed completed buildings use the shared projectile combat pass but never pursue or move. Unfinished
+turrets cannot fire. Weapon cadence is an immutable profile interval in fixed ticks (existing units
+retain one second); artillery has longer range, slower travel and a 2.5-second firing interval.
+It uses the existing single-target projectile rules.
 
 ## Verification owners
 

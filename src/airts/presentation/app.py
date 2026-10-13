@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime
 from enum import StrEnum
+from logging import getLogger
 from math import hypot
 from pathlib import Path
 from time import perf_counter
 
 import pygame
 
-from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
+from airts.adapters.persistence import PersistenceError, capture_save, load_simulation, write_save
 from airts.contracts.automations import (
     AutomationKind,
     ConstructionParameters,
@@ -32,6 +35,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    ReclaimBuildingCommand,
     ReduceProductionCommand,
     RenameRegionCommand,
     RepairBuildingCommand,
@@ -50,12 +54,13 @@ from airts.contracts.spatial import (
     rectangle_region,
     simplify_freehand,
 )
+from airts.presentation.build_placement import BuildingLineDraft
 from airts.presentation.camera import Camera
 from airts.presentation.lobby import Lobby
 from airts.presentation.metrics import PresentationMetrics, PresentationProfiler
 from airts.presentation.opengl_renderer import OpenGLRenderer, OpenGLRendererError
 from airts.presentation.rendering import RendererBackend, SoftwareRenderer
-from airts.presentation.ui import automations, menus, selection
+from airts.presentation.ui import automations, menus, saves, selection
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
 from airts.systems import construction
@@ -137,6 +142,8 @@ class AirtsApp:
         self.settings_open = False
         self.help_open = False
         self.placement_kind: EntityKind | None = None
+        self.building_line_draft: BuildingLineDraft | None = None
+        self.reclaim_mode = False
         self.paused = False
         self.real_fps = 0.0
         self.presentation_metrics = PresentationMetrics()
@@ -158,6 +165,11 @@ class AirtsApp:
         self._initial_enemy_spawn_interval_ticks = simulation.enemy_spawn_interval_ticks
         self._initial_enemy_spawn_cap = simulation.enemy_spawn_cap
         self.quick_save_path = Path("airts-quicksave.json")
+        self.save_directory = Path("saves")
+        self.save_panel = saves.SavePanelState()
+        self._save_executor: ThreadPoolExecutor | None = None
+        self._save_future: Future[None] | None = None
+        self._saving_path: Path | None = None
         self.ui = UiPainter()
         self.automation_panel = automations.AutomationPanelState()
         self._frame_selected_entities: tuple[Entity, ...] | None = None
@@ -278,6 +290,7 @@ class AirtsApp:
             self.lobby is not None
             or self.naming_reference_id is not None
             or self.settings_open
+            or self.save_panel.open
             or self.help_open
         ):
             return
@@ -371,6 +384,7 @@ class AirtsApp:
                 loop_started_at = perf_counter()
                 elapsed = min(loop_started_at - previous_loop_at, 0.25)
                 previous_loop_at = loop_started_at
+                self._poll_save()
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
@@ -395,7 +409,12 @@ class AirtsApp:
                         screen = pygame.display.set_mode(target_size, self.DISPLAY_FLAGS)
                     self.resize_layout(target_size)
                 self._move_camera_from_keys(elapsed)
-                if not self.paused and self.lobby is None and self.simulation.match_result is None:
+                if (
+                    not self.paused
+                    and not self.save_panel.open
+                    and self.lobby is None
+                    and self.simulation.match_result is None
+                ):
                     accumulator += elapsed
                     simulation_started = perf_counter()
                     while accumulator >= Simulation.TICK_SECONDS:
@@ -435,6 +454,7 @@ class AirtsApp:
                 self.real_fps = self.presentation_metrics.one_percent_low_fps
                 frames += 1
         finally:
+            self._finish_save()
             if opengl_renderer is not None:
                 opengl_renderer.release()
             self._shutdown_pygame(display_initialized, font_initialized)
@@ -477,6 +497,18 @@ class AirtsApp:
             return
         if event.type == pygame.WINDOWFOCUSLOST:
             self._camera_keys.clear()
+            self.building_line_draft = None
+            return
+        if self.save_panel.open and event.type not in {
+            pygame.VIDEORESIZE,
+            pygame.WINDOWSIZECHANGED,
+        }:
+            if event.type == pygame.MOUSEWHEEL:
+                self.save_panel.scroll_by(-event.y)
+            elif event.type == pygame.KEYDOWN:
+                self._handle_key(event.key)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                self._handle_mouse_down(event.button, event.pos)
             return
         if self.lobby is not None and event.type not in {
             pygame.VIDEORESIZE,
@@ -523,6 +555,21 @@ class AirtsApp:
             self.resize_layout(tuple(size))
 
     def _handle_key(self, key: int) -> None:
+        if self.save_panel.open:
+            if key == pygame.K_ESCAPE:
+                if self.save_panel.confirmation:
+                    self.save_panel.confirmation = None
+                else:
+                    self.save_panel.open = False
+            elif key in {pygame.K_UP, pygame.K_DOWN}:
+                self.save_panel.scroll_by(-1 if key == pygame.K_UP else 1)
+            return
+        if key in {pygame.K_t, pygame.K_y, pygame.K_p, pygame.K_r, pygame.K_x, pygame.K_h} and any(
+            self.simulation.entities[entity_id].owner_id != "player"
+            for entity_id in self.selected_entities
+        ):
+            self.notice = "Enemy units cannot receive orders."
+            return
         if key in {pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d}:
             self._camera_keys.add(key)
             return
@@ -578,8 +625,18 @@ class AirtsApp:
             self.notice = "Selection and active tools cleared."
 
     def _handle_mouse_down(self, button: int, position: tuple[int, int]) -> None:
+        if self.save_panel.open:
+            if button == 1:
+                self._handle_save_click(position)
+            return
         last_move_click = self._last_move_click
         self._last_move_click = None
+        if button == 3 and (self.building_line_draft is not None or self.reclaim_mode):
+            self.building_line_draft = None
+            self.reclaim_mode = False
+            self.placement_kind = None
+            self.notice = "Draft canceled. Queued construction is unchanged."
+            return
         # Direct headless interaction tests use historical canvas-local pixels.
         if self.ui.font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
@@ -623,6 +680,31 @@ class AirtsApp:
         if not self._in_canvas(position):
             return
         point = self._map_point(position)
+        if button == 1 and self.reclaim_mode:
+            targets = sorted(
+                (distance, entity.entity_id)
+                for entity in self.simulation.entities.values()
+                if entity.owner_id == "player"
+                and entity.category is EntityCategory.BUILDING
+                and (distance := _entity_hit_distance(entity, point)) <= self.ENTITY_CLICK_RADIUS
+            )
+            if not targets:
+                self.notice = "Choose a friendly building to reclaim."
+                return
+            reclaim_builders = tuple(
+                key
+                for key in sorted(self.selected_entities)
+                if self.simulation.entities[key].kind is EntityKind.BUILDER
+            )
+            result = self.simulation.execute(
+                ReclaimBuildingCommand(reclaim_builders, targets[0][1])
+            )
+            self.notice = (
+                "Builders will reclaim the building for 70%." if result.accepted else result.reason
+            )
+            if result.accepted:
+                self.reclaim_mode = False
+            return
         if button == 3 and self.placement_kind is not None:
             self.placement_kind = None
             self.notice = "Building placement closed. Queued construction is unchanged."
@@ -643,6 +725,14 @@ class AirtsApp:
                 queued = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
             except pygame.error:
                 queued = False
+            if queued:
+                self.building_line_draft = BuildingLineDraft(
+                    self.placement_kind, tuple(builders), snapped, snapped
+                )
+                self.notice = (
+                    "Drag to preview a building line; release to queue, right-click to cancel."
+                )
+                return
             result = self.simulation.execute(
                 CreateConstructionCommand(
                     builders[0],
@@ -667,6 +757,12 @@ class AirtsApp:
                     self.notice = "A line needs at least two points before finishing."
                     return
                 self._finish_target(PolylineTarget(tuple(self.line_points)))
+                return
+            if any(
+                self.simulation.entities[entity_id].owner_id != "player"
+                for entity_id in self.selected_entities
+            ):
+                self.notice = "Enemy units cannot receive orders."
                 return
             entity_ids = tuple(sorted(self.selected_entities))
             hits = sorted(
@@ -745,6 +841,16 @@ class AirtsApp:
         if self.ui.font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
             position = (position[0] + origin_x, position[1] + origin_y)
+        if self.building_line_draft is not None:
+            if buttons[2]:
+                self.building_line_draft = None
+                self.placement_kind = None
+                self.notice = "Building line canceled."
+            elif buttons[0] and self._in_canvas(position):
+                preview = self._construction_preview_at(self._map_point(position))
+                assert preview is not None
+                self.building_line_draft.end = preview[0]
+            return
         if self.automation_panel.scroll_drag_offset is not None and buttons[0]:
             automations.scroll_from_pointer(self, position[1])
             return
@@ -766,6 +872,15 @@ class AirtsApp:
         if self.ui.font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
             position = (position[0] + origin_x, position[1] + origin_y)
+        if button == 1 and self.building_line_draft is not None:
+            draft = self.building_line_draft
+            self.building_line_draft = None
+            if self._in_canvas(position):
+                preview = self._construction_preview_at(self._map_point(position))
+                assert preview is not None
+                draft.end = preview[0]
+            self._queue_building_line(draft)
+            return
         if button == 2:
             self._camera_drag_position = None
             return
@@ -800,6 +915,29 @@ class AirtsApp:
             except ValueError as error:
                 self.notice = str(error)
 
+    def _queue_building_line(self, draft: BuildingLineDraft) -> None:
+        accepted = 0
+        rejected = 0
+        for position in draft.positions():
+            result = self.simulation.execute(
+                CreateConstructionCommand(
+                    draft.builder_ids[0],
+                    draft.kind,
+                    position,
+                    builder_ids=draft.builder_ids,
+                    queued=True,
+                )
+            )
+            if result.accepted:
+                accepted += 1
+                self.automation_panel.group = AutomationKind.CONSTRUCTION
+                self.automation_panel.selected_id = result.automation_id
+            else:
+                rejected += 1
+        self.notice = f"Queued {accepted} buildings." + (
+            f" Skipped {rejected} invalid sites." if rejected else ""
+        )
+
     def _select_entities(self, start: Point, end: Point, additive: bool = False) -> None:
         if start.distance_to(end) < 0.3:
             candidates = sorted(
@@ -815,12 +953,19 @@ class AirtsApp:
                 )
             )
             clicked = candidates[0][1] if candidates else None
-            if clicked is not None and self.simulation.entities[clicked].owner_id != "player":
+            if (
+                clicked is not None
+                and self.simulation.entities[clicked].owner_id != "player"
+                and not self.simulation.are_hostile(
+                    self.simulation.entities[clicked].owner_id, "player"
+                )
+            ):
                 self.inspected_entity_id = clicked
                 if not additive:
                     self.selected_entities.clear()
                 self._commit_selection()
-                self.notice = f"Inspecting enemy {clicked}; commands disabled."
+                self._last_entity_click = None
+                self.notice = f"Inspecting ally {clicked}; commands disabled."
                 return
             found = {clicked} if clicked is not None else set()
             if clicked is not None:
@@ -830,7 +975,10 @@ class AirtsApp:
                     and self._last_entity_click[0] == clicked
                     and click_tick - self._last_entity_click[1] <= self.DOUBLE_CLICK_MS
                 ):
-                    self._select_all_visible_kind(self.simulation.entities[clicked].kind)
+                    entity = self.simulation.entities[clicked]
+                    self._select_all_visible_kind(
+                        entity.kind, hostile=self.simulation.are_hostile(entity.owner_id, "player")
+                    )
                     self._last_entity_click = None
                     return
                 self._last_entity_click = (clicked, click_tick)
@@ -876,18 +1024,33 @@ class AirtsApp:
                 entity_id
                 for entity_id, entity in self.simulation.entities.items()
                 if entity.owner_id == "player"
+                or self.simulation.are_hostile(entity.owner_id, "player")
                 if entity.category is EntityCategory.UNIT
                 if left <= entity.selection_position.x <= right
                 and top <= entity.selection_position.y <= bottom
                 if self.canvas_rect.collidepoint(self.screen_point(entity.selection_position))
             }
+            player_units = {
+                entity_id
+                for entity_id in found
+                if self.simulation.entities[entity_id].owner_id == "player"
+            }
+            if player_units:
+                found = player_units
         if additive:
             self.selected_entities.symmetric_difference_update(found)
         else:
             self.selected_entities = found
         self.inspected_entity_id = next(iter(found)) if len(found) == 1 else None
         self._selection_changed()
-        self.notice = f"Selected {len(self.selected_entities)} unit(s)."
+        self.notice = (
+            f"Selected {len(self.selected_entities)} enemy unit(s)."
+            if self.selected_entities
+            and all(
+                self.simulation.entities[key].owner_id != "player" for key in self.selected_entities
+            )
+            else f"Selected {len(self.selected_entities)} unit(s)."
+        )
 
     def _finish_target(self, target: SpatialTarget) -> None:
         if self.editing_reference_id is not None:
@@ -921,7 +1084,13 @@ class AirtsApp:
     def _commit_selection(self) -> None:
         self.simulation.execute(
             SetSelectionCommand(
-                tuple(sorted(self.selected_entities)),
+                tuple(
+                    sorted(
+                        entity_id
+                        for entity_id in self.selected_entities
+                        if self.simulation.entities[entity_id].owner_id == "player"
+                    )
+                ),
                 tuple(sorted(self.selected_points)),
                 tuple(sorted(self.selected_routes)),
                 tuple(sorted(self.selected_regions)),
@@ -931,6 +1100,17 @@ class AirtsApp:
     def _selection_changed(self) -> None:
         self._last_move_click = None
         self.production_detail_kind = None
+        player_entities = {
+            entity_id
+            for entity_id in self.selected_entities
+            if entity_id in self.simulation.entities
+            and self.simulation.entities[entity_id].owner_id == "player"
+        }
+        if player_entities:
+            self.selected_entities = player_entities
+        self.inspected_entity_id = (
+            next(iter(self.selected_entities)) if len(self.selected_entities) == 1 else None
+        )
         kinds = {
             self.simulation.entities[entity_id].kind
             for entity_id in self.selected_entities
@@ -951,11 +1131,15 @@ class AirtsApp:
         self._selection_changed()
         self.notice = f"Selected {len(self.selected_entities)} {kind.value} unit(s)."
 
-    def _select_all_visible_kind(self, kind: EntityKind) -> None:
+    def _select_all_visible_kind(self, kind: EntityKind, *, hostile: bool = False) -> None:
         self.selected_entities = {
             entity_id
             for entity_id, entity in self.simulation.entities.items()
-            if entity.owner_id == "player"
+            if (
+                self.simulation.are_hostile(entity.owner_id, "player")
+                if hostile
+                else entity.owner_id == "player"
+            )
             and entity.kind is kind
             and self.canvas_rect.collidepoint(self.screen_point(entity.selection_position))
         }
@@ -963,7 +1147,7 @@ class AirtsApp:
             next(iter(self.selected_entities)) if len(self.selected_entities) == 1 else None
         )
         self._selection_changed()
-        self.notice = f"Selected all visible {kind.value} units."
+        self.notice = f"Selected all visible {'enemy ' if hostile else ''}{kind.value} units."
 
     def _name_selected_region(self) -> None:
         if len(self.selected_regions) != 1:
@@ -1125,28 +1309,132 @@ class AirtsApp:
             self.active_target = None
         self.notice = result.reason
 
-    def _save_game(self) -> None:
+    @property
+    def save_busy(self) -> bool:
+        return self._save_future is not None
+
+    def _save_game(self, path: Path | None = None) -> None:
+        self._poll_save()
+        if self.save_busy:
+            self.notice = "A save is already in progress."
+            return
+        destination = path if path is not None else self.quick_save_path
         try:
-            save_simulation(self.simulation, self.quick_save_path)
+            if destination.parent == self.save_directory:
+                self.save_directory.mkdir(parents=True, exist_ok=True)
+            snapshot = capture_save(self.simulation)
         except OSError as error:
             self.notice = f"Save failed: {error}"
-        else:
-            self.notice = f"Saved {self.quick_save_path}."
+            return
+        if self._save_executor is None:
+            self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="airts-save")
+        self._saving_path = destination
+        self._save_future = self._save_executor.submit(write_save, snapshot, destination)
+        self.notice = f"Saving {destination.name}..."
 
-    def _load_game(self) -> None:
+    def _poll_save(self) -> None:
+        future = self._save_future
+        if future is None or not future.done():
+            return
         try:
-            simulation = load_simulation(self.quick_save_path)
+            future.result()
+        except (OSError, ValueError, TypeError) as error:
+            self.notice = f"Save failed: {error}"
+            getLogger(__name__).error(self.notice)
+        else:
+            self.notice = f"Saved {self._saving_path}."
+            self.save_panel.selected = self._saving_path
+        finally:
+            self._save_future = None
+            self._saving_path = None
+        if self.save_panel.open:
+            self.save_panel.refresh(self.save_directory, self.quick_save_path)
+
+    def _finish_save(self) -> None:
+        """Normal window exit waits for the pending atomic write, including its errors."""
+        if self._save_executor is not None:
+            self._save_executor.shutdown(wait=True)
+            self._save_executor = None
+        self._poll_save()
+
+    def _open_save_manager(self) -> None:
+        self.settings_open = False
+        self.help_open = False
+        self._camera_keys.clear()
+        self._camera_drag_position = None
+        self._clear_draft()
+        self.save_panel.open = True
+        self.save_panel.confirmation = None
+        self.save_panel.refresh(self.save_directory, self.quick_save_path)
+        if not self.save_busy:
+            self.notice = "Choose New save, or select an existing save."
+
+    def _handle_save_click(self, position: tuple[int, int]) -> None:
+        for rectangle, action in self.save_panel.buttons:
+            if not rectangle.collidepoint(position):
+                continue
+            if action == "close":
+                self.save_panel.open = False
+                self.save_panel.confirmation = None
+            elif action == "cancel":
+                self.save_panel.confirmation = None
+            elif action.startswith("select:"):
+                self.save_panel.selected = self.save_panel.entries[int(action.split(":")[1])].path
+                self.save_panel.confirmation = None
+            elif action in {"previous", "next"}:
+                self.save_panel.scroll_by(-1 if action == "previous" else 1)
+            elif self.save_busy:
+                self.notice = "Wait for the current save to finish."
+            elif action == "refresh":
+                self.save_panel.confirmation = None
+                self.save_panel.refresh(self.save_directory, self.quick_save_path)
+            elif action == "new_save":
+                self.save_panel.confirmation = None
+                name = datetime.now().strftime("Save %Y-%m-%d %H.%M.%S.%f.json")
+                self._save_game(self.save_directory / name)
+            elif action in {"overwrite", "delete", "load"}:
+                self.save_panel.confirmation = action
+            elif action == "confirm":
+                operation = self.save_panel.confirmation
+                selected = self.save_panel.selected
+                self.save_panel.confirmation = None
+                if selected is None:
+                    return
+                if operation == "overwrite":
+                    self._save_game(selected)
+                elif operation == "load":
+                    self._load_game(selected)
+                elif operation == "delete":
+                    try:
+                        selected.unlink()
+                    except OSError as error:
+                        self.notice = f"Delete failed: {error}"
+                    else:
+                        self.notice = f"Deleted {selected.name}."
+                    self.save_panel.refresh(self.save_directory, self.quick_save_path)
+            return
+
+    def _load_game(self, path: Path | None = None) -> None:
+        self._poll_save()
+        if self.save_busy:
+            self.notice = "Wait for the current save to finish before loading."
+            return
+        source = path if path is not None else self.quick_save_path
+        try:
+            simulation = load_simulation(source)
         except (OSError, PersistenceError) as error:
             self.notice = f"Load failed: {error}"
             return
         self.simulation = simulation
+        self.lobby = None
+        self.save_panel.open = False
         self._software_renderer.reset_map()
         self.camera.zoom = 1.0
         self.camera.offset = Point(0, 0)
         self.paused = False
         self._reset_presentation_history()
         self._clear_selection_state()
-        self.notice = f"Loaded {self.quick_save_path}."
+        self.notice = f"Loaded {source}."
 
     def _new_game(self) -> None:
         if self.simulation.game_map.match_slots:
@@ -1189,6 +1477,9 @@ class AirtsApp:
             if action == "settings":
                 self.settings_open = not self.settings_open
                 return
+            if action == "saves":
+                self._open_save_manager()
+                return
             if action == "help":
                 self.help_open = not self.help_open
                 return
@@ -1207,7 +1498,14 @@ class AirtsApp:
                 self.production_detail_kind = EntityKind(action.partition(":")[2])
                 self.automation_panel.details_open = False
                 return
+            if action == "reclaim":
+                self._clear_draft()
+                self.placement_kind = None
+                self.reclaim_mode = True
+                self.notice = "Click a friendly building to reclaim (70%); right-click cancels."
+                return
             if action.startswith("build:"):
+                self._clear_draft()
                 self.placement_kind = EntityKind(action.partition(":")[2])
                 self.notice = "Click a clear grid location to place the building."
                 return
@@ -1273,7 +1571,7 @@ class AirtsApp:
             if action == "resolution_higher":
                 self._request_resolution_step(1)
                 return True
-            {"save": self._save_game, "load": self._load_game, "new": self._new_game}[action]()
+            {"saves": self._open_save_manager, "new": self._new_game}[action]()
             self.settings_open = False
             return True
         return False
@@ -1395,6 +1693,8 @@ class AirtsApp:
             menus.draw_help(self, screen)
         if self.lobby is not None:
             self.lobby.draw(self, screen)
+        if self.save_panel.open:
+            saves.draw(self, screen)
 
     def _draw_opengl_overlay(self, screen: pygame.Surface) -> None:
         """Draw non-base scene feedback and the UI into a GPU-composited texture."""
@@ -1490,7 +1790,13 @@ class AirtsApp:
             self.automation_panel.scroll,
             self.settings_open,
             self.help_open,
-            self.placement_kind,
+            (
+                self.placement_kind,
+                self.reclaim_mode,
+                None
+                if self.building_line_draft is None
+                else (self.building_line_draft.start, self.building_line_draft.end),
+            ),
             (
                 self.automation_panel.group,
                 self.automation_panel.details_open,
@@ -1505,6 +1811,8 @@ class AirtsApp:
             None,
             None if self.lobby is None else (self.lobby.page, tuple(self.lobby.setup)),
             self.simulation.match_result,
+            self.save_panel.cache_key(),
+            self.save_busy,
         )
 
     def _opengl_partial_overlay_regions(
@@ -1514,9 +1822,9 @@ class AirtsApp:
     ) -> tuple[pygame.Rect, ...] | None:
         """Return the exact UI regions affected by inexpensive state-only changes."""
 
-        if self.lobby is not None:
-            return None
         if len(previous) != len(current):
+            return None
+        if self.lobby is not None or self.save_panel.open or previous[-2] != current[-2]:
             return None
         # A flyout can move with its list row or disappear after completion.
         # Recompose it together with the underlying canvas to erase old pixels.
@@ -1635,14 +1943,27 @@ class AirtsApp:
                 overlay.blit(label, (rectangle.x, rectangle.y - label.get_height()))
 
         mouse = pygame.mouse.get_pos() if pygame.display.get_init() else (-1, -1)
-        if self.placement_kind is not None and self.canvas_rect.collidepoint(mouse):
+        previews: tuple[tuple[Point, bool], ...] = ()
+        if self.building_line_draft is not None:
+            previews = tuple(
+                (
+                    point,
+                    construction.validate_building_placement(
+                        self.simulation, self.building_line_draft.kind, point, owner_id="player"
+                    )
+                    is None,
+                )
+                for point in self.building_line_draft.positions()
+            )
+        elif self.placement_kind is not None and self.canvas_rect.collidepoint(mouse):
             preview = self._construction_preview_at(self._map_point(mouse))
             if preview is not None:
-                position, valid = preview
-                width, height = self.placement_kind.profile.footprint
-                origin = self.screen_point(position)
+                previews = (preview,)
+        if self.placement_kind is not None:
+            width, height = self.placement_kind.profile.footprint
+            for position, valid in previews:
                 rectangle = pygame.Rect(
-                    origin,
+                    self.screen_point(position),
                     (round(width * self.tile_size), round(height * self.tile_size)),
                 )
                 color = (95, 224, 145) if valid else (235, 88, 88)
@@ -1913,6 +2234,8 @@ class AirtsApp:
         self.line_points.clear()
         self.freehand_points.clear()
         self.drag_start = None
+        self.building_line_draft = None
+        self.reclaim_mode = False
 
 
 def _entity_hit_distance(entity: Entity, point: Point) -> float:

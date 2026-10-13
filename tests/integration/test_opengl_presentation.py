@@ -21,6 +21,7 @@ from airts.presentation.opengl_renderer import (
     OpenGLRenderer,
     OpenGLRendererError,
 )
+from airts.presentation.palette import match_color
 from airts.simulation import Simulation
 from airts.world.map import GameMap, load_map_data
 
@@ -390,6 +391,47 @@ def test_opengl_normal_scene_preserves_full_health_bars_and_outer_selection_outl
     assert frame.building_count == 1
     assert frame.selected_unit_count == 1
     assert frame.shape_count == 10  # 3 entities + 6 health rectangles + 1 outer outline
+
+
+@pytest.mark.parametrize("teams", [False, True], ids=["sandbox", "team-match"])
+def test_large_enemy_selection_keeps_all_units_and_highlights_them(teams: bool) -> None:
+    data = {
+        "id": "enemy_highlights",
+        "name": "Enemy highlights",
+        "width": 32,
+        "height": 32,
+        "terrain": {"default": "grass"},
+        "entities": [
+            {
+                "id": f"enemy_{i}",
+                "kind": "scout",
+                "owner": "enemy",
+                "position": [1.5 + i % 16, 1.5 + i // 16],
+            }
+            for i in range(130)
+        ]
+        + [
+            {"id": "player", "kind": "builder", "position": [30.5, 30.5]},
+        ],
+    }
+    if teams:
+        data["match_slots"] = [
+            {"owner": "player", "controller": "player", "team": 1},
+            {"owner": "enemy", "controller": "ai", "team": 2},
+        ]
+    app = AirtsApp(Simulation(load_map_data(data)))
+    app.selected_entities = {f"enemy_{i}" for i in range(130)}
+    packed, shapes, units, buildings, selected = OpenGLFrameBuilder._build_entities(app, (0, 0), 1)
+    assert shapes == units == 131
+    assert buildings == 0 and selected == 130
+    values = array("f")
+    values.frombytes(packed)
+    base = match_color(app.simulation.game_map, "enemy") if teams else (218, 78, 78)
+    expected = (*[min(255, component + 45) / 255 for component in base], 1)
+    for i in range(130):
+        assert tuple(values[i * SHAPE_FLOATS + 14 : i * SHAPE_FLOATS + 18]) == pytest.approx(
+            expected
+        )
 
 
 def test_opengl_frame_batches_live_projectile_feedback_on_the_gpu() -> None:

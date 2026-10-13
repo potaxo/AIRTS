@@ -72,7 +72,7 @@ and supported saves; it does not enable or accelerate income.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
 disables ambient spawning by default; [README](../../README.md#run) owns CLI defaults and controls.
 
-Factories produce scouts, light/heavy tanks, and builders; completed command centers produce
+Factories produce scouts, light/heavy tanks, artillery, and builders; completed command centers produce
 only builders through the same paid production path. The existing `factory_id` field identifies
 either production source, preserving command and parameter tags;
 [simulation.py](../../src/airts/simulation.py) owns default build timing and construction progress.
@@ -94,7 +94,7 @@ use the same bounded recovery contract rather than being frozen or silently scat
 and attaches existing/future units to a linked defense. Polygons gather; polylines spread along the
 line. Factories remain independent owners of costs, queues, and progress.
 
-Builders construct factories, repair hubs, extractors, and Matter Synthesizers, not command centers. Entity profiles
+Builders construct factories, repair hubs, extractors, Matter Synthesizers, and turrets, not command centers. Entity profiles
 own costs, build speeds, and build ranges. Placement validates capability, ownership, bounds,
 terrain and real building footprints. Remote orders are owner-only blueprints: they do not occupy
 space, reserve resource sites, block movement or become combat targets. Blueprints may overlap.
@@ -110,13 +110,28 @@ job and releases builders to the next order. Canceling work or losing every buil
 physical scaffold; reissuing construction at an unclaimed friendly scaffold resumes progress
 without another charge. Such scaffolds count as surviving assets but not productive factories.
 
-Shift-placement appends FIFO jobs and keeps placement active. Waiting blueprints reserve neither
+Shift-placement appends FIFO jobs and keeps placement active. Shift-left-drag creates only a
+presentation draft: grid-aligned origins follow the drag direction, spaced by the selected footprint
+on its dominant axis. Release submits each site through the shared construction command in start-to-end
+order; invalid sites are skipped with a visible count. A zero-length drag is a queued click.
+Right-click during the drag cancels the whole unsubmitted line without commands or costs.
+[presentation/build_placement.py](../../src/airts/presentation/build_placement.py) owns draft geometry. Waiting blueprints reserve neither
 space, resources nor builders; activation claims the surviving builders. A repair interruption
 retains the construction assignment for return. Ordinary placement
 replaces pending jobs for those builders only after validation, including control claims, succeeds.
 Rejected placement preserves accepted queues. Right-click closes placement without issuing movement or
 altering accepted work. An unstarted occupied site waits with `SITE_OCCUPIED`; commit occupancy before
 publishing the scaffold. Queue, progress, damage, resource, and assignment state survive supported saves.
+
+Builders can reclaim any owned physical building through `ReclaimBuildingCommand`. They approach
+within build range, then remove the building in that tick through authoritative removal and refund
+`construction_cost * 70 // 100` once to its owner. Damage and scaffold progress do not change this
+refund because a published scaffold was already paid in full. Starting buildings priced at zero
+refund zero; blueprints have no physical target and cannot be refunded. Concurrent builders cannot
+refund twice; destruction before arrival yields no refund. Source/job, occupancy, selection and target
+cleanup reuse normal removal. Stop/move/new assignments cancel the builder's reclaim intent.
+[reclamation.py](../../src/airts/systems/reclamation.py) owns execution; reclaim target selection is a
+Builder action in the right sidebar.
 
 ## Interaction
 
@@ -130,6 +145,9 @@ Unit details expose relative mass and collision radius alongside existing attrib
 Automation panels, linked grouping, inspection and scrolling show only the human owner's work.
 Input uses valid actions for the selected kind/count; building hit tests use visible footprints,
 and friendly hits take precedence over generous enemy click areas. Accepted actions use commands.
+Enemy box/double-click selections are presentation-only inspections; domain grounding retains only
+owned entities. Player entities take precedence in mixed boxes and combined selections. Hostility
+uses team relationships, and enemy inspection never grants command authority.
 
 Camera motion uses presentation elapsed time and remains available while paused; focus loss stops
 held motion, naming/modals suppress it, and pan/zoom stay within the map (small maps center).

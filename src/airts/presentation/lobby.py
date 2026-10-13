@@ -32,6 +32,9 @@ class Lobby:
             rectangle = pygame.Rect(x, y + 152, 580, 48)
             app.ui.button(screen, rectangle, "Start game")
             self.buttons.append((rectangle, "configure", 0))
+            rectangle = pygame.Rect(x, y + 212, 580, 40)
+            app.ui.button(screen, rectangle, "Load saved game")
+            self.buttons.append((rectangle, "saves", 0))
             return
         app.ui.small_text(
             screen, "320 x 320 | Fixed symmetric map | No fog of war", (x, y + 78), (177, 196, 213)
@@ -73,6 +76,8 @@ class Lobby:
                 app.notice = "Configure players and teams before starting."
             elif action == "back":
                 self.page = "cover"
+            elif action == "saves":
+                app._open_save_manager()
             elif action == "start":
                 app.start_match(tuple(self.setup))
             elif action == "team":

@@ -58,6 +58,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
             entity.attack_target_id = None
             entity.pursue_target = False
             entity.repair_target_id = None
+            entity.reclaim_target_id = None
         entity.state = UnitState.IDLE
         movement.reset_movement_liveness(entity)
     return simulation._accept("pause_automation", automation_id)
@@ -284,6 +285,7 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
         entity = simulation.entities[entity_id]
         if entity.kind is EntityKind.BUILDER:
             entity.repair_target_id = None
+            entity.reclaim_target_id = None
         entity.clear_recovery_request()
         entity.hold_anchor = None
         entity.defend_arrived = False
@@ -346,6 +348,7 @@ def release_automation(
             if automation.kind is AutomationKind.PATROL:
                 entity.attack_target_id = None
                 entity.repair_target_id = None
+            entity.reclaim_target_id = None
             entity.state = UnitState.IDLE
             movement.reset_movement_liveness(entity)
         if clear_suspended:

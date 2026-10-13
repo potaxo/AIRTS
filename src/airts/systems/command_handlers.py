@@ -293,9 +293,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
 
 
 def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
-    failure = validate_entities(
-        simulation, command.entity_ids, command.owner_id, require_movable=True
-    )
+    failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("attack", failure)
     target = simulation.entities.get(command.target_entity_id)
@@ -311,7 +309,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
         )
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
-        if entity.kind.profile.attack_damage <= 0:
+        if entity.kind.profile.attack_damage <= 0 or not entity.is_complete:
             return simulation._reject_validation(
                 "attack",
                 ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
@@ -323,7 +321,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
         entity.move_target = None
         movement.reset_movement_liveness(entity)
         entity.attack_target_id = target.entity_id
-        entity.pursue_target = True
+        entity.pursue_target = entity.is_movable
         entity.state = UnitState.ATTACKING
     return simulation._accept("attack")
 

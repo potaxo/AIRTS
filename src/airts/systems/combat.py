@@ -46,7 +46,7 @@ def drive_combat(simulation: Simulation) -> None:
         for key in owned:
             entity = simulation.entities[key]
             profile = entity.kind.profile
-            if profile.attack_damage <= 0:
+            if profile.attack_damage <= 0 or not entity.is_complete:
                 continue
             target = simulation.entities.get(entity.attack_target_id or "")
             if (
@@ -115,7 +115,7 @@ def drive_combat(simulation: Simulation) -> None:
     # than depending on the construction history of the live dict.
     for entity_id in sorted(simulation.entities):
         attacker = simulation.entities.get(entity_id)
-        if attacker is None or attacker.kind.profile.attack_damage <= 0:
+        if attacker is None or attacker.kind.profile.attack_damage <= 0 or not attacker.is_complete:
             continue
         attacker_position = positions[entity_id]
         assigned_id = simulation.assignments.get(entity_id)
@@ -209,7 +209,7 @@ def drive_combat(simulation: Simulation) -> None:
             speed=speed,
         )
         simulation.projectiles[projectile_id] = projectile
-        attacker.attack_cooldown = 10
+        attacker.attack_cooldown = attacker.kind.profile.attack_interval_ticks
         simulation.events.record(
             simulation.tick,
             EventType.PROJECTILE_LAUNCHED,

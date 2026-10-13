@@ -67,6 +67,7 @@ _LARGE_SELECTED_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
     for kind, color in ENTITY_COLORS.items()
 }
 _ENEMY_FLOAT_COLOR: FloatColor = (218 / 255, 78 / 255, 78 / 255, 1.0)
+_LARGE_SELECTED_ENEMY_FLOAT_COLOR: FloatColor = (1.0, 123 / 255, 123 / 255, 1.0)
 
 
 class OpenGLRenderState(SceneView, FeedbackView, Protocol):
@@ -320,10 +321,19 @@ class OpenGLFrameBuilder:
                 and entity.category is EntityCategory.UNIT
                 else _ENTITY_FLOAT_COLORS[entity.kind]
                 if entity.owner_id == "player"
+                else _LARGE_SELECTED_ENEMY_FLOAT_COLOR
+                if selected and large_selection and entity.category is EntityCategory.UNIT
                 else _ENEMY_FLOAT_COLOR
             )
             if simulation.game_map.match_slots:
                 color = _float_color(match_color(simulation.game_map, entity.owner_id))
+                if selected and large_selection and entity.category is EntityCategory.UNIT:
+                    color = (
+                        min(1.0, color[0] + 45 / 255),
+                        min(1.0, color[1] + 45 / 255),
+                        min(1.0, color[2] + 45 / 255),
+                        color[3],
+                    )
             if entity.category is EntityCategory.BUILDING:
                 width, height = entity.kind.profile.footprint
                 half_width = width * tile_size / 2

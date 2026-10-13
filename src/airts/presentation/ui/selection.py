@@ -12,7 +12,7 @@ from airts.contracts.automations import (
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
 from airts.world.entities import Entity
-from airts.world.units.catalog import EntityKind
+from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 
 
@@ -40,12 +40,17 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
     view.ui.text(screen, "Selection", (x, y), (245, 245, 245))
     y += 28
     selected = view._selected_entities_for_draw()
+    read_only = any(entity.owner_id != "player" for entity in selected)
     inspected = view.simulation.entities.get(view.inspected_entity_id or "")
     if selected:
         health = sum(entity.health for entity in selected)
         maximum = sum(entity.kind.profile.max_health for entity in selected)
         label = (
-            f"{len(selected)} selected" if len(selected) > 1 else selected[0].state.value.title()
+            f"Enemy selected: {len(selected)}"
+            if read_only
+            else f"{len(selected)} selected"
+            if len(selected) > 1
+            else selected[0].state.value.title()
         )
         view.ui.small_text(screen, f"{label} | HP {health}/{maximum}", (x, y), (180, 198, 214))
         y += 24
@@ -68,7 +73,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         kinds[entity.kind] = kinds.get(entity.kind, 0) + 1
     view._type_buttons.clear()
     if not kinds:
-        view.ui.small_text(screen, "Select a friendly unit or building.", (x, y), (164, 184, 202))
+        view.ui.small_text(screen, "Select a unit or building.", (x, y), (164, 184, 202))
         return
     if len(kinds) > 1:
         for kind, count in sorted(kinds.items(), key=lambda item: item[0].value):
@@ -81,8 +86,14 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
     detail_kind = view.inspected_kind if view.inspected_kind in kinds else None
     if detail_kind is None:
         view.ui.small_text(
-            screen, "Choose a type to show its controls.", (x, y + 4), (164, 184, 202)
+            screen,
+            "Choose a type to inspect." if read_only else "Choose a type to show its controls.",
+            (x, y + 4),
+            (164, 184, 202),
         )
+        return
+    if read_only:
+        draw_unit_details(view, screen, detail_kind, x, y + 12)
         return
     y += 12
     profile = detail_kind.profile
@@ -120,12 +131,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             (105, 222, 172),
         )
         y += 22
-        for kind in (
-            EntityKind.FACTORY,
-            EntityKind.REPAIR_HUB,
-            EntityKind.RESOURCE_GENERATOR,
-            EntityKind.MATTER_SYNTHESIZER,
-        ):
+        for kind in BUILDABLE_KINDS:
             rectangle = pygame.Rect(x, y, panel.width - 32, 30)
             label = (
                 "Resource Extractor"
@@ -141,6 +147,9 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             )
             view._command_buttons.append((rectangle, f"build:{kind.value}"))
             y += 38
+        rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+        view.ui.button(screen, rectangle, "Reclaim building (70%)")
+        view._command_buttons.append((rectangle, "reclaim"))
     elif detail_kind.production_kinds:
         factories = view._selected_producer_ids()
         for kind in detail_kind.production_kinds:
@@ -200,6 +209,13 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             (x, y),
             (105, 222, 172),
         )
+    elif profile.attack_damage:
+        view.ui.small_text(
+            screen,
+            f"Damage {profile.attack_damage} | Range {profile.attack_range:g}",
+            (x, y),
+            (180, 198, 214),
+        )
 
 
 def draw_unit_details(
@@ -218,6 +234,10 @@ def draw_unit_details(
             1, f"Build time {Simulation.PRODUCTION_BUILD_TICKS * Simulation.TICK_SECONDS:g}s"
         )
         lines.append(f"Mass {profile.mass:g} | Collision radius {profile.collision_radius:g}")
+    if profile.attack_damage:
+        lines.append(
+            f"Fire interval {profile.attack_interval_ticks / Simulation.TICKS_PER_SECOND:g}s"
+        )
     if kind is EntityKind.BUILDER:
         lines.append(f"Build range {profile.build_range} | Work {profile.build_speed}/tick")
     for line in lines:

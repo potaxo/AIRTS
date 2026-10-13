@@ -34,6 +34,12 @@ def test_armed_definition_cannot_silently_disable_projectiles() -> None:
     assert EntityKind.BUILDER.profile.projectile_speed == 0.0
 
 
+@pytest.mark.parametrize("interval", [0, -1, True, 2.5])
+def test_attack_interval_requires_positive_integer_ticks(interval: int) -> None:
+    with pytest.raises(ValueError, match="attack_interval_ticks must be a positive integer"):
+        replace(EntityKind.ARTILLERY.profile, attack_interval_ticks=interval)
+
+
 @pytest.mark.parametrize("kind", list(EntityKind), ids=lambda kind: kind.value)
 def test_every_kind_has_a_profile_and_producers_offer_buildable_units(kind: EntityKind) -> None:
     profile = kind.profile

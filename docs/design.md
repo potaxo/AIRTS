@@ -59,7 +59,7 @@ The default game uses a static, exactly mirrored 320 x 320 river map with four c
 starting slots, resource sites, rule-based opponents with persistent squads, economy planning,
 combat estimates and team results. The original
 64 x 64 example map remains available for existing tests and the explicit legacy sandbox.
-Scouts, light/heavy tanks, builders,
+Scouts, light/heavy tanks, artillery, builders, defense turrets,
 ordinary buildings, movement, combat, economy, construction, production, spatial editing,
 patrol/defend/reinforcement/repair automations, JSON saves, and command-replay verification exist.
 OpenGL 3.3 is the default; software rendering is explicit. Performance targets and their
@@ -68,5 +68,4 @@ measurement limits belong to the performance document, not a blanket claim of pa
 No language provider, voice, MCP, scouting reports, map editor, multiplayer, Unity, dynamic terrain,
 semantic map regions, or multi-region automation is implemented. Visibility has no occlusion,
 last-known enemy memory, or fog overlay. There is no technology tree, armor, cover, splash damage,
-missed shots, learned enemy policies, individual kiting, builder gathering, construction refund,
-or vertex-level editing.
+missed shots, learned enemy policies, individual kiting, builder gathering, vertex-level editing.

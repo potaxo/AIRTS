@@ -31,8 +31,9 @@ Squads assemble most members, select valuable targets with affordable local resi
 pursuit, retreat from unfavorable fights and regroup. Small raids use the reserve; larger raids
 recall the nearest capable squad. Severely wounded units use repair-and-return through shared commands.
 
-Combat estimates use health, damage and range; close decisions add twelve aggregate exchanges
-with approach delays. Forecasts are heuristic and omit collision, individual focus fire, terrain
+Combat estimates use health, profile firing cadence, damage and range; close decisions add twelve
+aggregate exchanges with approach delays. Fixed turrets wait for mobile enemies to approach;
+unfinished turrets contribute no armed threat. Forecasts are heuristic and omit collision, individual focus fire, terrain
 routing and reinforcement prediction. Knowledge uses the current fully visible world.
 
 Economy avoids enemy-controlled sites, replaces lost builders/factories, restores income before

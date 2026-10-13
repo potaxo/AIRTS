@@ -22,7 +22,7 @@ from airts.navigation.pathfinding import PathfindingError
 from airts.systems import automation_execution, movement
 from airts.world.entities import Entity, UnitState
 from airts.world.map import Cell, footprint_cells
-from airts.world.units.catalog import EntityKind
+from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -44,13 +44,7 @@ def create_construction(
             "create_construction",
             ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_BUILDER", "builder_id"),
         )
-    allowed = {
-        EntityKind.FACTORY,
-        EntityKind.REPAIR_HUB,
-        EntityKind.RESOURCE_GENERATOR,
-        EntityKind.MATTER_SYNTHESIZER,
-    }
-    if command.building_kind not in allowed:
+    if command.building_kind not in BUILDABLE_KINDS:
         return simulation._reject_validation(
             "create_construction",
             ValidationFailure(
@@ -406,6 +400,7 @@ def start_next_construction(simulation: Simulation) -> None:
             builder_id in simulation.assignments
             or builder_id in simulation.suspended_assignments
             or simulation.entities[builder_id].repair_target_id is not None
+            or simulation.entities[builder_id].reclaim_target_id is not None
             for builder_id in builder_ids
         ):
             continue

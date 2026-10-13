@@ -1,18 +1,17 @@
-"""New map geometry is checked separately from unchanged legacy workload maps."""
+"""Skirmish map symmetry, resource sites and opening configuration."""
 
 from __future__ import annotations
 
 import pytest
 
 from airts.contracts.spatial import Point
-from airts.world.map import Terrain, load_example_map, load_map_data
+from airts.world.map import Terrain, load_map_data
 from airts.world.skirmish import create_skirmish_map
 
 
-def test_new_geometry_is_exactly_symmetric_and_legacy_map_remains_original() -> None:
+def test_skirmish_geometry_and_opening_entities_are_exactly_symmetric() -> None:
     game_map = create_skirmish_map()
     assert game_map.width == game_map.height == 320
-    assert load_example_map().width == load_example_map().height == 64
     for row in game_map.terrain:
         assert row == tuple(reversed(row))
     assert game_map.terrain == tuple(reversed(game_map.terrain))

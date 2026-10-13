@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 from tests.integration.recovery_checks import RecoveryChecks
 
 from airts.adapters.persistence import load_simulation, save_simulation
@@ -61,11 +60,3 @@ def test_heavy_traffic_moves_a_light_holder_more_than_light_traffic_moves_a_heav
         assert maximum > 0.01
         displacements.append(maximum)
     assert displacements[0] > displacements[1] * 2
-
-
-@pytest.mark.parametrize("schema", ["airts-replay-v15", "airts-match-replay-v8"])
-def test_previous_replay_physics_is_rejected_with_a_mass_diagnostic(schema: str) -> None:
-    from airts.adapters.replay import ReplayError, load_replay_data
-
-    with pytest.raises(ReplayError, match="mass-weighted contact response"):
-        load_replay_data({"schema": schema})

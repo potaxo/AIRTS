@@ -42,6 +42,7 @@ from airts.contracts.commands import (
     ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
+    ReclaimBuildingCommand,
     ReduceProductionCommand,
     RemoveEntityCommand,
     RenameRegionCommand,
@@ -77,8 +78,10 @@ from airts.systems import construction as construction_system
 from airts.systems import economy as economy_system
 from airts.systems import movement as movement_system
 from airts.systems import production as production_system
+from airts.systems import reclamation as reclamation_system
 from airts.systems import repair as repair_system
 from airts.systems import skirmish as skirmish_system
+from airts.systems.repair_positions import service_route
 from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
 from airts.world.map import Cell, GameMap, OccupancyGrid
@@ -351,6 +354,8 @@ class Simulation:
             return command_handlers.modify_automation(self, command)
         if isinstance(command, AttackCommand):
             return command_handlers.attack(self, command)
+        if isinstance(command, ReclaimBuildingCommand):
+            return reclamation_system.reclaim_building(self, command)
         if isinstance(command, RepairBuildingCommand):
             return repair_system.repair_building(self, command)
         if isinstance(command, MoveCommand):
@@ -409,6 +414,7 @@ class Simulation:
                 opponent_ai.drive_opponents(self)
             self._drive_automations()
             repair_system.drive_builders(self)
+            reclamation_system.drive_reclamation(self)
             movement_system.move_entities(self)
             combat_system.drive_projectiles(self)
             repair_system.drive_hubs(self)
@@ -581,6 +587,12 @@ class Simulation:
                     entity.move_target = None
                     entity.state = UnitState.IDLE
                     movement_system.reset_movement_liveness(entity)
+            if entity.reclaim_target_id in removed_ids:
+                entity.reclaim_target_id = None
+                entity.path.clear()
+                entity.move_target = None
+                entity.state = UnitState.IDLE
+                movement_system.reset_movement_liveness(entity)
             if entity.last_attacker_id in removed_ids:
                 entity.last_attacker_id = None
                 entity.last_attacked_tick = None
@@ -629,9 +641,14 @@ class Simulation:
             "projectile_traces": [trace.to_dict() for trace in self.projectile_traces],
         }
 
-    def export_state(self) -> dict[str, object]:
+    def export_state(self, *, include_events: bool = True) -> dict[str, object]:
+        """Export state; adapters may capture immutable events separately for deferred encoding."""
         return self._domain_state() | {
-            "events": [event.to_dict() for event in self.events.events],
+            **(
+                {"events": [event.to_dict() for event in self.events.events]}
+                if include_events
+                else {}
+            ),
             "command_history": list(self._command_history),
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
@@ -903,11 +920,7 @@ class Simulation:
             ):
                 continue
             try:
-                point, path = self._routes.shared_path_to_any(
-                    entity.position,
-                    self._interaction_points(building),
-                    self._building_cells(),
-                )
+                point, path = service_route(self, entity, building)
             except PathfindingError:
                 continue
             candidates.append((order[building.kind], path.cost, building.entity_id, point, path))

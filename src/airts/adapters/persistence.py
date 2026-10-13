@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from airts.contracts.automations import (
     Automation,
@@ -49,23 +53,78 @@ from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v12"
-MATCH_SAVE_SCHEMA = "airts-match-save-v4"
+SAVE_SCHEMA = "airts-save-v13"
+MATCH_SAVE_SCHEMA = "airts-match-save-v5"
 
 
 class PersistenceError(ValueError):
     """Raised when saved state is malformed or incompatible."""
 
 
+@dataclass(frozen=True, slots=True)
+class SaveSnapshot:
+    schema: str
+    game_map: dict[str, object]
+    state: dict[str, object]
+    events: tuple[Event, ...]
+
+
+def capture_save(simulation: Simulation) -> SaveSnapshot:
+    """Capture at a tick boundary; a writer never reads the live simulation.
+
+    Recorded events are append-only frozen records. Retain their packed paths until
+    the writer encodes each event, rather than expanding the entire history in the UI.
+    """
+    state = simulation.export_state(include_events=False)
+    state["command_history"] = deepcopy(state["command_history"])
+    if "match_result" in state:
+        state["match_result"] = deepcopy(state["match_result"])
+    return SaveSnapshot(
+        MATCH_SAVE_SCHEMA if simulation.game_map.match_slots else SAVE_SCHEMA,
+        simulation.game_map.to_dict(),
+        state,
+        simulation.events.events,
+    )
+
+
+def write_save(snapshot: SaveSnapshot, path: str | Path) -> None:
+    """Encode bounded pieces using the C JSON encoder, then replace atomically."""
+    destination = Path(path)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write('{"schema":' + json.dumps(snapshot.schema) + ',"map":')
+            stream.write(json.dumps(snapshot.game_map, separators=(",", ":")))
+            stream.write(',"state":{')
+            for key, value in snapshot.state.items():
+                stream.write(json.dumps(key) + ":")
+                stream.write(json.dumps(value, separators=(",", ":")))
+                stream.write(",")
+            stream.write('"events":[')
+            for index, event in enumerate(snapshot.events):
+                if index:
+                    stream.write(",")
+                stream.write(json.dumps(event.to_dict(), separators=(",", ":")))
+            stream.write("]}}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def save_simulation(simulation: Simulation, path: str | Path) -> None:
-    document = {
-        "schema": MATCH_SAVE_SCHEMA if simulation.game_map.match_slots else SAVE_SCHEMA,
-        "map": simulation.game_map.to_dict(),
-        "state": simulation.export_state(),
-    }
-    with Path(path).open("w", encoding="utf-8") as stream:
-        json.dump(document, stream, indent=2, sort_keys=True)
-        stream.write("\n")
+    write_save(capture_save(simulation), path)
 
 
 def load_simulation(path: str | Path) -> Simulation:
@@ -78,36 +137,16 @@ def load_simulation(path: str | Path) -> Simulation:
 
 def load_simulation_data(raw_data: object) -> Simulation:
     document = _mapping(raw_data, "save document")
-    legacy_movement = document.get("schema") in {"airts-save-v7", "airts-save-v8"}
-    legacy_contact = document.get("schema") in {"airts-save-v7", "airts-save-v8", "airts-save-v9"}
-    legacy_recovery = legacy_contact or document.get("schema") == "airts-save-v10"
-    legacy_construction = document.get("schema") not in {
-        SAVE_SCHEMA,
-        MATCH_SAVE_SCHEMA,
-        "airts-match-save-v3",
-        "airts-match-save-v2",
-    }
-    if (
-        document.get("schema")
-        not in {
-            SAVE_SCHEMA,
-            MATCH_SAVE_SCHEMA,
-            "airts-match-save-v3",
-            "airts-save-v11",
-            "airts-match-save-v1",
-            "airts-match-save-v2",
-        }
-        and not legacy_recovery
-    ):
-        raise PersistenceError(f"unsupported save schema: {document.get('schema')}")
+    if document.get("schema") not in {SAVE_SCHEMA, MATCH_SAVE_SCHEMA}:
+        raise PersistenceError(
+            f"unsupported save schema: {document.get('schema')}; only current formats "
+            f"{SAVE_SCHEMA} and {MATCH_SAVE_SCHEMA} are supported"
+        )
     try:
         game_map = load_map_data(document.get("map"))
     except MapValidationError as error:
         raise PersistenceError(f"invalid saved map: {error}") from error
-    if bool(game_map.match_slots) != (
-        document.get("schema")
-        in {MATCH_SAVE_SCHEMA, "airts-match-save-v1", "airts-match-save-v2", "airts-match-save-v3"}
-    ):
+    if bool(game_map.match_slots) != (document.get("schema") == MATCH_SAVE_SCHEMA):
         raise PersistenceError("match maps require the match save schema")
     state = _mapping(document.get("state"), "state")
     tick = _integer(state.get("tick"), "state.tick", minimum=0)
@@ -142,10 +181,6 @@ def load_simulation_data(raw_data: object) -> Simulation:
         state.get("entities"),
         game_map,
         tick,
-        legacy_movement=legacy_movement,
-        legacy_contact=legacy_contact,
-        legacy_recovery=legacy_recovery,
-        legacy_construction=legacy_construction,
     )
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
@@ -153,20 +188,21 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation.projectile_traces = _load_projectile_traces(
         state.get("projectile_traces", []), simulation
     )
-    simulation.automations = _load_automations(
-        state.get("automations"), simulation, legacy_construction=legacy_construction
-    )
+    simulation.automations = _load_automations(state.get("automations"), simulation)
     _validate_construction_sites(simulation)
     simulation._rebuild_live_automations(simulation.automations.values())
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
     for entity in simulation.entities.values():
-        if entity.kind is not EntityKind.BUILDER or entity.repair_target_id is None:
+        if entity.kind is not EntityKind.BUILDER or (
+            entity.repair_target_id is None and entity.reclaim_target_id is None
+        ):
             continue
         assigned = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
         if entity.hold_anchor is not None or (
             assigned is not None
             and (
-                assigned.kind is not AutomationKind.PATROL
+                entity.reclaim_target_id is not None
+                or assigned.kind is not AutomationKind.PATROL
                 or assigned.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
             )
         ):
@@ -224,16 +260,8 @@ def load_simulation_data(raw_data: object) -> Simulation:
         _integer(value, f"blocked_ticks.{entity_id}", minimum=0)
     if not set(blocked_ticks).issubset(simulation.entities):
         raise PersistenceError("blocked_ticks references an unknown entity")
-    if legacy_movement:
-        _validate_legacy_traffic(state.get("traffic_reservations"), simulation)
-        for entity in simulation.entities.values():
-            entity.no_progress_ticks = 0
-            entity.progress_target = entity.path[0] if entity.path else None
-            entity.progress_distance = (
-                entity.position.distance_to(entity.path[0]) if entity.path else None
-            )
-    elif state.get("traffic_reservations") is not None:
-        raise PersistenceError("traffic reservations are unsupported by save v9")
+    if state.get("traffic_reservations") is not None:
+        raise PersistenceError("traffic reservations are unsupported by current saves")
     if game_map.match_slots:
         from airts.systems.skirmish import evaluate_result, validate_match_state
 
@@ -244,19 +272,13 @@ def load_simulation_data(raw_data: object) -> Simulation:
         if result is not None and (type(result) is not int or result not in {0, *teams}):
             raise PersistenceError("invalid match_result")
         simulation.match_result = result
-        if document.get("schema") in {MATCH_SAVE_SCHEMA, "airts-match-save-v3"}:
-            simulation.opponents = _load_opponents(state.get("opponents"), simulation)
+        simulation.opponents = _load_opponents(state.get("opponents"), simulation)
         try:
             validate_match_state(simulation)
         except ValueError as error:
             raise PersistenceError(str(error)) from error
-        current_rules = document.get("schema") == MATCH_SAVE_SCHEMA
-        if tick > 0 and result != evaluate_result(
-            simulation, command_centers_produce=current_rules
-        ):
+        if tick > 0 and result != evaluate_result(simulation):
             raise PersistenceError("saved match result disagrees with production assets")
-        if tick > 0 and not current_rules:
-            simulation.match_result = evaluate_result(simulation)
     elif state.get("match_result") is not None:
         raise PersistenceError("legacy maps cannot have a match result")
     return simulation
@@ -349,37 +371,6 @@ def _load_opponents(raw_data: object, simulation: Simulation) -> dict[str, Oppon
     return opponents
 
 
-def _validate_legacy_traffic(raw_data: object, simulation: Simulation) -> None:
-    if raw_data is None:
-        return
-    data = _mapping(raw_data, "state.traffic_reservations")
-    spacing = _number(data.get("spacing"), "traffic spacing", minimum=1.0)
-    origin = 0.5 if spacing == 1.0 else spacing / 2
-    slots: dict[str, tuple[int, int]] = {}
-    occupied: dict[tuple[int, int], str] = {}
-    for entity_id, raw_slot in _mapping(data.get("slots"), "traffic slots").items():
-        entity = simulation.entities.get(entity_id)
-        if entity is None or not entity.is_movable:
-            raise PersistenceError(f"traffic reservation references invalid unit: {entity_id}")
-        values = _list(raw_slot, "traffic slot")
-        if len(values) != 2:
-            raise PersistenceError("traffic slot must have two coordinates")
-        slot = (
-            _integer(values[0], "traffic slot x", minimum=0),
-            _integer(values[1], "traffic slot y", minimum=0),
-        )
-        if slot in occupied:
-            raise PersistenceError("traffic reservations contain duplicate slots")
-        point = Point(origin + slot[0] * spacing, origin + slot[1] * spacing)
-        if (
-            not simulation.game_map.is_passable(point)
-            or simulation.game_map.cell_for(point) in simulation._building_cells()
-        ):
-            raise PersistenceError(f"traffic reservation is obstructed: {entity_id}")
-        slots[entity_id] = slot
-        occupied[slot] = entity_id
-
-
 def _load_spatial(raw_data: object, simulation: Simulation, tick: int) -> SpatialStore:
     data = _mapping(raw_data, "state.spatial")
     references_data = _mapping(data.get("references"), "state.spatial.references")
@@ -455,11 +446,6 @@ def _load_entities(
     raw_data: object,
     game_map: GameMap,
     current_tick: int,
-    *,
-    legacy_movement: bool = False,
-    legacy_contact: bool = False,
-    legacy_recovery: bool = False,
-    legacy_construction: bool = False,
 ) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
@@ -473,7 +459,7 @@ def _load_entities(
         except ValueError as error:
             raise PersistenceError(f"invalid entity {entity_id}: {error}") from error
         position = _point(entity.get("position"), "entity.position")
-        if not legacy_construction and "construction_progress" not in entity:
+        if "construction_progress" not in entity:
             raise PersistenceError("entity.construction_progress is required")
         progress_raw = entity.get("construction_progress")
         construction_progress = (
@@ -493,60 +479,45 @@ def _load_entities(
             or state is not UnitState.IDLE
         ):
             raise PersistenceError("invalid unfinished building state")
-        if legacy_recovery:
-            recovery_request_tick = None
-            recovery_released = False
-        else:
-            if "recovery_request_tick" not in entity or "recovery_released" not in entity:
-                raise PersistenceError("entity recovery request fields are required in v11")
-            request_raw = entity["recovery_request_tick"]
-            recovery_request_tick = (
-                None
-                if request_raw is None
-                else _past_tick(request_raw, "entity.recovery_request_tick", current_tick)
+        if "recovery_request_tick" not in entity or "recovery_released" not in entity:
+            raise PersistenceError("entity recovery request fields are required in v11")
+        request_raw = entity["recovery_request_tick"]
+        recovery_request_tick = (
+            None
+            if request_raw is None
+            else _past_tick(request_raw, "entity.recovery_request_tick", current_tick)
+        )
+        recovery_released = _boolean(entity["recovery_released"], "entity.recovery_released")
+        if recovery_released and recovery_request_tick is None:
+            raise PersistenceError("entity.recovery_released requires a recovery request")
+        if "hold_anchor" not in entity:
+            raise PersistenceError("entity.hold_anchor is required")
+        anchor_raw = entity.get("hold_anchor")
+        hold_anchor = None if anchor_raw is None else _point(anchor_raw, "entity.hold_anchor")
+        recovery_path = [
+            _point(p, "entity.recovery_path item")
+            for p in _list(entity.get("recovery_path"), "entity.recovery_path")
+        ]
+        recovery_retry_tick = _integer(
+            entity.get("recovery_retry_tick"), "entity.recovery_retry_tick", minimum=0
+        )
+        contact_wait_ticks = _integer(
+            entity.get("contact_wait_ticks"), "entity.contact_wait_ticks", minimum=0
+        )
+        defend_arrived = _boolean(entity.get("defend_arrived"), "entity.defend_arrived")
+        if "recovery_blocked_cells" not in entity:
+            raise PersistenceError("entity.recovery_blocked_cells is required")
+        blocked_raw = entity.get("recovery_blocked_cells")
+        recovery_blocked_cells = (
+            None
+            if blocked_raw is None
+            else frozenset(
+                _cell(cell, "entity.recovery_blocked_cells", game_map)
+                for cell in _list(blocked_raw, "entity.recovery_blocked_cells")
             )
-            recovery_released = _boolean(entity["recovery_released"], "entity.recovery_released")
-            if recovery_released and recovery_request_tick is None:
-                raise PersistenceError("entity.recovery_released requires a recovery request")
-        if legacy_contact:
-            hold_anchor = position if state is UnitState.HOLDING else None
-            recovery_path: list[Point] = []
-            recovery_retry_tick = contact_wait_ticks = 0
-            defend_arrived = False
-            recovery_blocked_cells = None
-        else:
-            if "hold_anchor" not in entity:
-                raise PersistenceError("entity.hold_anchor is required in v10 and later saves")
-            anchor_raw = entity.get("hold_anchor")
-            hold_anchor = None if anchor_raw is None else _point(anchor_raw, "entity.hold_anchor")
-            recovery_path = [
-                _point(p, "entity.recovery_path item")
-                for p in _list(entity.get("recovery_path"), "entity.recovery_path")
-            ]
-            recovery_retry_tick = _integer(
-                entity.get("recovery_retry_tick"), "entity.recovery_retry_tick", minimum=0
-            )
-            contact_wait_ticks = _integer(
-                entity.get("contact_wait_ticks"), "entity.contact_wait_ticks", minimum=0
-            )
-            defend_arrived = _boolean(entity.get("defend_arrived"), "entity.defend_arrived")
-            if "recovery_blocked_cells" not in entity:
-                raise PersistenceError(
-                    "entity.recovery_blocked_cells is required in v10 and later saves"
-                )
-            blocked_raw = entity.get("recovery_blocked_cells")
-            recovery_blocked_cells = (
-                None
-                if blocked_raw is None
-                else frozenset(
-                    _cell(cell, "entity.recovery_blocked_cells", game_map)
-                    for cell in _list(blocked_raw, "entity.recovery_blocked_cells")
-                )
-            )
-            if contact_wait_ticks > CONTACT_WAIT_TICKS:
-                raise PersistenceError(
-                    "entity.contact_wait_ticks exceeds the contact wait interval"
-                )
+        )
+        if contact_wait_ticks > CONTACT_WAIT_TICKS:
+            raise PersistenceError("entity.contact_wait_ticks exceeds the contact wait interval")
         if (state is UnitState.HOLDING) != (hold_anchor is not None):
             raise PersistenceError("entity Hold state and hold_anchor must agree")
         if hold_anchor is not None and (
@@ -612,18 +583,8 @@ def _load_entities(
             raise PersistenceError(
                 f"entity {entity_id} movement progress fields must both be set or null"
             )
-        if (
-            legacy_movement
-            and progress_target is not None
-            and (not path or progress_target != path[0])
-        ):
-            # v7 could leave progress pointing at a consumed large-force waypoint.
-            progress_target = path[0] if path else None
-            progress_distance = position.distance_to(path[0]) if path else None
-            no_progress_ticks = 0
         hold_return_progress = (
-            not legacy_recovery
-            and hold_anchor is not None
+            hold_anchor is not None
             and recovery_request_tick is not None
             and progress_target == hold_anchor
         )
@@ -661,7 +622,15 @@ def _load_entities(
             or move_target is not None
             or progress_target is not None
             or congestion_stopped
-            or state not in {UnitState.IDLE, UnitState.PRODUCING}
+            or pursue_target
+            or (
+                state not in {UnitState.IDLE, UnitState.PRODUCING}
+                and not (
+                    state is UnitState.ATTACKING
+                    and kind.profile.attack_damage > 0
+                    and construction_progress is None
+                )
+            )
         ):
             raise PersistenceError(f"building {entity_id} cannot have movement state")
         if kind.profile.category is EntityCategory.BUILDING and (
@@ -688,6 +657,9 @@ def _load_entities(
             repair_target_id=_nullable_string(
                 entity.get("repair_target_id"), "entity.repair_target_id"
             ),
+            reclaim_target_id=_nullable_string(
+                entity.get("reclaim_target_id"), "entity.reclaim_target_id"
+            ),
             pursue_target=pursue_target,
             attack_cooldown=_integer(
                 entity.get("attack_cooldown"), "entity.attack_cooldown", minimum=0
@@ -710,6 +682,17 @@ def _load_entities(
             construction_progress=construction_progress,
         )
     for loaded_entity in entities.values():
+        if loaded_entity.reclaim_target_id is not None:
+            target = entities.get(loaded_entity.reclaim_target_id)
+            if (
+                loaded_entity.kind is not EntityKind.BUILDER
+                or target is None
+                or target.owner_id != loaded_entity.owner_id
+                or target.category is not EntityCategory.BUILDING
+                or loaded_entity.repair_target_id is not None
+                or loaded_entity.pursue_target
+            ):
+                raise PersistenceError("entity has an invalid reclaim target")
         if loaded_entity.repair_target_id is not None:
             target = entities.get(loaded_entity.repair_target_id)
             if (
@@ -827,9 +810,7 @@ def _load_projectile_traces(raw_data: object, simulation: Simulation) -> list[Pr
     return traces
 
 
-def _load_automations(
-    raw_data: object, simulation: Simulation, *, legacy_construction: bool = False
-) -> dict[str, Automation]:
+def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Automation]:
     automations_data = _mapping(raw_data, "state.automations")
     automations: dict[str, Automation] = {}
     for automation_id, raw_automation in automations_data.items():
@@ -855,7 +836,7 @@ def _load_automations(
         parameters = _load_automation_parameters(
             kind, data.get("parameters"), entity_ids, simulation, terminal=status.terminal
         )
-        if kind is AutomationKind.CONSTRUCTION and not legacy_construction:
+        if kind is AutomationKind.CONSTRUCTION:
             if "site_entity_id" not in _mapping(data.get("parameters"), "construction parameters"):
                 raise PersistenceError("construction.site_entity_id is required")
         history = _load_transition_history(data.get("transition_history"), status, simulation.tick)

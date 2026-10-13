@@ -55,7 +55,7 @@ def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
         (111, 221, 151),
     )
     y += 122
-    for action, label in (("save", "Save"), ("load", "Load"), ("new", "New game")):
+    for action, label in (("saves", "Save manager"), ("new", "New game")):
         rectangle = pygame.Rect(x + 8, y, 252, 24)
         view.ui.button(screen, rectangle, label)
         view._settings_buttons.append((rectangle, action))

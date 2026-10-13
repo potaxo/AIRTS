@@ -584,7 +584,7 @@ def test_command_center_builder_production_saves_and_replays(
 
 
 @pytest.mark.parametrize("remove_kind", [EntityKind.SCOUT, EntityKind.BUILDER])
-def test_reduce_legacy_batch_preserves_progress_save_and_replay(
+def test_reduce_finite_batch_preserves_progress_save_and_replay(
     tmp_path: Path, remove_kind: EntityKind
 ) -> None:
     simulation = Simulation(runtime_map())

@@ -54,11 +54,20 @@ FORECAST_ROUNDS = 12
 MIN_ATTACK_STRENGTH = 360.0
 
 
+def _damage_per_exchange(unit: Entity) -> float:
+    """Each aggregate exchange spans one decision interval of fixed game ticks."""
+    if not unit.is_complete:
+        return 0.0
+    return (
+        unit.kind.profile.attack_damage * DECISION_TICKS / unit.kind.profile.attack_interval_ticks
+    )
+
+
 def force_strength(units: Sequence[Entity]) -> float:
     """Health-weighted firepower; count alone cannot compare scouts and heavy tanks."""
 
     return sum(
-        unit.kind.profile.attack_damage
+        _damage_per_exchange(unit)
         * sqrt(max(0, unit.health))
         * (1 + unit.kind.profile.attack_range / 20)
         for unit in units
@@ -84,17 +93,27 @@ def engagement_margin(own: Sequence[Entity], enemy: Sequence[Entity]) -> float:
     own_center, enemy_center = _center(own), _center(enemy)
     distance = own_center.distance_to(enemy_center)
 
-    def profile(units: Sequence[Entity]) -> tuple[float, float, float]:
+    def profile(units: Sequence[Entity], opposing: Sequence[Entity]) -> tuple[float, float, float]:
         health = sum(unit.health for unit in units)
-        damage = sum(unit.kind.profile.attack_damage for unit in units)
+        damage = sum(_damage_per_exchange(unit) for unit in units)
+        incoming_speed = sum(unit.kind.profile.movement_speed or 0 for unit in opposing) / len(
+            opposing
+        )
+        # Fixed guns wait for an approaching force rather than acquiring a speed or
+        # pretending to chase it. Two fixed out-of-range forces never close the gap.
         delay = sum(
-            max(0.0, distance - unit.kind.profile.attack_range) / max(0.1, unit.speed)
+            (
+                max(0.0, distance - unit.kind.profile.attack_range)
+                / max(0.1, unit.kind.profile.movement_speed or incoming_speed)
+            )
+            if unit.is_movable or incoming_speed or distance <= unit.kind.profile.attack_range
+            else float("inf")
             for unit in units
         ) / len(units)
         return float(health), float(damage), delay
 
-    own_hp, own_damage, own_delay = profile(own)
-    enemy_hp, enemy_damage, enemy_delay = profile(enemy)
+    own_hp, own_damage, own_delay = profile(own, enemy)
+    enemy_hp, enemy_damage, enemy_delay = profile(enemy, own)
     initial_own, initial_enemy = own_hp, enemy_hp
     for step in range(FORECAST_ROUNDS):
         incoming = enemy_damage * (enemy_hp / initial_enemy) if step >= enemy_delay else 0.0
@@ -158,8 +177,14 @@ def drive_opponents(simulation: Simulation) -> None:
         enemies = [
             entity for entity in entities if simulation.are_hostile(slot.owner_id, entity.owner_id)
         ]
-        armed_enemies = [entity for entity in enemies if entity.kind.profile.attack_damage > 0]
-        index = SpatialIndex({entity.entity_id: entity.position for entity in armed_enemies})
+        armed_enemies = [
+            entity
+            for entity in enemies
+            if entity.kind.profile.attack_damage > 0 and entity.is_complete
+        ]
+        index = SpatialIndex(
+            {entity.entity_id: entity.selection_position for entity in armed_enemies}
+        )
         memory = simulation.opponents[slot.owner_id]
         decision = _Decision(simulation, slot.owner_id, memory, owned, enemies, index, home, home)
         decision.rally = _safe_point(decision, home, 8) or home
@@ -178,8 +203,8 @@ def drive_opponents(simulation: Simulation) -> None:
 
 def _center(units: Sequence[Entity]) -> Point:
     return Point(
-        sum(unit.position.x for unit in units) / len(units),
-        sum(unit.position.y for unit in units) / len(units),
+        sum(unit.selection_position.x for unit in units) / len(units),
+        sum(unit.selection_position.y for unit in units) / len(units),
     )
 
 
@@ -441,7 +466,7 @@ def _drive_squad(decision: _Decision, squad: Squad, threat: Entity | None) -> No
         nearby_target = min(
             local,
             key=lambda enemy: (
-                enemy.health / max(1, enemy.kind.profile.attack_damage),
+                enemy.health / max(1, _damage_per_exchange(enemy)),
                 enemy.entity_id,
             ),
             default=target,

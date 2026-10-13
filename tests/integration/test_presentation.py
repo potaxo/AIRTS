@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event as ThreadEvent
 from unittest.mock import Mock, call, patch
 
 import pygame
@@ -13,6 +14,7 @@ from tests.integration.scenarios import (
     runtime_map,
 )
 
+from airts.adapters.persistence import SaveSnapshot, load_simulation, write_save
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
@@ -558,6 +560,151 @@ def test_double_click_entity_selects_all_visible_friendly_entities_of_that_kind(
     assert app.inspected_kind is EntityKind.BUILDER
 
 
+@pytest.fixture
+def enemy_selection_app() -> AirtsApp:
+    app = AirtsApp(
+        Simulation(
+            load_map_data(
+                {
+                    "id": "enemy_inspection",
+                    "name": "Enemy inspection",
+                    "width": 64,
+                    "height": 64,
+                    "terrain": {"default": "grass"},
+                    "match_slots": [
+                        {"owner": "player", "controller": "player", "team": 1},
+                        {"owner": "enemy", "controller": "ai", "team": 2},
+                        {"owner": "other_enemy", "controller": "ai", "team": 3},
+                        {"owner": "ally", "controller": "ai", "team": 1},
+                    ],
+                    "entities": [
+                        {"id": "player", "kind": "scout", "position": [22.5, 24.5]},
+                        {
+                            "id": "scout_1",
+                            "kind": "scout",
+                            "owner": "enemy",
+                            "position": [30.5, 30.5],
+                        },
+                        {
+                            "id": "scout_2",
+                            "kind": "scout",
+                            "owner": "other_enemy",
+                            "position": [35.5, 30.5],
+                        },
+                        {
+                            "id": "builder",
+                            "kind": "builder",
+                            "owner": "enemy",
+                            "position": [30.5, 35.5],
+                        },
+                        {
+                            "id": "below",
+                            "kind": "scout",
+                            "owner": "enemy",
+                            "position": [30.5, 49.5],
+                        },
+                        {"id": "ally", "kind": "scout", "owner": "ally", "position": [35.5, 35.5]},
+                    ],
+                }
+            )
+        )
+    )
+    app.camera.zoom = 2
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 24)
+    app.ui.small_font = pygame.font.Font(None, 19)
+    return app
+
+
+def test_enemy_box_counts_visible_hostiles_and_keeps_commands_player_only(
+    enemy_selection_app: AirtsApp,
+) -> None:
+    app = enemy_selection_app
+    try:
+        start = app.screen_point(Point(28, 28))
+        end = app.screen_point(Point(38, 50))  # Ends in the command bar over an offscreen scout.
+        assert app.command_bar_rect.collidepoint(end)
+        with patch("airts.presentation.app.pygame.key.get_mods", return_value=0):
+            app._handle_mouse_down(1, start)
+            app._handle_mouse_up(1, end)
+        assert app.selected_entities == {"scout_1", "scout_2", "builder"}
+        assert app.simulation.selection.entity_ids == ()
+        surface = pygame.Surface(app.window_size)
+        with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
+            app._draw_interface(surface)
+        assert any("Enemy selected: 3" in call.args[1] for call in text.call_args_list)
+        assert {kind for _, kind in app._type_buttons} == {EntityKind.SCOUT, EntityKind.BUILDER}
+        builder_button = next(
+            rect for rect, kind in app._type_buttons if kind is EntityKind.BUILDER
+        )
+        app._handle_panel_click(builder_button.center)
+        app._draw_interface(surface)
+        assert app.selected_entities == {"builder"}
+        assert not any(
+            action.startswith(("build:", "queue:", "loop:", "reduce:"))
+            or action in {"stop", "hold", "patrol", "defend"}
+            for _, action in app._command_buttons
+        )
+        before = app.simulation.export_state()
+        app.active_target = rectangle_region(Point(28, 28), Point(38, 38))
+        for key in (pygame.K_t, pygame.K_y, pygame.K_p, pygame.K_r, pygame.K_x, pygame.K_h):
+            app._handle_key(key)
+        app._handle_mouse_down(3, app.screen_point(Point(40, 40)))
+        assert app.simulation.export_state() == before
+        app.simulation.remove_entity("builder")
+        app._prune_removed_entities()
+        assert not app.selected_entities
+        assert app.inspected_entity_id is None
+    finally:
+        pygame.font.quit()
+
+
+@pytest.mark.parametrize("initial", [set(), {"player"}, {"scout_1"}])
+@pytest.mark.parametrize("additive", [False, True], ids=["replace", "shift"])
+def test_player_selection_takes_precedence_over_enemy_units(
+    enemy_selection_app: AirtsApp,
+    initial: set[str],
+    additive: bool,
+) -> None:
+    app = enemy_selection_app
+    try:
+        app.selected_entities = initial.copy()
+        app._selection_changed()
+        app._select_entities(Point(20, 20), Point(38, 38), additive=additive)
+        assert app.selected_entities == (
+            set() if additive and initial == {"player"} else {"player"}
+        )
+        assert set(app.simulation.selection.entity_ids) == app.selected_entities
+        app.selected_entities = {"player"}
+        app._selection_changed()
+        app._select_entities(Point(28, 28), Point(38, 38), additive=True)
+        assert app.selected_entities == {"player"}
+        assert app.simulation.selection.entity_ids == ("player",)
+    finally:
+        pygame.font.quit()
+
+
+def test_double_click_enemy_selects_same_kind_across_hostile_owners_in_canvas(
+    enemy_selection_app: AirtsApp,
+) -> None:
+    app = enemy_selection_app
+    try:
+        app.selected_entities = {"player"}
+        app._selection_changed()
+        point = app.simulation.entities["scout_1"].position
+        with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1200)):
+            app._select_entities(point, point)
+            assert app.selected_entities == {"scout_1"}
+            app._select_entities(point, point)
+        assert app.selected_entities == {"scout_1", "scout_2"}
+        assert app.inspected_kind is EntityKind.SCOUT
+        assert app.simulation.selection.entity_ids == ()
+        app._handle_key(pygame.K_ESCAPE)
+        assert not app.selected_entities
+    finally:
+        pygame.font.quit()
+
+
 @pytest.mark.parametrize(
     ("delay_ms", "offset_pixels", "change_selection", "gathering"),
     [
@@ -641,9 +788,10 @@ def test_right_click_on_friendly_is_not_stolen_by_a_nearby_enemy(friendly_id: st
     )
 
 
-def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
+def test_save_manager_creates_overwrites_loads_deletes_and_returns_to_game(tmp_path: Path) -> None:
     app = AirtsApp(builder_factory_simulation())
     app.quick_save_path = tmp_path / "quicksave.json"
+    app.save_directory = tmp_path / "saves"
     pygame.font.init()
     app.ui.font = pygame.font.Font(None, 24)
     app.ui.small_font = pygame.font.Font(None, 19)
@@ -653,23 +801,124 @@ def test_settings_menu_clicks_save_load_and_new_game(tmp_path: Path) -> None:
     app._draw(surface)
     buttons = {action: rectangle for rectangle, action in app._settings_buttons}
 
-    app._handle_mouse_down(1, buttons["save"].center)
-    assert app.quick_save_path.exists()
-    app.simulation.resources["player"] = 123
-    app.settings_open = True
-    app._draw(surface)
-    buttons = {action: rectangle for rectangle, action in app._settings_buttons}
-    app._handle_mouse_down(1, buttons["load"].center)
-    assert app.simulation.resources["player"] == 10_000
-    assert app._software_renderer._map_surface is None
-    app.simulation.resources["player"] = 123
-    app.settings_open = True
-    app._draw(surface)
-    buttons = {action: rectangle for rectangle, action in app._settings_buttons}
-    app._handle_mouse_down(1, buttons["new"].center)
-    assert app.simulation.resources["player"] == 500
-    assert app._software_renderer._map_surface is None
-    pygame.font.quit()
+    def click(action: str) -> None:
+        app._draw(surface)
+        buttons = {action: rectangle for rectangle, action in app.save_panel.buttons}
+        app._handle_mouse_down(1, buttons[action].center)
+
+    try:
+        app._handle_mouse_down(1, buttons["saves"].center)
+        assert app.save_panel.open and not app.settings_open
+        click("new_save")
+        app._finish_save()
+        first = app.save_panel.selected
+        assert first is not None and first.exists()
+        assert len(app.save_panel.entries) == 1
+
+        app.simulation.resources["player"] = 123
+        click("overwrite")
+        assert app.save_panel.confirmation == "overwrite"
+        click("confirm")
+        app._finish_save()
+        app.simulation.resources["player"] = 456
+        click("new_save")
+        app._finish_save()
+        assert len(app.save_panel.entries) == 2
+        click("select:1")
+        assert app.save_panel.selected == first
+        click("load")
+        click("confirm")
+        assert not app.save_panel.open
+        assert app.simulation.resources["player"] == 123
+        assert app._software_renderer._map_surface is None
+        assert not app.selected_entities
+
+        app.paused = True
+        app._open_save_manager()
+        click("delete")
+        click("cancel")
+        assert first.exists()
+        click("delete")
+        click("confirm")
+        assert not first.exists()
+        assert len(app.save_panel.entries) == 1
+        click("close")
+        assert app.paused
+
+        app.settings_open = True
+        app._draw(surface)
+        buttons = {action: rectangle for rectangle, action in app._settings_buttons}
+        app._handle_mouse_down(1, buttons["new"].center)
+        assert app.simulation.resources["player"] == 500
+        assert app._software_renderer._map_surface is None
+    finally:
+        app._finish_save()
+        pygame.font.quit()
+
+
+def test_quicksave_keeps_ui_responsive_and_prevents_overlapping_operations(tmp_path: Path) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.quick_save_path = tmp_path / "quick.json"
+    started = ThreadEvent()
+    release = ThreadEvent()
+    original = app.simulation
+    tick = original.tick
+
+    def delayed_write(snapshot: SaveSnapshot, path: str | Path) -> None:
+        started.set()
+        assert release.wait(5)
+        write_save(snapshot, path)
+
+    try:
+        with patch("airts.presentation.app.write_save", side_effect=delayed_write) as writer:
+            app._handle_key(pygame.K_F5)
+            assert started.wait(5)
+            assert app.save_busy
+            app._handle_key(pygame.K_F5)
+            app._handle_key(pygame.K_F9)
+            assert writer.call_count == 1
+            assert app.simulation is original
+            assert "Wait" in app.notice
+            app._advance_presentation_tick()
+            assert app.simulation.tick == tick + 1
+            app._open_save_manager()
+            app._handle_key(pygame.K_SPACE)
+            assert not app.paused
+            app._handle_key(pygame.K_DELETE)
+            app._handle_key(pygame.K_ESCAPE)
+            assert not app.save_panel.open
+            release.set()
+            app._finish_save()
+        assert not app.save_busy and "Saved" in app.notice
+        assert load_simulation(app.quick_save_path).tick == tick
+        app._handle_key(pygame.K_F9)
+        assert app.simulation.tick == tick
+    finally:
+        release.set()
+        app._finish_save()
+
+
+def test_save_and_load_failures_leave_current_world_available(tmp_path: Path) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.quick_save_path = tmp_path / "quicksave.json"
+    app.save_directory = tmp_path / "saves"
+    original = app.simulation
+    with patch("airts.presentation.app.write_save", side_effect=OSError("disk full")):
+        app._save_game()
+        app._finish_save()
+    assert "Save failed: disk full" in app.notice
+    assert not app.save_busy
+    bad_save = app.save_directory / "invalid.json"
+    bad_save.parent.mkdir()
+    bad_save.write_text("{broken", encoding="utf-8")
+    app._open_save_manager()
+    app._load_game(bad_save)
+    assert "Load failed" in app.notice
+    assert app.simulation is original
+    assert app.save_panel.open
+    app._load_game(tmp_path / "missing.json")
+    assert app.simulation is original
+    assert app.save_panel.open
 
 
 def test_settings_menu_requests_a_higher_explicit_resolution() -> None:

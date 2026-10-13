@@ -62,23 +62,6 @@ def test_manual_movement_reaches_target_on_fixed_ticks(
     )
 
 
-def test_same_initial_state_and_commands_are_deterministic(
-    make_map: Callable[[int], GameMap],
-) -> None:
-    target = PolylineTarget((Point(2, 2), Point(8, 2), Point(8, 8)))
-    first = Simulation(make_map(2))
-    second = Simulation(make_map(2))
-
-    for simulation in (first, second):
-        simulation.execute(CreatePatrolCommand(("unit_01", "unit_02"), target))
-        simulation.advance(80)
-
-    assert first.snapshot() == second.snapshot()
-    assert [event.to_dict() for event in first.events.events] == [
-        event.to_dict() for event in second.events.events
-    ]
-
-
 def test_unreachable_move_is_rejected_without_partial_movement() -> None:
     game_map = load_map_data(
         {

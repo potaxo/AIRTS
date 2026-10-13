@@ -35,6 +35,8 @@ ENTITY_COLORS: dict[EntityKind, Color] = {
     EntityKind.LIGHT_TANK: (235, 221, 93),
     EntityKind.HEAVY_TANK: (230, 139, 75),
     EntityKind.BUILDER: (99, 220, 176),
+    EntityKind.ARTILLERY: (204, 115, 214),
+    EntityKind.TURRET: (186, 195, 111),
     EntityKind.FACTORY: (112, 142, 181),
     EntityKind.REPAIR_HUB: (110, 178, 151),
     EntityKind.COMMAND_CENTER: (155, 129, 190),
@@ -46,4 +48,6 @@ PROJECTILE_COLORS: dict[EntityKind, Color] = {
     EntityKind.SCOUT: (120, 225, 255),
     EntityKind.LIGHT_TANK: (255, 232, 105),
     EntityKind.HEAVY_TANK: (255, 135, 70),
+    EntityKind.ARTILLERY: (237, 164, 255),
+    EntityKind.TURRET: (238, 255, 136),
 }

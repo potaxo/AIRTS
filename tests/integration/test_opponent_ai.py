@@ -8,7 +8,7 @@ import pytest
 from tests.integration.opponent_scenarios import opening_army, opponent_scenario
 
 from airts.adapters.persistence import MATCH_SAVE_SCHEMA, PersistenceError, load_simulation_data
-from airts.adapters.replay import ReplayError, capture_replay, load_replay_data, run_replay
+from airts.adapters.replay import capture_replay, load_replay_data, run_replay
 from airts.contracts.automations import (
     AutomationStatus,
     ConstructionParameters,
@@ -263,21 +263,3 @@ def test_opponent_memory_rejects_malformed_saves(corruption: str) -> None:
         load_simulation_data(
             {"schema": MATCH_SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
         )
-
-
-def test_legacy_match_save_migrates_but_old_regenerated_replay_is_rejected() -> None:
-    simulation = opponent_scenario(opening_army())
-    simulation.advance(10)
-    state = simulation.export_state()
-    state.pop("opponents")
-    restored = load_simulation_data(
-        {"schema": "airts-match-save-v2", "map": simulation.game_map.to_dict(), "state": state}
-    )
-    assert restored.entities["army_0000"].to_dict() == simulation.entities["army_0000"].to_dict()
-    assert not restored.opponents["ai"].squads
-    restored.advance(10)
-    assert restored.opponents["ai"].squads
-    old_replay = capture_replay(simulation).to_dict()
-    old_replay["schema"] = "airts-match-replay-v2"
-    with pytest.raises(ReplayError, match="older opponent policy"):
-        load_replay_data(old_replay)

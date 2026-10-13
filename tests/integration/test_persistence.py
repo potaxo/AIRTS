@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from tests.integration.scenarios import (
@@ -20,9 +21,11 @@ from tests.integration.scenarios import (
 from airts.adapters.persistence import (
     SAVE_SCHEMA,
     PersistenceError,
+    capture_save,
     load_simulation,
     load_simulation_data,
     save_simulation,
+    write_save,
 )
 from airts.adapters.replay import (
     capture_replay,
@@ -60,6 +63,47 @@ from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_example_map
 from airts.world.units.catalog import EntityKind
+
+
+def test_save_capture_defers_packed_history_and_isolated_state_survives_play(
+    tmp_path: Path,
+) -> None:
+    simulation = builder_factory_simulation()
+    simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    simulation.events.record_path(
+        simulation.tick, "builder", source="test", cost=2, cells=((2, 2), (3, 2), (4, 2))
+    )
+    expected = simulation.export_state()
+    # Capturing must not expand historical paths on the application's thread.
+    with patch("airts.contracts.events.Event.to_dict", side_effect=AssertionError("expanded")):
+        snapshot = capture_save(simulation)
+    simulation.advance(3)
+    simulation.resources["player"] = 1
+    simulation.execute(HoldPositionCommand(("builder",)))
+    path = tmp_path / "captured.json"
+    write_save(snapshot, path)
+    restored = load_simulation(path)
+    assert restored.export_state() == expected
+    assert restored.tick < simulation.tick
+    restored.advance(3)
+    assert restored.tick == simulation.tick
+
+
+@pytest.mark.parametrize("failure", ["encoding", "replace"])
+def test_atomic_save_failure_preserves_previous_file_and_cleans_temporary(
+    tmp_path: Path, failure: str
+) -> None:
+    simulation = builder_factory_simulation()
+    path = tmp_path / "existing.json"
+    save_simulation(simulation, path)
+    before = path.read_bytes()
+    simulation.resources["player"] = 1
+    target = "json.dumps" if failure == "encoding" else "os.replace"
+    with patch(f"airts.adapters.persistence.{target}", side_effect=OSError("disk failure")):
+        with pytest.raises(OSError, match="disk failure"):
+            save_simulation(simulation, path)
+    assert path.read_bytes() == before
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_blocked_attack_continues_after_save_load_and_gate_removal(tmp_path: Path) -> None:
@@ -228,67 +272,10 @@ def test_thousand_unit_dense_recovery_save_preserves_bounded_continuation(tmp_pa
     ), "conflicting anchors must wait safely after the selected squad has left"
 
 
-@pytest.mark.parametrize("schema", ["airts-save-v7", "airts-save-v8", "airts-save-v9"])
-def test_legacy_hold_save_migrates_only_the_recorded_body_position(schema: str) -> None:
-    simulation = hold_contact_simulation()
-    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
-    state = simulation.export_state()
-    saved_position = [7.5, 5.5]
-    state["entities"]["holder"]["position"] = saved_position
-    for entity in state["entities"].values():
-        for field in (
-            "hold_anchor",
-            "contact_wait_ticks",
-            "recovery_path",
-            "recovery_retry_tick",
-            "defend_arrived",
-            "recovery_blocked_cells",
-            "recovery_request_tick",
-            "recovery_released",
-        ):
-            entity.pop(field)
-    restored = load_simulation_data(
-        {"schema": schema, "map": simulation.game_map.to_dict(), "state": state}
-    )
-    assert restored.entities["holder"].hold_anchor == Point(*saved_position)
-    restored.advance(40)
-    assert restored.entities["holder"].position == Point(*saved_position)
-    assert restored.entities["holder"].recovery_request_tick is None
-    assert not restored.entities["holder"].recovery_released
-    assert SAVE_SCHEMA == "airts-save-v12"
-
-
-def test_v10_preserves_recovery_intent_and_initializes_the_new_return_phase() -> None:
-    simulation = hold_contact_simulation()
-    assert simulation.execute(HoldPositionCommand(("holder",))).accepted
-    # Prepare past request ages without depending on a particular movement trace.
-    simulation.tick = 3
-    holder = simulation.entities["holder"]
-    holder.contact_wait_ticks = 4
-    holder.recovery_request_tick = 1
-    holder.recovery_released = True
-    state = simulation.export_state()
-    for entity in state["entities"].values():
-        entity.pop("recovery_request_tick")
-        entity.pop("recovery_released")
-    restored = load_simulation_data(
-        {"schema": "airts-save-v10", "map": simulation.game_map.to_dict(), "state": state}
-    )
-    assert restored.entities["holder"].hold_anchor == holder.hold_anchor
-    assert restored.entities["holder"].contact_wait_ticks == 4
-    assert restored.entities["holder"].recovery_request_tick is None
-    assert not restored.entities["holder"].recovery_released
-    migrated = restored.export_state()
-    for entity in migrated["entities"].values():
-        assert entity.pop("recovery_request_tick") is None
-        assert entity.pop("recovery_released") is False
-    assert migrated == state
-
-
 @pytest.mark.parametrize(
     ("request_tick", "released"), [(None, False), (0, False), (0, True), (3, True)]
 )
-def test_v11_round_trips_return_request_age_and_release_phase(
+def test_current_save_round_trips_return_request_age_and_release_phase(
     request_tick: int | None, released: bool
 ) -> None:
     simulation = hold_contact_simulation()
@@ -307,7 +294,9 @@ def test_v11_round_trips_return_request_age_and_release_phase(
     assert restored.export_state() == simulation.export_state()
 
 
-def test_v11_preserves_pending_hold_progress_and_continues_without_a_player_route() -> None:
+def test_current_save_preserves_pending_hold_progress_and_continues_without_a_player_route() -> (
+    None
+):
     """The internal weak return tracker affects the saved deterministic trajectory."""
     simulation = hold_contact_simulation()
     assert simulation.execute(HoldPositionCommand(("holder",))).accepted
@@ -335,7 +324,7 @@ def test_v11_preserves_pending_hold_progress_and_continues_without_a_player_rout
     assert holder.position.distance_to(Point(5.5, 5.5)) <= 0.05
 
 
-@pytest.mark.parametrize("fault", ["wrong-anchor", "missing-request", "legacy-v10"])
+@pytest.mark.parametrize("fault", ["wrong-anchor", "missing-request"])
 def test_hold_internal_progress_requires_the_current_saved_request_owner(fault: str) -> None:
     simulation = hold_contact_simulation()
     assert simulation.execute(HoldPositionCommand(("holder",))).accepted
@@ -350,7 +339,7 @@ def test_hold_internal_progress_requires_the_current_saved_request_owner(fault: 
     with pytest.raises(PersistenceError, match="progress target must match its next waypoint"):
         load_simulation_data(
             {
-                "schema": "airts-save-v10" if fault == "legacy-v10" else SAVE_SCHEMA,
+                "schema": SAVE_SCHEMA,
                 "map": simulation.game_map.to_dict(),
                 "state": simulation.export_state(),
             }
@@ -358,7 +347,7 @@ def test_hold_internal_progress_requires_the_current_saved_request_owner(fault: 
 
 
 @pytest.mark.parametrize("field", ["recovery_request_tick", "recovery_released"])
-def test_v11_requires_explicit_return_phase_fields(field: str) -> None:
+def test_current_save_requires_explicit_return_phase_fields(field: str) -> None:
     simulation = hold_contact_simulation()
     state = simulation.export_state()
     state["entities"]["holder"].pop(field)
@@ -369,7 +358,7 @@ def test_v11_requires_explicit_return_phase_fields(field: str) -> None:
 
 
 @pytest.mark.parametrize("owner", ["idle", "move", "building", "unarrived-defend", "paused"])
-def test_v11_rejects_return_requests_without_a_weak_business_owner(owner: str) -> None:
+def test_current_save_rejects_return_requests_without_a_weak_business_owner(owner: str) -> None:
     simulation = Simulation(runtime_map()) if owner == "building" else hold_contact_simulation()
     key = "factory" if owner == "building" else "holder"
     entity = simulation.entities[key]
@@ -393,7 +382,7 @@ def test_v11_rejects_return_requests_without_a_weak_business_owner(owner: str) -
         )
 
 
-def test_v11_preserves_arrived_defense_release_phase_at_its_station() -> None:
+def test_current_save_preserves_arrived_defense_release_phase_at_its_station() -> None:
     simulation = hold_contact_simulation()
     entity = simulation.entities["holder"]
     created = simulation.execute(CreateDefendCommand(("holder",), PointTarget(entity.position)))
@@ -692,45 +681,6 @@ def test_save_load_round_trip_preserves_active_runtime_and_continuation(
     _assert_continues_identically(simulation, restored, 25)
 
 
-def test_loading_retired_congestion_state_preserves_repair_continuation() -> None:
-    simulation = Simulation(runtime_map())
-    simulation.entities["unit_01"].health = 10
-    assert simulation.execute(CreateRepairAndReturnCommand(("unit_01",))).accepted
-    simulation.advance()
-    assert simulation.entities["unit_01"].path
-    state = simulation.export_state()
-    state["entities"]["unit_01"]["congestion_stopped"] = True
-    state["blocked_ticks"] = {"unit_01": 17}
-
-    restored = load_simulation_data(
-        {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
-    )
-
-    assert restored.export_state() == simulation.export_state()
-    _assert_continues_identically(simulation, restored, 40)
-
-
-@pytest.mark.parametrize("invalid_field", ["stop-flag", "negative-counter", "unknown-unit"])
-def test_loading_retired_congestion_fields_still_rejects_malformed_data(
-    invalid_field: str,
-) -> None:
-    simulation = Simulation(runtime_map())
-    state = simulation.export_state()
-    if invalid_field == "stop-flag":
-        state["entities"]["unit_01"]["congestion_stopped"] = "false"
-        message = "congestion_stopped"
-    else:
-        state["blocked_ticks"] = (
-            {"unit_01": -1} if invalid_field == "negative-counter" else {"missing": 1}
-        )
-        message = "blocked_ticks"
-
-    with pytest.raises(PersistenceError, match=message):
-        load_simulation_data(
-            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
-        )
-
-
 def test_load_rejects_an_unknown_schema(tmp_path: Path) -> None:
     destination = tmp_path / "invalid.json"
     destination.write_text(json.dumps({"schema": "future"}), encoding="utf-8")
@@ -861,27 +811,6 @@ def test_blueprint_and_unfinished_site_state_continues_after_loading(stage: str)
     _assert_continues_identically(simulation, restored, 80)
 
 
-def test_v11_construction_migrates_prepaid_progress_without_charging_again() -> None:
-    simulation = builder_factory_simulation()
-    created = simulation.execute(
-        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(6, 10))
-    )
-    simulation.advance(3)
-    state = simulation.export_state()
-    parameters = state["automations"][created.automation_id]["parameters"]
-    site_id = parameters.pop("site_entity_id")
-    del state["entities"][site_id]
-    for entity in state["entities"].values():
-        entity.pop("construction_progress")
-    balance = simulation.resources["player"]
-    restored = load_simulation_data(
-        {"schema": "airts-save-v11", "map": simulation.game_map.to_dict(), "state": state}
-    )
-    restored.advance(20)
-    assert restored.automations[created.automation_id or ""].status is AutomationStatus.COMPLETED
-    assert restored.resources["player"] == balance
-
-
 @pytest.mark.parametrize(
     "corruption",
     [
@@ -945,21 +874,3 @@ def test_growing_army_save_preserves_shared_cells_and_movement_continuation(
     assert restored.export_state() == simulation.export_state()
     _assert_continues_identically(simulation, restored, 20)
     assert "traffic_reservations" not in document["state"]
-
-
-@pytest.mark.parametrize("schema", ["airts-save-v7", "airts-save-v8"])
-def test_previous_save_version_repairs_consumed_waypoint_progress(schema: str) -> None:
-    simulation, _ = growing_factory_simulation()
-    simulation.advance(260)
-    state = simulation.export_state()
-    entity = next(value for value in state["entities"].values() if value["path"])
-    entity["progress_target"] = [2.5, 2.5]
-    entity["progress_distance"] = 10.0
-    restored = load_simulation_data(
-        {"schema": schema, "map": simulation.game_map.to_dict(), "state": state}
-    )
-    loaded_entity = restored.entities[entity["id"]]
-    assert loaded_entity.progress_target == loaded_entity.path[0]
-    restored.advance(5)
-    assert restored.tick == 265
-    assert loaded_entity.progress_target == (loaded_entity.path[0] if loaded_entity.path else None)
