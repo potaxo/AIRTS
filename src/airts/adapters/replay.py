@@ -11,7 +11,7 @@ from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
 REPLAY_SCHEMA = "airts-replay-v21"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v14"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v15"
 
 
 class ReplayError(ValueError):

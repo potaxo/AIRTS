@@ -18,6 +18,7 @@ to change, not line count; avoid facade forwarders, generic managers and transit
 | `systems/` | Command application, automation, movement, combat, repair, economy, production, construction and results |
 | `adapters/` | Versioned persistence and replay diagnostics |
 | `presentation/` | Window/input, lobby, UI, software/GPU rendering and frame metrics |
+| `presentation/visuals/` | Explicit appearance bindings, packaged images/atlas, bounded software transforms, visual facing and GPU sprite records; [appearance contract](appearance.md) |
 | `presentation/ui/` | Font/text primitives (`drawing`), selection/production controls (`selection`), automation inspection/scroll (`automations`), settings/help (`menus`) and save browser (`saves`) |
 | `data/` | Bundled maps; package-data configuration belongs to `pyproject.toml` |
 
@@ -56,6 +57,9 @@ scroll and hit geometry; authoritative automation data remains in Simulation. Ui
 and text/button drawing, including the font handle read by the GPU text atlas.
 GPU resources/buffers belong to its backend; metrics has no Pygame/app dependency.
 Shared palette and independent backends retain separate owners.
+Battle appearance and facing are presentation concerns; GPU record packing has a shared leaf owner
+in `gpu_shapes.py`. The core never loads PNGs, stores camera state or advances visual headings.
+Art sources and the offline authoring tool are owned by the appearance contract.
 
 Collision geometry and queries are shared leaves. Release and return algorithms import those
 leaves; the solver orchestrates them. Movement packs each profile's mass into its existing reusable

@@ -53,14 +53,19 @@ diagnostic, without automatic migration.
 | Input | Current handling |
 | --- | --- |
 | Sandbox save v16 | Current write/read format; includes developer mode, its income timer and per-assignment auto repair |
-| Match save v8 | Current write/read format, including developer mode, its income timer and per-assignment auto repair |
-| Sandbox replay v21 / match replay v14 | Current diagnostic formats and exact verification |
+| Match save v9 | Current write/read format with victory based on surviving assets |
+| Sandbox replay v21 / match replay v15 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves require construction progress and site references and validate owner, kind,
-position, payment and live jobs. Match results use current command-center production rules.
+position, payment and live jobs. Match results use current surviving-asset victory rules.
 The adapter's exact tags/validators are authoritative. Legacy migration branches are removed;
 old sandbox and match saves are rejected before world reconstruction.
+
+Forward expansion, siege production and continuous cleanup regenerate AI decisions from the saved
+squad memory and current world. They introduce no additional memory fields. Match save v9 rejects
+earlier result semantics, and match replay v15 rejects earlier AI trajectories and events; sandbox
+formats are unchanged. Current continuation and command replay verification remain enabled.
 
 Developer mode and its partial-second tick counter are authoritative save/snapshot state.
 Current formats require a boolean toggle and a counter within the enabled one-second interval;

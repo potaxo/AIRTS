@@ -15,8 +15,8 @@ from tests.scout_scenario import head_on_scout_simulation
 from airts.contracts.commands import MoveCommand
 from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
+from airts.presentation.gpu_shapes import SHAPE_FLOATS
 from airts.presentation.opengl_renderer import (
-    SHAPE_FLOATS,
     OpenGLFrameBuilder,
     OpenGLRenderer,
     OpenGLRendererError,
@@ -190,7 +190,8 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     context.vertex_array.side_effect = vertex_arrays
     texture = MagicMock()
     terrain_texture = MagicMock()
-    context.texture.side_effect = (terrain_texture, texture)
+    sprite_texture = MagicMock()
+    context.texture.side_effect = (sprite_texture, terrain_texture, texture)
     renderer = OpenGLRenderer(module, context)
     simulation, eastbound, westbound = head_on_scout_simulation()
     entity_ids = eastbound + westbound
@@ -251,7 +252,8 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
 
     texture.release.assert_called_once_with()
     terrain_texture.release.assert_called_once_with()
-    assert context.texture.call_count == 2
+    sprite_texture.release.assert_called_once_with()
+    assert context.texture.call_count == 3
     assert all(resource.release.called for resource in (*vertex_arrays, *buffers, *programs))
 
 
@@ -390,7 +392,7 @@ def test_opengl_normal_scene_preserves_full_health_bars_and_outer_selection_outl
     assert frame.unit_count == 2
     assert frame.building_count == 1
     assert frame.selected_unit_count == 1
-    assert frame.shape_count == 10  # 3 entities + 6 health rectangles + 1 outer outline
+    assert frame.shape_count == 10  # 3 aligned sprites + 6 health rectangles + 1 outer outline
 
 
 @pytest.mark.parametrize("teams", [False, True], ids=["sandbox", "team-match"])
@@ -422,7 +424,7 @@ def test_large_enemy_selection_keeps_all_units_and_highlights_them(teams: bool) 
     app = AirtsApp(Simulation(load_map_data(data)))
     app.selected_entities = {f"enemy_{i}" for i in range(130)}
     packed, shapes, units, buildings, selected = OpenGLFrameBuilder._build_entities(app, (0, 0), 1)
-    assert shapes == units == 131
+    assert shapes == units == 131  # Aligned layers share one atlas entry, including both images.
     assert buildings == 0 and selected == 130
     values = array("f")
     values.frombytes(packed)
@@ -470,7 +472,14 @@ def test_opengl_frame_batches_live_projectile_feedback_on_the_gpu() -> None:
     active_combat = builder.build(app, DISPLAY_SIZE)
 
     assert simulation.projectiles
-    assert active_combat.shape_count == initial.shape_count + 2 * len(simulation.projectiles)
+    values = array("f")
+    values.frombytes(active_combat.shape_buffer)
+    filled_circles = [
+        values[i : i + SHAPE_FLOATS]
+        for i in range(0, len(values), SHAPE_FLOATS)
+        if values[i + 18] == 1 and values[i + 17] > 0
+    ]
+    assert len(filled_circles) == 2 * len(simulation.projectiles)
     assert active_combat.line_vertex_count > initial.line_vertex_count
 
 

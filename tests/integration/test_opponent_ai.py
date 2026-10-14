@@ -21,7 +21,10 @@ from airts.contracts.commands import (
     PauseAutomationCommand,
 )
 from airts.contracts.spatial import Point
+from airts.simulation import Simulation
 from airts.systems.opponent_ai import engagement_margin
+from airts.systems.skirmish import owner_status
+from airts.world.map import load_map_data
 from airts.world.opponents import SquadPhase
 from airts.world.units.catalog import EntityKind
 
@@ -156,7 +159,7 @@ def test_production_mixes_units_and_respects_a_manual_pause() -> None:
         and job.parameters.unit_kind is EntityKind.SCOUT
         for job in simulation.automations.values()
     )
-    simulation.advance(20)
+    simulation.advance(60)
     assert any(
         isinstance(job.parameters, ProductionParameters)
         and job.parameters.unit_kind is EntityKind.HEAVY_TANK
@@ -211,7 +214,7 @@ def test_construction_budget_pauses_then_resumes_production_and_survives_save() 
     assert simulation.export_state() == restored.export_state()
     assert any(
         transition.previous is AutomationStatus.PAUSED
-        and transition.current is AutomationStatus.ACTIVE
+        and transition.current in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}
         and transition.tick > 20
         for transition in simulation.automations[production.automation_id or ""].transition_history
     )
@@ -234,6 +237,147 @@ def test_wounded_units_use_repair_and_are_excluded_from_attack_orders() -> None:
         unit.entity_id not in squad.entity_ids for squad in simulation.opponents["ai"].squads
     )
     assert not unit.pursue_target
+
+
+def test_remote_extraction_gets_a_turret_and_forward_factory() -> None:
+    simulation = opponent_scenario(
+        resource_sites=((66, 66), (32, 66)),
+        outposts=((EntityKind.RESOURCE_GENERATOR, 32, 66),),
+    )
+    simulation.resources["ai"] = 2500
+    simulation.advance(20)
+    jobs = [
+        job.parameters
+        for job in simulation.live_automations
+        if isinstance(job.parameters, ConstructionParameters)
+    ]
+    assert any(
+        job.building_kind is EntityKind.TURRET and job.position.distance_to(Point(32, 66)) < 14
+        for job in jobs
+    )
+    simulation.advance(140)
+    assert any(
+        unit.kind is EntityKind.TURRET
+        and unit.is_complete
+        and unit.position.distance_to(Point(32, 66)) < 14
+        for unit in simulation.entities.values()
+    )
+    assert any(
+        isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.building_kind is EntityKind.FACTORY
+        and job.parameters.position.distance_to(Point(32, 66)) < 14
+        for job in simulation.automations.values()
+    )
+
+
+def test_exhausted_resource_sites_reserve_funds_for_synthesis() -> None:
+    simulation = opponent_scenario(resource_sites=((66, 66),))
+    simulation.advance(160)
+    assert any(
+        unit.kind is EntityKind.MATTER_SYNTHESIZER and unit.is_complete
+        for unit in simulation.entities.values()
+    )
+    assert any(
+        job.title == "AI expansion"
+        and isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.building_kind is EntityKind.MATTER_SYNTHESIZER
+        for job in simulation.automations.values()
+    )
+
+
+def test_factory_search_reaches_beyond_an_extractor_and_its_defense() -> None:
+    simulation = opponent_scenario(
+        resource_sites=((66, 66), (32, 66)),
+        outposts=((EntityKind.RESOURCE_GENERATOR, 32, 66), (EntityKind.TURRET, 33, 61)),
+    )
+    simulation.resources["ai"] = 2500
+    simulation.advance(20)
+    assert any(
+        isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.building_kind is EntityKind.FACTORY
+        and job.parameters.position.distance_to(Point(32, 66)) < 14
+        for job in simulation.live_automations
+    )
+
+
+def test_passive_remnants_on_opposing_teams_draw() -> None:
+    simulation = opponent_scenario(
+        enemies=((EntityKind.RESOURCE_GENERATOR, 10, 12),),
+    )
+    for key in ("ai_factory", "ai_builder", "player_factory"):
+        simulation.remove_entity(key)
+    simulation.advance()
+    assert simulation.match_result == 0
+
+
+def test_attack_selection_skips_a_valuable_but_unreachable_factory() -> None:
+    data = opponent_scenario(
+        opening_army(),
+        ((EntityKind.FACTORY, 32, 50), (EntityKind.MATTER_SYNTHESIZER, 70, 30)),
+    ).game_map.to_dict()
+    data["terrain"] = {"default": "grass", "rectangles": [[40, 0, 1, 80, "rock"]]}
+    simulation = Simulation(load_map_data(data))
+    simulation.advance(10)
+    squad = simulation.opponents["ai"].squads[0]
+    assert squad.target_id == "enemy_0001"
+    assert all(simulation.entities[key].pursue_target for key in squad.entity_ids)
+
+
+def test_command_center_replaces_a_builder_and_rebuilds_a_lost_factory() -> None:
+    simulation = opponent_scenario(outposts=((EntityKind.COMMAND_CENTER, 70, 40),))
+    simulation.remove_entity("ai_factory")
+    simulation.remove_entity("ai_builder")
+    simulation.advance(180)
+    assert any(
+        unit.owner_id == "ai" and unit.kind is EntityKind.BUILDER
+        for unit in simulation.entities.values()
+    )
+    assert any(
+        unit.owner_id == "ai" and unit.kind is EntityKind.FACTORY and unit.is_complete
+        for unit in simulation.entities.values()
+    )
+
+
+def test_siege_production_adds_artillery_against_fixed_defenses() -> None:
+    simulation = opponent_scenario(opening_army(), ((EntityKind.TURRET, 30, 30),))
+    simulation.advance(100)
+    assert any(
+        isinstance(job.parameters, ProductionParameters)
+        and job.parameters.unit_kind is EntityKind.ARTILLERY
+        for job in simulation.automations.values()
+    )
+
+
+def test_squad_retargets_after_a_kill_without_returning_home() -> None:
+    simulation = opponent_scenario(
+        opening_army(),
+        ((EntityKind.RESOURCE_GENERATOR, 32, 30),),
+        resource_sites=((66, 66), (32, 30)),
+    )
+    simulation.advance(10)
+    squad = simulation.opponents["ai"].squads[0]
+    assert squad.target_id == "enemy_0000"
+    simulation.remove_entity("enemy_0000")
+    simulation.advance(20)
+    assert squad.phase is SquadPhase.ADVANCING
+    assert squad.target_id == "player_factory"
+    assert all(simulation.entities[key].pursue_target for key in squad.entity_ids)
+
+
+def test_last_scout_clears_remnants_and_wins_without_production() -> None:
+    simulation = opponent_scenario(
+        ((EntityKind.SCOUT, 30.5, 35.5),), ((EntityKind.MATTER_SYNTHESIZER, 30, 30),)
+    )
+    for key in ("ai_factory", "ai_builder", "ai_income", "player_factory"):
+        simulation.remove_entity(key)
+    assert owner_status(simulation, "ai") == "eliminated"
+    simulation.advance(10)
+    assert simulation.match_result is None
+    assert simulation.entities["army_0000"].pursue_target
+    assert not simulation.opponents["ai"].reserve.entity_ids
+    simulation.advance(850)
+    assert "enemy_0000" not in simulation.entities
+    assert simulation.match_result == 2
 
 
 @pytest.mark.parametrize(

@@ -924,11 +924,14 @@ def test_continuous_production_compact_defense_link_round_trips(
 @pytest.mark.parametrize(
     "stage", ["traveling", "waiting_for_money", "paused_site", "destroyed_builder"]
 )
-def test_blueprint_and_unfinished_site_state_continues_after_loading(stage: str) -> None:
+@pytest.mark.parametrize("building_kind", [EntityKind.REPAIR_HUB, EntityKind.TURRET])
+def test_blueprint_and_unfinished_site_state_continues_after_loading(
+    stage: str, building_kind: EntityKind
+) -> None:
     simulation = builder_factory_simulation()
     simulation.resources["player"] = 0 if stage in {"traveling", "waiting_for_money"} else 500
     result = simulation.execute(
-        CreateConstructionCommand("builder", EntityKind.REPAIR_HUB, Point(16, 14), queued=True)
+        CreateConstructionCommand("builder", building_kind, Point(16, 14), queued=True)
     )
     simulation.execute(
         CreateConstructionCommand(

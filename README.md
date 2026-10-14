@@ -44,8 +44,8 @@ Red rings mark resource sites. Team colors show alliances; all units and buildin
 and there is no fog-of-war overlay. Opponents build their economy, form squads, attack, defend,
 and retreat for repairs.
 
-The roster shows active, eliminated, and out players. Victory depends on the surviving teams'
-ability to continue production, so residual enemy troops do not necessarily prevent a win.
+The roster shows active, eliminated, and out players. Victory requires destroying every opposing
+unit and building; armies continue fighting after their owner loses production.
 See [match and elimination rules](docs/milestones/opponents.md#skirmish-configuration-and-results).
 Use **Settings > New game** or `F2` to return to the cover and configure another match.
 
@@ -56,6 +56,10 @@ a type row in a mixed selection of your units to remove that type from the selec
 command bar shows actions available for the current selection and spatial target, plus **Settings**.
 
 ## Controls
+
+Battle units/buildings use packaged pixel art with display-only turning and separate weapon layers.
+Art locations, regeneration and replacement are documented in the
+[appearance contract](docs/architecture/appearance.md); production portraits are not included.
 
 ### Selection, camera, and direct orders
 

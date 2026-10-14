@@ -12,6 +12,7 @@ import pygame
 from airts.contracts.automations import AutomationKind, DefendParameters, target_center
 from airts.contracts.spatial import Point
 from airts.presentation.gpu_feedback import FeedbackView, GPUFeedback
+from airts.presentation.gpu_shapes import SHAPE_FLOATS, FloatColor, append_shape
 from airts.presentation.palette import (
     ENTITY_COLORS,
     PROJECTILE_COLORS,
@@ -20,14 +21,14 @@ from airts.presentation.palette import (
     match_color,
 )
 from airts.presentation.rendering import SceneView, order_feedback
+from airts.presentation.visuals.assets import atlas_pixels
+from airts.presentation.visuals.catalog import APPEARANCES, ATLAS_COLUMNS, TILE_PIXELS
+from airts.presentation.visuals.gpu import append_entity_sprites
 from airts.simulation import Simulation
 from airts.world.entities import ProjectileTrace
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
-type FloatColor = tuple[float, float, float, float]
-
-SHAPE_FLOATS = 24
 LINE_FLOATS = 6
 
 _INITIAL_TERRAIN_BUFFER_BYTES = 512 * 1024
@@ -37,6 +38,7 @@ _INITIAL_LINE_BUFFER_BYTES = 256 * 1024
 _GPU_RESOURCE_ATTRIBUTES = (
     "_overlay_texture",
     "_terrain_texture",
+    "_sprite_texture",
     "_overlay_vertex_array",
     "_line_vertex_array",
     "_shape_vertex_array",
@@ -164,6 +166,47 @@ class OpenGLFrameBuilder:
         self._frame: OpenGLFrame | None = None
         self._selection_key: frozenset[str] | None = None
         self._trace_buffers: dict[str, tuple[ProjectileTrace, bytes]] = {}
+        self._deferred_tick: int | None = None
+        self._frame_entity_ids: frozenset[str] = frozenset()
+
+    def staged_frame(
+        self, app: OpenGLRenderState, framebuffer_size: tuple[int, int]
+    ) -> OpenGLFrame | None:
+        """Hold the previous current endpoint for one presentation call after a tick.
+
+        As with software scene composition, pack the new world on the following
+        call rather than adding that work to the simulation tick's CPU tail.
+        This adds at most one presentation interval to interpolation latency.
+        Commands, selection changes, births and skipped ticks rebuild at once. Deaths
+        can retain their old endpoint for that one call; no living unit is omitted.
+        """
+        frame, key = self._frame, self._frame_key
+        simulation = app.simulation
+        if (
+            frame is None
+            or key is None
+            or self._deferred_tick == simulation.tick
+            or frame.tick != simulation.tick - 1
+            or key[0] != id(simulation)
+            or key[2] != simulation.command_count
+            or self._selection_key is None
+            or self._selection_key.intersection(simulation.entities) != app.selected_entities
+            or not simulation.entities.keys() <= self._frame_entity_ids
+        ):
+            return None
+        self._deferred_tick = simulation.tick
+        if (
+            frame.framebuffer_size != framebuffer_size
+            or frame.terrain_origin != app.map_origin
+            or frame.terrain_tile_size != app.tile_size
+        ):
+            return replace(
+                frame,
+                framebuffer_size=framebuffer_size,
+                terrain_origin=app.map_origin,
+                terrain_tile_size=app.tile_size,
+            )
+        return frame
 
     def build(
         self,
@@ -230,6 +273,7 @@ class OpenGLFrameBuilder:
         line_buffer += projectile_line_buffer
         line_vertex_count += projectile_line_vertex_count
         self._frame_key = frame_key
+        self._frame_entity_ids = frozenset(simulation.entities)
         self._frame = OpenGLFrame(
             framebuffer_size=framebuffer_size,
             pixel_scale=1.0,
@@ -263,7 +307,7 @@ class OpenGLFrameBuilder:
         pixels = b"".join(
             palette[terrain] for row in simulation.game_map.terrain for terrain in row
         )
-        _append_shape(
+        append_shape(
             values,
             center=(map_width / 2, map_height / 2),
             half_size=(map_width / 2, map_height / 2),
@@ -274,7 +318,7 @@ class OpenGLFrameBuilder:
         count = map_width * map_height
         grid_color = _float_color((44, 65, 49))
         for cell in range(0, simulation.game_map.width + 1, 8):
-            _append_shape(
+            append_shape(
                 values,
                 center=(cell, map_height / 2),
                 half_size=(0.0, map_height / 2),
@@ -283,7 +327,7 @@ class OpenGLFrameBuilder:
             )
             values[-6] = -1.0  # Vertical grid: keep its width in screen pixels.
         for cell in range(0, simulation.game_map.height + 1, 8):
-            _append_shape(
+            append_shape(
                 values,
                 center=(map_width / 2, cell),
                 half_size=(map_width / 2, 0.0),
@@ -305,6 +349,7 @@ class OpenGLFrameBuilder:
         large_selection = len(selected_entities) > 128
         show_full_health_bars = not large_selection
         origin_x, origin_y = origin
+        app.facing.sync(simulation)
         unit_radius = tile_size * 0.42
         unit_count = 0
         building_count = 0
@@ -342,17 +387,11 @@ class OpenGLFrameBuilder:
                     origin_y + (entity.position.y + height / 2) * tile_size,
                 )
                 previous_center = center
-                _append_shape(
-                    values,
-                    center=center,
-                    half_size=(half_width, half_height),
-                    color=color,
-                    circle=False,
-                    outline_width=2.0,
-                    outline_color=_float_color((35, 42, 49)),
+                append_entity_sprites(
+                    values, entity, color, app.facing.pose(entity_id), center, center
                 )
                 if selected:
-                    _append_shape(
+                    append_shape(
                         values,
                         center=center,
                         half_size=(half_width + 3, half_height + 3),
@@ -372,19 +411,13 @@ class OpenGLFrameBuilder:
                     origin_x + previous_position.x * tile_size,
                     origin_y + previous_position.y * tile_size,
                 )
-                _append_shape(
-                    values,
-                    center=center,
-                    previous_center=previous_center,
-                    half_size=(unit_radius, unit_radius),
-                    color=color,
-                    circle=True,
-                    minimum_half_size=(5.0, 5.0),
+                append_entity_sprites(
+                    values, entity, color, app.facing.pose(entity_id), center, previous_center
                 )
                 if (selected and not large_selection) or (
                     entity_id == app.inspected_entity_id and not selected
                 ):
-                    _append_shape(
+                    append_shape(
                         values,
                         center=center,
                         previous_center=previous_center,
@@ -403,13 +436,13 @@ class OpenGLFrameBuilder:
             if show_full_health_bars or entity_id == app.inspected_entity_id:
                 ratio = entity.health / entity.kind.profile.max_health
                 for fraction, health_color in ((1.0, (70, 35, 35)), (ratio, (74, 218, 111))):
-                    _append_shape(
+                    append_shape(
                         values,
                         center=center,
                         previous_center=previous_center,
-                        half_size=(0.7, 0.0),
+                        half_size=(0.7, -APPEARANCES[entity.kind].size[1] / 2),
                         minimum_half_size=(6.0, 1.5),
-                        pixel_offset=(0.0, -10.5),
+                        pixel_offset=(0.0, -4.5),
                         size_fraction=(fraction, 1.0),
                         color=_float_color(health_color),
                         circle=False,
@@ -434,7 +467,7 @@ class OpenGLFrameBuilder:
                 if inspected.category is EntityCategory.UNIT
                 else inspected.selection_position
             )
-            _append_shape(
+            append_shape(
                 values,
                 center=(
                     origin_x + inspected.selection_position.x * tile_size,
@@ -468,7 +501,7 @@ class OpenGLFrameBuilder:
                 origin_y + world_center.y * tile_size,
             )
             radius = (parameters.assembly_radius + 0.8) * tile_size
-            _append_shape(
+            append_shape(
                 values,
                 center=center,
                 half_size=(radius, radius),
@@ -478,7 +511,7 @@ class OpenGLFrameBuilder:
                 outline_width=2.0,
                 outline_color=(135 / 255, 205 / 255, 1.0, 72 / 255),
             )
-            _append_shape(
+            append_shape(
                 values,
                 center=center,
                 half_size=(radius, radius),
@@ -596,7 +629,7 @@ class OpenGLFrameBuilder:
                 origin_x + previous_position.x * tile_size,
                 origin_y + previous_position.y * tile_size,
             )
-            _append_shape(
+            append_shape(
                 shapes,
                 center=center,
                 previous_center=previous_center,
@@ -605,7 +638,7 @@ class OpenGLFrameBuilder:
                 color=_float_color((255, 255, 255)),
                 circle=True,
             )
-            _append_shape(
+            append_shape(
                 shapes,
                 center=center,
                 previous_center=previous_center,
@@ -643,6 +676,7 @@ class OpenGLRenderer:
         self._overlay_surface: pygame.Surface | None = None
         self._overlay_texture: Any = None
         self._terrain_texture: Any = None
+        self._sprite_texture: Any = None
         self._overlay_vertex_array: Any = None
         self._line_vertex_array: Any = None
         self._shape_vertex_array: Any = None
@@ -742,6 +776,10 @@ class OpenGLRenderer:
                 [(self._overlay_quad_buffer, "2f 2f", "in_position", "in_uv")],
             )
             self._overlay_program["overlay_texture"].value = 0
+            atlas_size, pixels = atlas_pixels()
+            self._sprite_texture = context.texture(atlas_size, 4, data=pixels, alignment=1)
+            self._sprite_texture.filter = module.NEAREST, module.NEAREST
+            self._shape_program["sprite_texture"].value = 2
             self._feedback = GPUFeedback(module, context)
             context.enable(module.BLEND)
             context.blend_func = (module.SRC_ALPHA, module.ONE_MINUS_SRC_ALPHA)
@@ -799,7 +837,9 @@ class OpenGLRenderer:
         """Draw one complete native-resolution frame and return its submitted batch metadata."""
 
         app._prune_removed_entities()
-        frame = self._builder.build(app, framebuffer_size)
+        frame = self._builder.staged_frame(app, framebuffer_size)
+        if frame is None:
+            frame = self._builder.build(app, framebuffer_size)
         target = framebuffer if framebuffer is not None else self._context.screen
         if target is None:
             raise OpenGLRendererError("the OpenGL context has no screen framebuffer")
@@ -809,14 +849,14 @@ class OpenGLRenderer:
             self._context.viewport = (0, 0, width, height)
             self._context.clear(18 / 255, 22 / 255, 28 / 255, 1.0)
             self._shape_program["viewport_size"].value = framebuffer_size
-            self._shape_program["interpolation_alpha"].value = max(
-                0.0,
-                min(1.0, app.render_alpha),
+            self._shape_program["interpolation_alpha"].value = (
+                1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
             )
             self._line_program["viewport_size"].value = framebuffer_size
             self._line_program["origin"].value = frame.terrain_origin
             self._line_program["tile"].value = frame.terrain_tile_size
             self._upload_frame(frame)
+            self._sprite_texture.use(location=2)
             if frame.terrain_shape_count:
                 self._shape_program["terrain_origin"].value = frame.terrain_origin
                 self._shape_program["terrain_tile_size"].value = frame.terrain_tile_size
@@ -930,7 +970,7 @@ class OpenGLRenderer:
             self._overlay_tick = None
         defer_tick_refresh = (
             self._overlay_key is not None
-            and self._overlay_tick != frame.tick
+            and self._overlay_tick != app.simulation.tick
             and app.render_alpha <= 0.0
         )
         if overlay_key != self._overlay_key and not defer_tick_refresh:
@@ -954,7 +994,7 @@ class OpenGLRenderer:
                 )
             self._overlay_regions = app._opengl_dynamic_overlay_regions()
             self._overlay_key = overlay_key
-            self._overlay_tick = frame.tick
+            self._overlay_tick = app.simulation.tick
         assert self._overlay_texture is not None
         self._overlay_texture.use(location=0)
         self._overlay_vertex_array.render(mode=self._module.TRIANGLE_STRIP, vertices=4)
@@ -1038,43 +1078,6 @@ def _float_color(color: Color) -> FloatColor:
     return color[0] / 255, color[1] / 255, color[2] / 255, 1.0
 
 
-def _append_shape(
-    values: array[float],
-    *,
-    center: tuple[float, float],
-    half_size: tuple[float, float],
-    color: FloatColor,
-    circle: bool,
-    previous_center: tuple[float, float] | None = None,
-    minimum_half_size: tuple[float, float] = (0.0, 0.0),
-    pixel_offset: tuple[float, float] = (0.0, 0.0),
-    pixel_padding: tuple[float, float] = (0.0, 0.0),
-    size_fraction: tuple[float, float] = (1.0, 1.0),
-    health_bar: bool = False,
-    outline_width: float = 0.0,
-    outline_color: FloatColor = (0.0, 0.0, 0.0, 0.0),
-) -> None:
-    previous = center if previous_center is None else previous_center
-    values.extend(
-        (
-            center[0],
-            center[1],
-            previous[0],
-            previous[1],
-            half_size[0],
-            half_size[1],
-            *minimum_half_size,
-            *pixel_offset,
-            *pixel_padding,
-            *size_fraction,
-            *color,
-            2.0 if health_bar else 1.0 if circle else 0.0,
-            outline_width,
-            *outline_color,
-        )
-    )
-
-
 def _append_line_vertex(
     values: array[float],
     x: float,
@@ -1118,11 +1121,19 @@ void main() {
             : in_shape_outline.x < -1.5 ? vec2(0.0, 0.5) : vec2(0.5, 0.0);
         size += padding;
     }
-    if (in_shape_outline.x > 1.5) {
+    if (in_shape_outline.x > 1.5 && in_shape_outline.x < 2.5) {
         center.x += size.x * (in_size_fraction.x - 1.0);
+        // Negative world height carries the sprite's top edge; bar height is pixels.
+        center.y -= max(-in_half_size.y * terrain_tile_size, 7.0);
     }
     size *= in_size_fraction;
-    vec2 pixel_position = center + in_corner * size;
+    vec2 offset = in_corner * size;
+    if (in_shape_outline.x > 2.5) {
+        float angle = mix(in_outline_color.x, in_outline_color.y, interpolation_alpha);
+        float c = cos(angle), s = sin(angle);
+        offset = vec2(c * offset.x - s * offset.y, s * offset.x + c * offset.y);
+    }
+    vec2 pixel_position = center + offset;
     vec2 normalized = vec2(
         pixel_position.x * 2.0 / viewport_size.x - 1.0,
         1.0 - pixel_position.y * 2.0 / viewport_size.y
@@ -1143,6 +1154,7 @@ _SHAPE_FRAGMENT_SHADER = """
 in vec2 local_position;
 in vec2 world_position;
 uniform sampler2D terrain_texture;
+uniform sampler2D sprite_texture;
 uniform ivec2 terrain_size;
 flat in vec2 half_size;
 flat in vec4 fill_color;
@@ -1152,6 +1164,14 @@ flat in vec4 outline_color;
 out vec4 fragment_color;
 
 void main() {
+    if (circle_shape > 2.5) {
+        int index = int(outline_width + 0.5);
+        ivec2 cell = ivec2(index % SPRITE_COLUMNS, index / SPRITE_COLUMNS) * SPRITE_SIDE;
+        ivec2 pixel = clamp(ivec2(floor((local_position + 1.0) * (float(SPRITE_SIDE) / 2.0))), ivec2(0), ivec2(SPRITE_SIDE - 1));
+        fragment_color = texelFetch(sprite_texture, cell + pixel, 0) * fill_color;
+        if (fragment_color.a < 0.01) discard;
+        return;
+    }
     float signed_distance;
     if (circle_shape > 0.5 && circle_shape < 1.5) {
         signed_distance = (1.0 - length(local_position)) * min(half_size.x, half_size.y);
@@ -1183,7 +1203,8 @@ void main() {
         discard;
     }
 }
-"""
+""".replace("SPRITE_COLUMNS", str(ATLAS_COLUMNS)).replace("SPRITE_SIDE", str(TILE_PIXELS))
+
 
 _LINE_VERTEX_SHADER = """
 #version 330

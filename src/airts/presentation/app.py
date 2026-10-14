@@ -66,6 +66,7 @@ from airts.presentation.opengl_renderer import OpenGLRenderer, OpenGLRendererErr
 from airts.presentation.rendering import RendererBackend, SoftwareRenderer
 from airts.presentation.ui import automations, menus, saves, selection
 from airts.presentation.ui.drawing import UiPainter
+from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
 from airts.systems import construction
 from airts.systems.skirmish import owner_status
@@ -126,6 +127,7 @@ class AirtsApp:
         self.renderer_backend = renderer_backend
         self.lobby: Lobby | None = Lobby() if show_lobby else None
         self.camera = Camera()
+        self.facing = FacingHistory()
         self.mode = InputMode.SELECT
         self.selected_entities: set[str] = set()
         self.selected_points: set[str] = set()
@@ -247,10 +249,12 @@ class AirtsApp:
             for projectile_id, projectile in self.simulation.projectiles.items()
         }
         self.render_alpha = 1.0
+        self.facing.reset(self.simulation)
 
     def _advance_presentation_tick(self) -> None:
         """Capture the previous state before advancing the authoritative simulation."""
 
+        self.facing.sync(self.simulation)
         self._previous_entity_positions = {
             entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
         }

@@ -49,12 +49,12 @@ from airts.world.map import (
     load_map_data,
 )
 from airts.world.opponents import OpponentState, Squad, SquadPhase
-from airts.world.units.catalog import EntityKind
+from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
 SAVE_SCHEMA = "airts-save-v16"
-MATCH_SAVE_SCHEMA = "airts-match-save-v8"
+MATCH_SAVE_SCHEMA = "airts-match-save-v9"
 
 
 class PersistenceError(ValueError):
@@ -295,7 +295,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         except ValueError as error:
             raise PersistenceError(str(error)) from error
         if tick > 0 and result != evaluate_result(simulation):
-            raise PersistenceError("saved match result disagrees with production assets")
+            raise PersistenceError("saved match result disagrees with surviving assets")
     elif state.get("match_result") is not None:
         raise PersistenceError("legacy maps cannot have a match result")
     return simulation
@@ -485,13 +485,7 @@ def _load_entities(
             else _number(progress_raw, "entity.construction_progress", minimum=0)
         )
         if construction_progress is not None and (
-            kind
-            not in {
-                EntityKind.FACTORY,
-                EntityKind.REPAIR_HUB,
-                EntityKind.RESOURCE_GENERATOR,
-                EntityKind.MATTER_SYNTHESIZER,
-            }
+            kind not in BUILDABLE_KINDS
             or not 0 <= construction_progress < 1
             or state is not UnitState.IDLE
         ):

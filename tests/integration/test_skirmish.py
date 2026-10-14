@@ -106,23 +106,29 @@ def test_eliminated_player_keeps_army_until_team_result_and_out_requires_all_ass
     simulation.remove_entity("enemy_builder")
     simulation.remove_entity("enemy_command_01")
     simulation.advance()
-    assert simulation.match_result == 1
+    assert simulation.match_result is None
     assert "enemy_tank_01" in simulation.entities
     assert owner_status(simulation, "ai_b") == "eliminated"
     for entity in tuple(simulation.entities.values()):
         if entity.owner_id == "ai_b":
             simulation.remove_entity(entity.entity_id)
     assert owner_status(simulation, "ai_b") == "out"
+    simulation.advance()
+    assert simulation.match_result == 1
     tick = simulation.tick
     simulation.advance(100)
     assert simulation.tick == tick
 
 
-def test_all_production_destroyed_in_same_tick_is_draw() -> None:
+def test_surviving_armies_continue_after_all_production_is_destroyed() -> None:
     simulation = match_simulation()
     for entity in tuple(simulation.entities.values()):
         if entity.kind in {EntityKind.FACTORY, EntityKind.BUILDER, EntityKind.COMMAND_CENTER}:
             simulation.remove_entity(entity.entity_id)
+    simulation.advance()
+    assert simulation.match_result is None
+    for entity in tuple(simulation.entities.values()):
+        simulation.remove_entity(entity.entity_id)
     simulation.advance()
     assert simulation.match_result == 0
 

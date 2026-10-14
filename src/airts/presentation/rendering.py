@@ -25,6 +25,9 @@ from airts.presentation.palette import (
     Color,
     match_color,
 )
+from airts.presentation.visuals.assets import SpriteCache
+from airts.presentation.visuals.catalog import APPEARANCES, COMPOSITE_PATHS
+from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
 from airts.systems.construction import construction_distance
 from airts.systems.repair import building_distance
@@ -44,6 +47,7 @@ class SceneView(Protocol):
 
     MAX_SELECTED_PATHS: int
     MAP_PIXELS: int
+    facing: FacingHistory
 
     @property
     def simulation(self) -> Simulation: ...
@@ -153,13 +157,13 @@ class SoftwareRenderer:
         self._scaled_map_surface: pygame.Surface | None = None
         self._scaled_map_size: tuple[int, int] | None = None
         self._viewport_terrain_key: tuple[object, ...] | None = None
-        self._unit_sprite_cache: dict[tuple[int, tuple[int, int, int]], pygame.Surface] = {}
-        self._large_unit_render_key: tuple[object, ...] | None = None
-        self._large_unit_blits: tuple[tuple[pygame.Surface, tuple[int, int]], ...] = ()
-        self._large_building_draws: tuple[tuple[pygame.Rect, tuple[int, int, int], bool], ...] = ()
-        self._large_unit_selected_bounds: pygame.Rect | None = None
-        self._large_unit_health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
-        self._large_unit_inspected_ring: tuple[tuple[int, int], int] | None = None
+        self._sprites = SpriteCache()
+        self._entity_render_key: tuple[object, ...] | None = None
+        self._entity_blits: tuple[tuple[pygame.Surface, tuple[int, int]], ...] = ()
+        self._building_selection_rects: tuple[pygame.Rect, ...] = ()
+        self._selected_bounds: pygame.Rect | None = None
+        self._health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
+        self._inspected_ring: tuple[tuple[int, int], int] | None = None
         self._path_render_key: tuple[object, ...] | None = None
         self._path_render_points: tuple[tuple[Color, tuple[tuple[int, int], ...]], ...] = ()
 
@@ -240,59 +244,8 @@ class SoftwareRenderer:
             )
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
-        selected_entities = view.selected_entities
-        if len(selected_entities) > 128:
-            self._draw_cached_large_unit_entities(
-                view, screen, colors, tile_size, (origin_x, origin_y)
-            )
-            return
-        unit_radius = max(5, round(tile_size * 0.42))
-        bar_width = max(12, round(tile_size * 1.4))
-        for entity_id, entity in view.simulation.entities.items():
-            entity_color = (
-                match_color(view.simulation.game_map, entity.owner_id)
-                if view.simulation.game_map.match_slots
-                else colors[entity.kind]
-                if entity.owner_id == "player"
-                else (218, 78, 78)
-            )
-            center = (
-                origin_x + round(entity.selection_position.x * tile_size),
-                origin_y + round(entity.selection_position.y * tile_size),
-            )
-            if entity.category is EntityCategory.BUILDING:
-                width, height = entity.kind.profile.footprint
-                rectangle = pygame.Rect(
-                    origin_x + round(entity.position.x * tile_size),
-                    origin_y + round(entity.position.y * tile_size),
-                    round(width * tile_size),
-                    round(height * tile_size),
-                )
-                pygame.draw.rect(
-                    screen,
-                    entity_color if view.simulation.game_map.match_slots else colors[entity.kind],
-                    rectangle,
-                    border_radius=3,
-                )
-                pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
-                if entity_id in selected_entities:
-                    pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
-            else:
-                radius = unit_radius
-                color = entity_color
-                pygame.draw.circle(screen, color, center, radius)
-                if entity_id in selected_entities:
-                    pygame.draw.circle(screen, (255, 255, 255), center, radius + 3, 2)
-                if entity_id == view.inspected_entity_id and entity_id not in selected_entities:
-                    pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
-            bar = pygame.Rect(center[0] - bar_width // 2, center[1] - 12, bar_width, 3)
-            pygame.draw.rect(screen, (70, 35, 35), bar)
-            health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
-            pygame.draw.rect(
-                screen,
-                (74, 218, 111),
-                pygame.Rect(bar.x, bar.y, health_width, 3),
-            )
+        view.facing.sync(view.simulation)
+        self._draw_cached_entities(view, screen, colors, tile_size, (origin_x, origin_y))
         inspected = view.simulation.entities.get(view.inspected_entity_id or "")
         interaction_range = (
             inspected.kind.profile.build_range
@@ -312,7 +265,7 @@ class SoftwareRenderer:
                 1,
             )
 
-    def _draw_cached_large_unit_entities(
+    def _draw_cached_entities(
         self,
         view: SceneView,
         screen: pygame.Surface,
@@ -320,25 +273,28 @@ class SoftwareRenderer:
         tile_size: float,
         origin: tuple[int, int],
     ) -> None:
-        """Draw a large scene without rebuilding unchanged transforms each frame."""
+        """Cache all entity layers and retain small/large-selection feedback policies."""
 
         selected_entities = frozenset(view.selected_entities)
         key: tuple[object, ...] = (
             id(view.simulation),
             view.simulation.tick,
+            view.simulation.command_count,
             origin,
             tile_size,
             selected_entities,
             view.inspected_entity_id,
             len(view.simulation.entities),
         )
-        if key != self._large_unit_render_key:
-            self._large_unit_render_key = key
+        if key != self._entity_render_key:
+            self._entity_render_key = key
+            self._sprites.prepare(screen)
             radius = max(5, round(tile_size * 0.42))
+            large_selection = len(selected_entities) > 128
             bar_width = max(12, round(tile_size * 1.4))
             origin_x, origin_y = origin
             blits: list[tuple[pygame.Surface, tuple[int, int]]] = []
-            building_draws: list[tuple[pygame.Rect, tuple[int, int, int], bool]] = []
+            building_draws: list[pygame.Rect] = []
             health_bars: list[tuple[pygame.Rect, int]] = []
             selected_min_x: int | None = None
             selected_min_y = 0
@@ -358,7 +314,8 @@ class SoftwareRenderer:
                         round(width * tile_size),
                         round(height * tile_size),
                     )
-                    building_draws.append((rectangle, color, selected))
+                    if selected:
+                        building_draws.append(rectangle)
                     center = (
                         origin_x + round(entity.selection_position.x * tile_size),
                         origin_y + round(entity.selection_position.y * tile_size),
@@ -368,7 +325,7 @@ class SoftwareRenderer:
                         origin_x + round(entity.position.x * tile_size),
                         origin_y + round(entity.position.y * tile_size),
                     )
-                    if selected:
+                    if selected and large_selection:
                         color = (
                             min(255, color[0] + 45),
                             min(255, color[1] + 45),
@@ -390,25 +347,48 @@ class SoftwareRenderer:
                             selected_max_y = max(selected_max_y, bottom)
                     elif entity_id == view.inspected_entity_id:
                         inspected_ring = (center, radius)
-                    sprite = self._unit_sprite(radius, color)
-                    blits.append((sprite, (center[0] - radius, center[1] - radius)))
+                appearance = APPEARANCES[entity.kind]
+                size = (
+                    max(14 if entity.is_movable else 1, round(appearance.size[0] * tile_size)),
+                    max(14 if entity.is_movable else 1, round(appearance.size[1] * tile_size)),
+                )
+                pose = view.facing.pose(entity_id)
+                layers: tuple[tuple[str | None, float], ...] = (
+                    (appearance.body, pose.body),
+                    (appearance.weapon, pose.weapon),
+                )
+                if appearance.weapon is not None and pose.body == pose.weapon:
+                    layers = ((COMPOSITE_PATHS[entity.kind], pose.body),)
+                for path, angle in layers:
+                    if path is not None:
+                        sprite = self._sprites.get(path, color, size, angle)
+                        blits.append(
+                            (
+                                sprite,
+                                (
+                                    center[0] - sprite.get_width() // 2,
+                                    center[1] - sprite.get_height() // 2,
+                                ),
+                            )
+                        )
                 if (
-                    entity.health < entity.kind.profile.max_health
+                    not large_selection
+                    or entity.health < entity.kind.profile.max_health
                     or entity_id == view.inspected_entity_id
                 ):
                     bar = pygame.Rect(
                         center[0] - bar_width // 2,
-                        center[1] - 12,
+                        center[1] - max(7, round(appearance.size[1] * tile_size / 2)) - 6,
                         bar_width,
                         3,
                     )
                     health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
                     health_bars.append((bar, health_width))
-            self._large_unit_blits = tuple(blits)
-            self._large_building_draws = tuple(building_draws)
-            self._large_unit_health_bars = tuple(health_bars)
-            self._large_unit_inspected_ring = inspected_ring
-            self._large_unit_selected_bounds = (
+            self._entity_blits = tuple(blits)
+            self._building_selection_rects = tuple(building_draws)
+            self._health_bars = tuple(health_bars)
+            self._inspected_ring = inspected_ring
+            self._selected_bounds = (
                 None
                 if selected_min_x is None
                 else pygame.Rect(
@@ -418,43 +398,37 @@ class SoftwareRenderer:
                     selected_max_y - selected_min_y + 6,
                 )
             )
-        screen.fblits(self._large_unit_blits)
-        for rectangle, color, selected in self._large_building_draws:
-            pygame.draw.rect(screen, color, rectangle, border_radius=3)
-            pygame.draw.rect(screen, (35, 42, 49), rectangle, 2, border_radius=3)
-            if selected:
-                pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
-        if self._large_unit_inspected_ring is not None:
-            center, radius = self._large_unit_inspected_ring
+        screen.fblits(self._entity_blits)
+        for rectangle in self._building_selection_rects:
+            pygame.draw.rect(screen, (255, 255, 255), rectangle.inflate(6, 6), 2)
+        if self._inspected_ring is not None:
+            center, radius = self._inspected_ring
             pygame.draw.circle(screen, (255, 210, 90), center, radius + 3, 2)
-        for bar, health_width in self._large_unit_health_bars:
+        for bar, health_width in self._health_bars:
             pygame.draw.rect(screen, (70, 35, 35), bar)
             pygame.draw.rect(
                 screen,
                 (74, 218, 111),
                 pygame.Rect(bar.x, bar.y, health_width, 3),
             )
-        if self._large_unit_selected_bounds is not None:
+        if len(selected_entities) <= 128:
+            for entity_id in selected_entities:
+                entity = view.simulation.entities[entity_id]
+                if entity.is_movable:
+                    pygame.draw.circle(
+                        screen,
+                        (255, 255, 255),
+                        view.screen_point(entity.position),
+                        max(5, round(tile_size * 0.42)) + 3,
+                        2,
+                    )
+        elif self._selected_bounds is not None:
             pygame.draw.rect(
                 screen,
                 (245, 245, 245),
-                self._large_unit_selected_bounds,
+                self._selected_bounds,
                 1,
             )
-
-    def _unit_sprite(
-        self,
-        radius: int,
-        color: tuple[int, int, int],
-    ) -> pygame.Surface:
-        key = (radius, color)
-        sprite = self._unit_sprite_cache.get(key)
-        if sprite is None:
-            diameter = radius * 2 + 1
-            sprite = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
-            pygame.draw.circle(sprite, color, (radius, radius), radius)
-            self._unit_sprite_cache[key] = sprite
-        return sprite
 
     def _representative_path_points(
         self, view: SceneView

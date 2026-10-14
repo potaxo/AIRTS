@@ -12,6 +12,7 @@ def opponent_scenario(
     enemies: tuple[tuple[EntityKind, float, float], ...] = (),
     *,
     resource_sites: tuple[tuple[int, int], ...] = ((66, 66), (52, 66), (32, 66), (10, 12)),
+    outposts: tuple[tuple[EntityKind, float, float], ...] = (),
 ) -> Simulation:
     entities: list[dict[str, object]] = [
         {"id": "player_factory", "kind": "factory", "owner": "player", "position": [4, 4]},
@@ -19,7 +20,11 @@ def opponent_scenario(
         {"id": "ai_builder", "kind": "builder", "owner": "ai", "position": [58.5, 64.5]},
         {"id": "ai_income", "kind": "resource_generator", "owner": "ai", "position": [66, 66]},
     ]
-    for prefix, owner, units in (("army", "ai", army), ("enemy", "player", enemies)):
+    for prefix, owner, units in (
+        ("army", "ai", army),
+        ("enemy", "player", enemies),
+        ("outpost", "ai", outposts),
+    ):
         entities.extend(
             {"id": f"{prefix}_{index:04d}", "kind": kind.value, "owner": owner, "position": [x, y]}
             for index, (kind, x, y) in enumerate(units)

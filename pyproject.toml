@@ -33,7 +33,7 @@ where = ["src"]
 
 
 [tool.setuptools.package-data]
-airts = ["data/*.json"]
+airts = ["data/*.json", "data/sprites/units/*/*.png", "data/sprites/buildings/*/*.png"]
 
 
 [tool.pytest.ini_options]

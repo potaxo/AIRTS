@@ -38,10 +38,16 @@ height, text and projectile cores stay fixed in pixels. Construction percentages
 a cached text atlas. Panels/font textures upload dirty regions; camera changes never dirty the
 whole canvas. Status refreshes in three-tick buckets; explicit interaction remains immediate.
 
-GPU interpolation mixes previous/current centers without per-frame rebuilds or simulation feedback,
-adds at most 100 ms visual latency, and resets on load/reset. Tick-driven overlays stage on the first
-interpolation frame after a tick (at most one frame text delay). Software caches composed Surfaces,
-rebuilds on the following presentation call and catches up if another tick arrives. Its interactive
+GPU interpolation mixes previous/current centers and visual headings without per-frame rebuilds
+or simulation feedback and resets on load/reset. New world-batch packing can stage for one
+presentation call after a tick: that call displays the previous current endpoint, and the next
+publishes the complete new snapshot. This adds at most one presentation interval to the 100 ms
+interpolation delay and separates tick work from batch assembly. Commands, selection changes,
+births, resets and skipped ticks bypass staging. A removed entity may retain its old endpoint for
+the staged call; every survivor is still rendered. Inspection world markers can follow on the next
+call. Tick-driven overlays stage on the first interpolation frame after a tick (at most one frame
+text delay). Software caches composed Surfaces, rebuilds on the following presentation call and
+catches up if another tick arrives. Its interactive
 framebuffer is bounded; native-4K test Surfaces do not prove native-4K interactive software rendering.
 OpenGL resolution presets span 1280x720 through 3840x2160; settings reports p95 frame/render/simulation/
 swap wait. Renderer correctness and resource lifetime belong to the linked integration tests.

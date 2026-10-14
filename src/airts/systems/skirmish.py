@@ -33,13 +33,25 @@ def owner_status(
 def evaluate_result(simulation: Simulation, *, command_centers_produce: bool = True) -> int | None:
     """None means ongoing; zero is a draw; positive values identify the winning team."""
 
-    viable = {
+    surviving = {
         slot.team
         for slot in simulation.game_map.match_slots
         if owner_status(simulation, slot.owner_id, command_centers_produce=command_centers_produce)
-        == "active"
+        != "out"
     }
-    return next(iter(viable)) if len(viable) == 1 else 0 if not viable else None
+    if len(surviving) <= 1:
+        return next(iter(surviving)) if surviving else 0
+    if not any(
+        entity.is_complete
+        and (
+            entity.kind.production_kinds
+            or entity.kind is EntityKind.BUILDER
+            or entity.kind.profile.attack_damage > 0
+        )
+        for entity in simulation.entities.values()
+    ):
+        return 0
+    return None
 
 
 def validate_match_state(simulation: Simulation) -> None:
