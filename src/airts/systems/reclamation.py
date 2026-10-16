@@ -46,6 +46,12 @@ def reclaim_building(simulation: Simulation, command: ReclaimBuildingCommand) ->
             ValidationFailure(ValidationPhase.CAPABILITY, reason, "target_entity_id"),
         )
     automation_control.manual_override_many(simulation, command.entity_ids)
+    for entity in simulation.entities.values():
+        if (
+            entity.kind is EntityKind.REPAIR_HUB
+            and entity.repair_target_id == command.target_entity_id
+        ):
+            entity.repair_target_id = None
     for key in command.entity_ids:
         builder = simulation.entities[key]
         builder.path.clear()
@@ -71,6 +77,13 @@ def drive_reclamation(simulation: Simulation) -> None:
         if target is None:
             continue  # Removal clears the other builders' targets and paths immediately.
         if building_distance(builder.position, target) <= builder.kind.profile.build_range:
+            builder.path.clear()
+            builder.move_target = None
+            builder.state = UnitState.RECLAIMING
+            movement.reset_movement_liveness(builder)
+            target.health = max(0, target.health - builder.kind.profile.reclaim_rate)
+            if target.health > 0:
+                continue
             refund = target.kind.profile.construction_cost * 70 // 100
             owner = target.owner_id
             result = simulation._remove_entity(

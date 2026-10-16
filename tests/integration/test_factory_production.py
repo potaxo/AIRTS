@@ -737,20 +737,41 @@ def test_finite_player_queue_preempts_then_resumes_continuous_loop() -> None:
     assert loop_parameters.progress_ticks == 2
 
 
-def test_produce_and_defend_attaches_area_to_current_loop_kind() -> None:
+@pytest.mark.parametrize("prior_order", ["idle", "move", "defend"])
+@pytest.mark.parametrize("line_target", [False, True])
+def test_produce_and_defend_only_assigns_future_units(prior_order: str, line_target: bool) -> None:
     simulation = builder_factory_simulation()
     loop_result = simulation.execute(
-        CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1, continuous=True)
+        CreateProductionCommand(
+            "factory",
+            EntityKind.HEAVY_TANK,
+            1,
+            continuous=True,
+            defend_target=(
+                rectangle_region(Point(5, 12), Point(10, 18)) if prior_order == "defend" else None
+            ),
+        )
     )
     simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
     loop = simulation.automations[loop_result.automation_id or ""]
     parameters = loop.parameters
     assert isinstance(parameters, ProductionParameters)
-    assert parameters.defend_target is None
+    existing_id = parameters.produced_entity_ids[0]
+    if prior_order == "move":
+        assert simulation.execute(MoveCommand((existing_id,), Point(10, 10))).accepted
+    existing_unit = simulation.entities[existing_id].to_dict()
+    existing_assignment = simulation.assignments.get(existing_id)
+    existing_defense = simulation.automations.get(parameters.defend_automation_id or "")
+    existing_defense_state = existing_defense.to_dict() if existing_defense is not None else None
     app = AirtsApp(simulation)
     app.selected_entities = {"factory"}
     app._selection_changed()
-    app.active_target = rectangle_region(Point(12, 12), Point(18, 18))
+    app.active_target = (
+        PolylineTarget((Point(12, 12), Point(18, 18)))
+        if line_target
+        else rectangle_region(Point(12, 12), Point(18, 18))
+    )
+    app.automation_panel.new_area_auto_repair = True
 
     app._create_production()
 
@@ -760,9 +781,26 @@ def test_produce_and_defend_attaches_area_to_current_loop_kind() -> None:
     )
     assert parameters.unit_kind is EntityKind.HEAVY_TANK
     assert parameters.defend_target == app.active_target
-    assert parameters.defend_automation_id is not None
-    defender = simulation.entities[parameters.produced_entity_ids[0]]
-    assert simulation.assignments[defender.entity_id] == parameters.defend_automation_id
+    assert parameters.defend_automation_id is None
+    assert simulation.entities[existing_id].to_dict() == existing_unit
+    assert simulation.assignments.get(existing_id) == existing_assignment
+    if existing_defense is not None:
+        assert existing_defense.to_dict() == existing_defense_state
+
+    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+
+    assert len(parameters.produced_entity_ids) == 2
+    new_id = parameters.produced_entity_ids[-1]
+    defense = simulation.automations[parameters.defend_automation_id or ""]
+    assert defense.entity_ids == [new_id]
+    assert isinstance(defense.parameters, DefendParameters)
+    assert defense.parameters.target == app.active_target
+    assert defense.parameters.auto_repair
+    assert simulation.assignments[new_id] == defense.automation_id
+    assert simulation.assignments.get(existing_id) == existing_assignment
+    if existing_defense is not None:
+        assert existing_defense.entity_ids == [existing_id]
+        assert existing_defense.status is AutomationStatus.ACTIVE
 
 
 def test_automation_inspector_can_attach_current_loop_to_defense_area() -> None:

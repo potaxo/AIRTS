@@ -63,8 +63,9 @@ from airts.presentation.camera import Camera
 from airts.presentation.lobby import Lobby
 from airts.presentation.metrics import PresentationMetrics, PresentationProfiler
 from airts.presentation.opengl_renderer import OpenGLRenderer, OpenGLRendererError
+from airts.presentation.palette import match_color
 from airts.presentation.rendering import RendererBackend, SoftwareRenderer
-from airts.presentation.ui import automations, menus, saves, selection
+from airts.presentation.ui import automations, menus, saves, selection, theme
 from airts.presentation.ui.drawing import UiPainter
 from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
@@ -109,7 +110,7 @@ class AirtsApp:
         (2560, 1440),
         (3840, 2160),
     )
-    BACKGROUND = (18, 22, 28)
+    BACKGROUND = theme.BACKGROUND
     PANEL_BACKGROUND = automations.PANEL_BACKGROUND
     ENTITY_CLICK_RADIUS = 1.5
     ENEMY_CLICK_RADIUS = 2.5
@@ -2076,9 +2077,23 @@ class AirtsApp:
 
     def _draw_match_status(self, screen: pygame.Surface) -> None:
         x, y = self.canvas_rect.x + 12, 12
-        for slot in self.simulation.game_map.match_slots:
-            text = f"{slot.owner_id} | Team {slot.team} | {owner_status(self.simulation, slot.owner_id)}"
-            self.ui.small_text(screen, text, (x, y), (245, 220, 150))
+        slots = self.simulation.game_map.match_slots
+        labels = [
+            f"{slot.owner_id} | Team {slot.team} | {owner_status(self.simulation, slot.owner_id)}"
+            for slot in slots
+        ]
+        if self.ui.small_font is None:
+            raise RuntimeError("font not initialized")
+        width = min(
+            self.canvas_rect.width - 16,
+            max(self.ui.small_font.size(label)[0] for label in labels) + 26,
+        )
+        theme.frame(screen, pygame.Rect(x - 6, y - 6, width, len(slots) * 20 + 10), theme.PANEL)
+        for slot, text in zip(slots, labels, strict=True):
+            pygame.draw.rect(
+                screen, match_color(self.simulation.game_map, slot.owner_id), (x, y + 3, 3, 12)
+            )
+            self.ui.small_text(screen, text, (x + 10, y), theme.TEXT)
             y += 20
         result = self.simulation.match_result
         if result is not None:
@@ -2086,13 +2101,13 @@ class AirtsApp:
             rectangle = pygame.Rect(
                 self.canvas_rect.centerx - 130, self.canvas_rect.centery - 40, 260, 80
             )
-            pygame.draw.rect(screen, (25, 34, 44), rectangle)
-            self.ui.text(screen, label, (rectangle.x + 20, rectangle.y + 16), (130, 245, 170))
+            theme.panel(screen, rectangle)
+            self.ui.text(screen, label, (rectangle.x + 20, rectangle.y + 16), theme.SUCCESS)
             self.ui.small_text(
                 screen,
                 "F2: return to opening setup",
                 (rectangle.x + 20, rectangle.y + 48),
-                (225, 232, 238),
+                theme.MUTED,
             )
 
     def _draw_assembly_glows(self, screen: pygame.Surface) -> None:
@@ -2258,12 +2273,12 @@ class AirtsApp:
         if self.ui.small_font is None:
             return
         bar = self.command_bar_rect
-        pygame.draw.rect(screen, (24, 29, 36), bar)
+        theme.panel(screen, bar)
         self.ui.small_text(
             screen,
             "Commands — unavailable actions are omitted",
             (bar.x + 14, bar.y + 9),
-            (190, 205, 220),
+            theme.MUTED,
         )
         actions: list[tuple[str, str]] = []
         selected = self._selected_entities_for_draw()

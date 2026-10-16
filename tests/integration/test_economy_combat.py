@@ -26,9 +26,13 @@ from airts.contracts.commands import (
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
     HoldPositionCommand,
+    ModifyAutomationCommand,
     MoveCommand,
+    PauseAutomationCommand,
     RemoveEntityCommand,
     SetDeveloperModeCommand,
+    SetSelectionCommand,
+    StopCommand,
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget
@@ -81,14 +85,20 @@ def test_actual_shot_enlists_nearby_combat_units_and_preserves_their_work(
     destination = Point(5.5, 24.5)
     assert simulation.execute(HoldPositionCommand(("held",))).accepted
     if order == "move":
-        assert simulation.execute(MoveCommand(("support",), destination)).accepted
+        assert simulation._execute_command(
+            MoveCommand(("support",), destination), record=False
+        ).accepted
     elif order == "patrol":
-        assert simulation.execute(
-            CreatePatrolCommand(("support",), PolylineTarget((Point(5.5, 10.5), Point(22.5, 10.5))))
+        assert simulation._execute_command(
+            CreatePatrolCommand(
+                ("support",), PolylineTarget((Point(5.5, 10.5), Point(22.5, 10.5)))
+            ),
+            record=False,
         ).accepted
     elif order == "defend":
-        assert simulation.execute(
-            CreateDefendCommand(("support",), PointTarget(Point(10, 10.5)))
+        assert simulation._execute_command(
+            CreateDefendCommand(("support",), PointTarget(Point(10, 10.5))),
+            record=False,
         ).accepted
     assignment = simulation.assignments.get("support")
     simulation.advance()
@@ -108,7 +118,124 @@ def test_actual_shot_enlists_nearby_combat_units_and_preserves_their_work(
     if order == "move":
         assert support.position == destination
     assert simulation.export_state() == loaded.export_state()
+    if order == "idle":
+        assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+def test_player_micro_window_refreshes_on_queued_moves_survives_save_and_expires(
+    tmp_path: Path,
+) -> None:
+    simulation = support_world()
+    simulation.advance()
+    support = simulation.entities["support"]
+    assert support.pursue_target  # Manual Stop must cancel an already active support pursuit.
+    assert simulation.execute(StopCommand(("support",))).accepted
+    assert simulation.execute(HoldPositionCommand(("held",))).accepted
+    assert support.last_player_control_tick == 1
+    simulation.advance(20)
+    assert not support.pursue_target
+    assert simulation.execute(MoveCommand(("support",), Point(5.6, 10.5), queued=True)).accepted
+    assert support.last_player_control_tick == 21
+    assert simulation.execute(SetSelectionCommand(entity_ids=("support",))).accepted
+    assert not simulation.execute(MoveCommand(("support",), Point(-1, -1))).accepted
+    assert support.last_player_control_tick == 21
+    assert simulation.entities["shooter"].last_player_control_tick is None
+    assert simulation.entities["distant"].last_player_control_tick is None
+    save_simulation(simulation, tmp_path / "micro.json")
+    restored = load_simulation(tmp_path / "micro.json")
+    for world in (simulation, restored):
+        for _ in range(Simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS - 1):
+            world.advance()
+            assert not world.entities["support"].pursue_target
+        assert not world.events.query(
+            event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}),
+            subject_id="support",
+            since_tick=2,
+        )
+        world.advance()
+        assert world.entities["support"].pursue_target
+        assert world.entities["support"].attack_target_id == "enemy"
+        assert world.entities["held"].hold_anchor == Point(6.5, 8.5)
+        assert not world.entities["held"].pursue_target
+        assert not world.events.query(
+            event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}),
+            subject_id="held",
+            since_tick=2,
+        )
+    assert restored.export_state() == simulation.export_state()
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+def test_hold_stays_out_of_support_after_timeout_and_new_move_releases_it() -> None:
+    data = support_world().game_map.to_dict()
+    data["entities"] = [
+        item
+        if item["id"] != "enemy"
+        else {"id": "enemy", "kind": "factory", "owner": "enemy", "position": [15, 10]}
+        for item in data["entities"]
+    ]
+    simulation = Simulation(load_map_data(data))
+    assert simulation.execute(HoldPositionCommand(("support",))).accepted
+    simulation.advance(2 * Simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS)
+    support = simulation.entities["support"]
+    assert support.hold_anchor == Point(5.5, 10.5)
+    assert not support.pursue_target
+    assert not simulation.events.query(
+        event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}),
+        subject_id="support",
+    )
+    assert simulation.execute(MoveCommand(("support",), Point(5.6, 10.5))).accepted
+    assert support.hold_anchor is None
+    simulation.advance(Simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS - 1)
+    assert not support.pursue_target
+    simulation.advance(11)
+    assert support.pursue_target
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+@pytest.mark.parametrize("replacement", ["pause", "retarget"])
+def test_player_automation_control_cancels_existing_defense_support_pursuit(
+    replacement: str,
+) -> None:
+    simulation = support_world()
+    created = simulation._execute_command(
+        CreateDefendCommand(("support",), PointTarget(Point(10, 10.5))),
+        record=False,
+    )
+    assert created.accepted and created.automation_id is not None
+    simulation.advance()
+    assert simulation.entities["support"].pursue_target
+    command = (
+        PauseAutomationCommand(created.automation_id)
+        if replacement == "pause"
+        else ModifyAutomationCommand(created.automation_id, target=PointTarget(Point(7.5, 24.5)))
+    )
+    assert simulation.execute(command).accepted
+    unit = simulation.entities["support"]
+    assert not unit.pursue_target and not unit.path
+    assert unit.last_player_control_tick == 1
+    simulation.advance(Simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS + 10)
+    assert not unit.pursue_target
+    if replacement == "pause":
+        assert not unit.path
+        assert simulation.automations[created.automation_id].status is AutomationStatus.PAUSED
+    else:
+        assert unit.position.distance_to(Point(7.5, 24.5)) < 2
+
+
+def test_player_control_suppresses_only_commanded_units_and_background_control_does_not() -> None:
+    manual = support_world()
+    assert manual.execute(MoveCommand(("support",), Point(5.5, 20.5))).accepted
+    manual.advance()
+    assert not manual.entities["support"].pursue_target
+    assert manual.entities["support"].path
+    assert manual.entities["held"].pursue_target  # This unit has not actually received Hold here.
+    assert manual.entities["held"].last_player_control_tick is None
+    background = support_world()
+    assert background._execute_command(StopCommand(("support",)), record=False).accepted
+    background.advance()
+    assert background.entities["support"].pursue_target
+    assert background.entities["support"].last_player_control_tick is None
 
 
 def test_destroyed_ordered_target_converts_survivors_to_gathering_and_continues_after_save(

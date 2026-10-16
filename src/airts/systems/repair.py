@@ -149,10 +149,17 @@ def drive_hubs(simulation: Simulation) -> None:
     ]
     if not hubs:
         return
+    reclaiming = {
+        entity.reclaim_target_id
+        for entity in simulation.entities.values()
+        if entity.reclaim_target_id is not None
+    }
     wounded = {
-        key: entity.position
+        key: entity.selection_position
         for key, entity in simulation.entities.items()
-        if entity.is_movable and entity.health < entity.kind.profile.max_health
+        if entity.is_complete
+        and entity.health < entity.kind.profile.max_health
+        and key not in reclaiming
     }
     index = SpatialIndex(wounded)
     rates = {}
@@ -171,21 +178,26 @@ def drive_hubs(simulation: Simulation) -> None:
         center = hub.selection_position
         if (
             target is None
+            or target is hub
             or target.entity_id not in wounded
             or target.health >= target.kind.profile.max_health
             or target.owner_id != hub.owner_id
-            or center.distance_to(target.position) > radius
+            or center.distance_to(target.selection_position) > radius
         ):
             candidates = [
                 simulation.entities[key]
                 for key in index.nearby(center, radius)
-                if simulation.entities[key].owner_id == hub.owner_id
+                if key != hub.entity_id
+                and simulation.entities[key].owner_id == hub.owner_id
                 and simulation.entities[key].health
                 < simulation.entities[key].kind.profile.max_health
             ]
             target = min(
                 candidates,
-                key=lambda entity: (center.distance_to(entity.position), entity.entity_id),
+                key=lambda entity: (
+                    center.distance_to(entity.selection_position),
+                    entity.entity_id,
+                ),
                 default=None,
             )
             hub.repair_target_id = None if target is None else target.entity_id

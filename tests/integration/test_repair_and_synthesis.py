@@ -21,6 +21,7 @@ from airts.contracts.commands import (
     CreatePatrolCommand,
     CreateRepairAndReturnCommand,
     MoveCommand,
+    ReclaimBuildingCommand,
     RepairBuildingCommand,
     StopCommand,
 )
@@ -117,6 +118,7 @@ def test_invalid_builder_repair_preserves_current_order(ids: tuple[str, ...], ta
 
 def test_hub_repairs_one_in_range_unit_until_full_then_switches(tmp_path: Path) -> None:
     simulation = repair_world()
+    simulation.entities["hub"].health = 20
     for key in ("a", "b", "outside", "hostile"):
         simulation.entities[key].health = 20
     simulation.advance(1)
@@ -131,6 +133,73 @@ def test_hub_repairs_one_in_range_unit_until_full_then_switches(tmp_path: Path) 
     assert simulation.export_state() == restored.export_state()
     assert simulation.entities["a"].health == 100
     assert simulation.entities["b"].health == 25
+    assert simulation.entities["hub"].health == 20  # A hub cannot service itself.
+
+
+def hub_building_world() -> Simulation:
+    return Simulation(
+        load_map_data(
+            {
+                "id": "hub_buildings",
+                "name": "Hub buildings",
+                "width": 48,
+                "height": 32,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "hub", "kind": "repair_hub", "position": [22, 12]},
+                    {"id": "building", "kind": "factory", "position": [26, 12]},
+                    {"id": "outside", "kind": "factory", "position": [24, 18]},
+                    {"id": "hostile", "kind": "factory", "owner": "enemy", "position": [16, 12]},
+                    {"id": "scaffold", "kind": "factory", "position": [22, 7]},
+                    {"id": "builder", "kind": "builder", "position": [25.5, 13.5]},
+                ],
+            }
+        )
+    )
+
+
+def test_hub_repairs_building_retains_target_and_restores_service(tmp_path: Path) -> None:
+    simulation = hub_building_world()
+    for key in ("building", "outside", "hostile", "scaffold"):
+        simulation.entities[key].health = 200
+    simulation.entities["scaffold"].construction_progress = 0.5
+    simulation.advance()
+    hub, building = simulation.entities["hub"], simulation.entities["building"]
+    assert building.health == 205 and hub.repair_target_id == "building"
+    assert tuple(work_links(simulation)) == ((hub.selection_position, building.selection_position),)
+    # A nearer wounded unit does not steal active service.
+    simulation.entities["builder"].health = 20
+    path = tmp_path / "hub-building.json"
+    save_simulation(simulation, path)
+    loaded = load_simulation(path)
+    simulation.advance(59)
+    loaded.advance(59)
+    assert simulation.export_state() == loaded.export_state()
+    assert building.health == building.kind.profile.max_health
+    assert simulation.entities["builder"].health == 20
+    assert all(simulation.entities[key].health == 200 for key in ("outside", "hostile", "scaffold"))
+    simulation.advance()
+    assert simulation.entities["builder"].health == 25 and hub.repair_target_id == "builder"
+
+
+def test_hub_avoids_reclamation_and_resumes_healing_when_stopped() -> None:
+    simulation = hub_building_world()
+    target = simulation.entities["building"]
+    target.health = 200
+    simulation.advance()
+    assert simulation.entities["hub"].repair_target_id == "building"
+    before = simulation.resources["player"]
+    assert simulation.execute(ReclaimBuildingCommand(("builder",), "building")).accepted
+    assert simulation.entities["hub"].repair_target_id is None
+    assert not tuple(work_links(simulation))
+    simulation.advance(10)
+    assert target.health == 155
+    assert simulation.entities["hub"].repair_target_id is None
+    assert not tuple(work_links(simulation))
+    assert simulation.resources["player"] == before
+    assert simulation.execute(StopCommand(("builder",))).accepted
+    simulation.advance()
+    assert target.health == 160 and simulation.entities["hub"].repair_target_id == "building"
 
 
 def test_repair_beam_tracks_hub_service_without_selection_in_both_renderers() -> None:
@@ -443,9 +512,10 @@ def test_large_attack_selection_keeps_feedback_bounded() -> None:
     assert paths == app.MAX_SELECTED_PATHS and vertices == 2 * app.MAX_SELECTED_PATHS
 
 
-def test_save_rejects_wrong_repair_target_kind() -> None:
+@pytest.mark.parametrize("worker,target", [("builder", "a"), ("hub", "hub")])
+def test_save_rejects_wrong_repair_target_kind(worker: str, target: str) -> None:
     simulation = repair_world()
-    simulation.entities["builder"].repair_target_id = "a"
+    simulation.entities[worker].repair_target_id = target
     with pytest.raises(PersistenceError, match="invalid repair target"):
         load_simulation_data(
             {

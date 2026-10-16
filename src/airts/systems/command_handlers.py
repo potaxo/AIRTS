@@ -23,6 +23,8 @@ from airts.contracts.automations import (
 )
 from airts.contracts.commands import (
     AttackCommand,
+    CancelAutomationCommand,
+    Command,
     CommandResult,
     ControlAuthority,
     CreateDefendCommand,
@@ -33,6 +35,8 @@ from airts.contracts.commands import (
     HoldPositionCommand,
     ModifyAutomationCommand,
     MoveCommand,
+    PauseAutomationCommand,
+    ResumeAutomationCommand,
     SetDeveloperModeCommand,
     StopCommand,
     ValidationFailure,
@@ -57,6 +61,56 @@ from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+def player_controlled_entity_ids(simulation: Simulation, command: Command) -> tuple[str, ...]:
+    """Capture affected fighters before dispatch; accepted external orders stamp them afterward."""
+    if isinstance(
+        command,
+        (
+            MoveCommand,
+            AttackCommand,
+            StopCommand,
+            HoldPositionCommand,
+            CreatePatrolCommand,
+            CreateDefendCommand,
+            CreateRepairAndReturnCommand,
+        ),
+    ):
+        owner = command.owner_id
+        ids = command.entity_ids
+    elif isinstance(
+        command,
+        (
+            ModifyAutomationCommand,
+            PauseAutomationCommand,
+            ResumeAutomationCommand,
+            CancelAutomationCommand,
+        ),
+    ):
+        if isinstance(command, ModifyAutomationCommand) and command.target is None:
+            return ()
+        owner = command.owner_id
+        automation = simulation.automations.get(command.automation_id)
+        if automation is None:
+            return ()
+        ids = tuple(
+            key
+            for key in automation.entity_ids
+            if simulation.assignments.get(key) == automation.automation_id
+            or simulation.suspended_assignments.get(key) == automation.automation_id
+        )
+    else:
+        return ()
+    if owner != "player":
+        return ()
+    return tuple(
+        key
+        for key in ids
+        if key in simulation.entities
+        and simulation.entities[key].owner_id == "player"
+        and simulation.entities[key].kind.profile.combat_support
+    )
 
 
 def set_developer_mode(simulation: Simulation, command: SetDeveloperModeCommand) -> CommandResult:
@@ -248,7 +302,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
         automation.parameters.auto_repair = command.auto_repair
         if new_parameters is not None:
             new_parameters.auto_repair = command.auto_repair
-        if isinstance(automation.parameters, ProductionParameters):
+        if isinstance(automation.parameters, ProductionParameters) and production_target is None:
             for linked_id in (
                 automation.parameters.defend_automation_id,
                 automation.parameters.patrol_automation_id,
@@ -276,6 +330,14 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
         for entity_id in automation.entity_ids:
             if simulation.assignments.get(entity_id) != automation.automation_id:
                 continue
+            entity = simulation.entities[entity_id]
+            if entity.pursue_target:
+                entity.attack_target_id = None
+                entity.pursue_target = False
+                entity.path.clear()
+                entity.move_target = None
+                entity.state = simulation._state_for_assignment(entity_id)
+                movement.reset_movement_liveness(entity)
             if isinstance(new_parameters, DefendParameters) and isinstance(
                 previous_parameters, DefendParameters
             ):

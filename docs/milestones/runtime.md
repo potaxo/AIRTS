@@ -101,8 +101,9 @@ defers when capacity is unavailable. The bundled starting map has legal disc cle
 cell validation alone is not a physical separation guarantee, so legacy initial mobile overlaps
 use the same bounded recovery contract rather than being frozen or silently scattered.
 `Produce + Defend` retargets each selected factory's existing loop without changing its unit kind
-and attaches existing/future units to a linked defense. Polygons gather; polylines spread along the
-line. Factories remain independent owners of costs, queues, and progress.
+and attaches only subsequently produced units to a new linked defense. Already produced units keep
+their current orders, including any earlier defense target. Polygons gather; polylines spread along
+the line. Factories remain independent owners of costs, queues, and progress.
 
 Builders construct factories, repair hubs, extractors, Matter Synthesizers, and turrets, not command centers. Entity profiles
 own costs, build speeds, and build ranges. Placement validates capability, ownership, bounds,
@@ -135,12 +136,14 @@ altering accepted work. An unstarted occupied site waits with `SITE_OCCUPIED`; c
 publishing the scaffold. Queue, progress, damage, resource, and assignment state survive supported saves.
 
 Builders can reclaim any owned physical building through `ReclaimBuildingCommand`. They approach
-within build range, then remove the building in that tick through authoritative removal and refund
-`construction_cost * 70 // 100` once to its owner. Damage and scaffold progress do not change this
-refund because a published scaffold was already paid in full. Starting buildings priced at zero
+within build range, stop, and subtract their profile's reclaim rate from its health each tick.
+Multiple builders contribute independently. Only the builder taking the final health point removes
+the building through authoritative removal and refunds `construction_cost * 70 // 100` once to its owner.
+Damage and scaffold progress do not change this refund because a published scaffold was already paid
+in full. Starting buildings priced at zero
 refund zero; blueprints have no physical target and cannot be refunded. Concurrent builders cannot
-refund twice; destruction before arrival yields no refund. Source/job, occupancy, selection and target
-cleanup reuse normal removal. Stop/move/new assignments cancel the builder's reclaim intent.
+refund twice; destruction by another cause at any point yields no refund. Source/job, occupancy,
+selection and target cleanup reuse normal removal. Stop/move/new assignments cancel the builder's reclaim intent.
 [reclamation.py](../../src/airts/systems/reclamation.py) owns execution; reclaim target selection is a
 Builder action in the right sidebar.
 

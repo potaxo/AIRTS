@@ -50,8 +50,9 @@ See [match and elimination rules](docs/milestones/opponents.md#skirmish-configur
 Use **Settings > New game** or `F2` to return to the cover and configure another match.
 
 The left panel shows resources, notices, pause/help controls, and your automations. The right
-**Selection** panel shows selected entities and their available actions. With a mixed selection,
-left-click a type row to narrow the selection to that type and reveal its controls; right-click
+**Selection** panel shows selected entities and their available actions. Enemy inspection also lists
+each selected faction's owner, team (in matches), and unit count. With a mixed selection, left-click
+a type row to narrow the selection to that type and reveal its controls; right-click
 a type row in a mixed selection of your units to remove that type from the selection. The bottom
 command bar shows actions available for the current selection and spatial target, plus **Settings**.
 
@@ -114,6 +115,9 @@ switch prevents future automatic retreats and lets repairs already underway fini
 
 Direct orders override the selected units' current automation and pending construction/movement
 queues; other members keep working. Shift movement appends to an existing direct movement route.
+Successful player unit orders also prevent automatic combat support from taking over those units
+for five seconds of game time; each new order restarts this micro window. Hold units never join
+automatic support until another order replaces Hold. Units can still fire at enemies in range.
 Production linked to a defense sends existing and future units to that target: an area gathers
 them, while a line distributes them along it.
 
@@ -166,12 +170,12 @@ at long range.
 | --- | --- |
 | `R` | Send selected mobile units below 50% health to repair, then resume their work or return to their previous positions |
 | Builders + right-click a damaged building you own | Repair the completed building |
-| Builder action: **Reclaim building (70%)**, then left-click an owned building | Approach and remove the building, refunding 70% of its construction price |
+| Builder action: **Reclaim building (70%)**, then left-click an owned building | Approach and gradually drain its health with a red beam; refund 70% of its construction price only on completion |
 | Right-click while choosing a reclaim target | Cancel target selection |
 
-A completed repair hub automatically heals one mobile unit of the same owner at a time within its radius.
+A completed repair hub automatically heals one other mobile unit or completed building of the same owner at a time within its radius, excluding buildings being reclaimed.
 Select the hub to see that radius. Thick green lines connect builders to buildings while constructing
-or repairing, and repair facilities to units while healing, even without selection. Builders work
+or repairing, and repair facilities to units or buildings while healing, even without selection. Builders work
 within the build/repair ranges shown in their details, without needing to touch the building.
 Units on repair orders stop at clear positions within range instead of all converging
 on the hub's center. Selected attackers show red target lines; large selections sample those lines

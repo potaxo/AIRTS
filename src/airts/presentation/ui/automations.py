@@ -16,13 +16,14 @@ from airts.contracts.automations import (
     PatrolParameters,
     ProductionParameters,
 )
+from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
 
 AUTOMATION_ROW_HEIGHT = 34
 AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT = 32
 AUTOMATION_SCROLLBAR_WIDTH = 12
-PANEL_BACKGROUND = (27, 32, 40)
+PANEL_BACKGROUND = theme.PANEL
 
 
 @dataclass(slots=True)
@@ -118,11 +119,14 @@ def draw_panel(
     if view.ui.font is None or view.ui.small_font is None:
         raise RuntimeError("fonts not initialized")
     panel = view.left_panel_rect
+    previous_clip = screen.get_clip()
     for region in (panel,) if background_regions is None else background_regions:
-        pygame.draw.rect(screen, PANEL_BACKGROUND, region)
+        screen.set_clip(previous_clip.clip(region))
+        theme.panel(screen, panel)
+    screen.set_clip(previous_clip)
     x = 16
     y = 14
-    view.ui.text(screen, "AIRTS", (x, y), (245, 245, 245))
+    view.ui.text(screen, "AIRTS", (x, y), theme.TEXT)
     pause = pygame.Rect(panel.right - 90, y - 2, 74, 26)
     view.ui.button(screen, pause, "Resume" if view.paused else "Pause")
     view._command_buttons.append((pause, "pause_game"))
@@ -131,11 +135,11 @@ def draw_panel(
         screen,
         f"Real FPS {view.real_fps:4.0f} | {'PAUSED' if view.paused else 'RUNNING'}",
         (x, y),
-        (166, 191, 215),
+        theme.MUTED,
     )
     y += 25
     for line in view.ui.wrap(view.notice, 46):
-        view.ui.small_text(screen, line, (x, y), (244, 216, 118))
+        view.ui.small_text(screen, line, (x, y), theme.ACCENT)
         y += 18
     y += 7
     help_button = pygame.Rect(x, y, 72, 26)
@@ -146,10 +150,10 @@ def draw_panel(
         screen,
         f"Resources: {view.simulation.resources.get('player', 0)}",
         (x, y),
-        (111, 221, 151),
+        theme.SUCCESS,
     )
     y += 20
-    view.ui.text(screen, "Automations", (x, y), (245, 245, 245))
+    view.ui.text(screen, "Automations", (x, y), theme.TEXT)
     y += 25
     groups = (
         (None, "Units"),
@@ -159,9 +163,12 @@ def draw_panel(
     tab_width = (panel.width - 32) // 3
     for index, (group, label) in enumerate(groups):
         tab = pygame.Rect(x + index * tab_width, y, tab_width - 3, 26)
-        view.ui.button(screen, tab, view.ui.fit_small_text(label, tab.width - 8))
-        if view.automation_panel.group is group:
-            pygame.draw.rect(screen, (112, 174, 224), tab, 2, border_radius=4)
+        view.ui.button(
+            screen,
+            tab,
+            view.ui.fit_small_text(label, tab.width - 8),
+            active=view.automation_panel.group is group,
+        )
         view._command_buttons.append(
             (tab, f"automation_group:{group.value if group is not None else 'units'}")
         )
@@ -175,9 +182,8 @@ def draw_panel(
             view.ui.fit_small_text(
                 f"New area repair: {'ON' if enabled else 'OFF'} (<50%)", repair.width - 8
             ),
+            active=enabled,
         )
-        if enabled:
-            pygame.draw.rect(screen, (111, 221, 151), repair, 2, border_radius=4)
         view._command_buttons.append((repair, "toggle_new_area_auto_repair"))
         y += repair.height + round(8 * view.ui_scale)
     view.automation_panel.buttons.clear()
@@ -210,7 +216,7 @@ def draw_panel(
     has_overflow = total_rows > view.automation_panel.visible_rows
     view.automation_panel.scrollbar_track = track if has_overflow else None
     if has_overflow:
-        pygame.draw.rect(screen, (49, 61, 75), track, border_radius=6)
+        pygame.draw.rect(screen, theme.TRACK, track, border_radius=0)
     thumb_height = (
         track.height
         if total_rows <= view.automation_panel.visible_rows
@@ -228,8 +234,8 @@ def draw_panel(
     thumb = pygame.Rect(track.x, thumb_y, track.width, thumb_height)
     view.automation_panel.scrollbar_thumb = thumb if has_overflow else None
     if has_overflow:
-        pygame.draw.rect(screen, (112, 174, 224), thumb, border_radius=6)
-        pygame.draw.rect(screen, (190, 225, 250), thumb, 2, border_radius=6)
+        pygame.draw.rect(screen, theme.ACCENT, thumb, border_radius=0)
+        pygame.draw.rect(screen, theme.TEXT, thumb, 2, border_radius=0)
     for automation in visible_automations:
         height = round(26 * view.ui_scale)
         gap = round(4 * view.ui_scale)
@@ -248,7 +254,7 @@ def draw_panel(
             screen,
             view.ui.fit_small_text(automation.title, name.width),
             (x, y + 5),
-            (153, 178, 198) if automation.status is AutomationStatus.PAUSED else (232, 232, 232),
+            theme.MUTED if automation.status is AutomationStatus.PAUSED else theme.TEXT,
         )
         view.ui.button(screen, toggle, ">" if action == "resume" else "||")
         view.ui.button(screen, cancel, "X")
@@ -326,19 +332,18 @@ def draw_details(view: AutomationsView, screen: pygame.Surface) -> None:
     panel = details_rect(view)
     if panel is None:
         return
-    pygame.draw.rect(screen, (22, 27, 34), panel, border_radius=6)
-    pygame.draw.rect(screen, (112, 174, 224), panel, 1, border_radius=6)
+    theme.panel(screen, panel)
     padding = round(16 * view.ui_scale)
     x, y = panel.x + padding, panel.y + padding
     close_size = round(26 * view.ui_scale)
     close = pygame.Rect(panel.right - close_size - 10, panel.y + 10, close_size, close_size)
-    view.ui.text(screen, "Automation details", (x, y), (244, 216, 118))
+    view.ui.text(screen, "Automation details", (x, y), theme.ACCENT)
     view.ui.button(screen, close, "X")
     view._command_buttons.append((close, "close_automation_details"))
     y += round(28 * view.ui_scale)
     width = panel.width - 2 * padding
     for line in details_lines(view):
-        view.ui.small_text(screen, view.ui.fit_small_text(line, width), (x, y), (180, 198, 214))
+        view.ui.small_text(screen, view.ui.fit_small_text(line, width), (x, y), theme.MUTED)
         y += max(20, round(20 * view.ui_scale))
     automation = view.simulation.automations[view.automation_panel.selected_id or ""]
     if isinstance(

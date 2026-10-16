@@ -8,13 +8,17 @@ from unittest.mock import MagicMock, patch
 import pygame
 import pytest
 
-from airts.contracts.commands import CreateConstructionCommand, RepairBuildingCommand
+from airts.contracts.commands import (
+    CreateConstructionCommand,
+    ReclaimBuildingCommand,
+    RepairBuildingCommand,
+)
 from airts.contracts.spatial import Point, PolygonRegion
 from airts.presentation.app import AirtsApp
 from airts.presentation.build_placement import BuildingLineDraft
 from airts.presentation.gpu_feedback import GPUFeedback, _triangles
-from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
-from airts.presentation.rendering import work_links
+from airts.presentation.palette import RECLAIM_COLOR, REPAIR_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import reclaim_links, work_links
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -142,6 +146,23 @@ def test_gpu_packs_thick_builder_and_hub_work_beams_without_changing_state() -> 
         for beam, (source, target) in zip(beams, expected, strict=True):
             assert beam[:4] == (source.x, source.y, target.x, target.y)
             assert beam[8] == WORK_BEAM_WIDTH
+        assert simulation.export_state() == before
+        simulation.entities["tank"].health = EntityKind.LIGHT_TANK.profile.max_health
+        assert simulation.execute(ReclaimBuildingCommand(("repairer",), "factory")).accepted
+        simulation.advance()
+        before = simulation.export_state()
+        feedback._build(app, None)
+        values = array("f")
+        values.frombytes(feedback.lines.write.call_args.args[0])
+        beams = [
+            tuple(values[i : i + 9])
+            for i in range(0, len(values), 9)
+            if tuple(values[i + 4 : i + 7]) == pytest.approx(tuple(c / 255 for c in RECLAIM_COLOR))
+        ]
+        assert len(beams) == 1
+        source, target = next(reclaim_links(simulation))
+        assert beams[0][:4] == (source.x, source.y, target.x, target.y)
+        assert beams[0][8] == WORK_BEAM_WIDTH
         assert simulation.export_state() == before
     finally:
         feedback.release()

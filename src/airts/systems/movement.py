@@ -127,10 +127,21 @@ def skip_crowded_waypoints(
     blocked = _route_obstacles(
         simulation, entity, simulation._building_cells() if obstacles is None else obstacles
     )
-    for index in range(min(len(entity.path) - 1, 16), 0, -1):
-        if simulation._routes.clear_segment(entity.position, entity.path[index], blocked):
-            del entity.path[:index]
-            return
+    index = int(
+        simulation._routes.visible_waypoints(
+            [entity.position],
+            [entity.path],
+            blocked,
+            [
+                collision_radius(entity.kind)
+                if entity.entity_id in simulation._movement_blocked
+                or entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
+                else 0.0
+            ],
+        )[0]
+    )
+    if index:
+        del entity.path[:index]
 
 
 def _route_obstacles(
@@ -160,7 +171,12 @@ def _hold_target(simulation: Simulation, entity: Entity) -> Point:
         is None
     ):
         entity.recovery_path.clear()
-    if simulation._routes.clear_segment(entity.position, anchor, buildings):
+    if simulation._routes.disc_segment(
+        entity.position,
+        anchor,
+        buildings,
+        collision_radius(entity.kind),
+    ):
         entity.recovery_path.clear()
         entity.recovery_blocked_cells = None
         return anchor
@@ -176,7 +192,7 @@ def _hold_target(simulation: Simulation, entity: Entity) -> Point:
                 entity.recovery_blocked_cells = buildings
                 return entity.position
             entity.recovery_blocked_cells = None
-            entity.recovery_path = list(route.waypoints)
+            entity.recovery_path = _endpoint_waypoints(simulation, entity, anchor, route, buildings)
     while (
         entity.recovery_path
         and entity.position.distance_to(entity.recovery_path[0]) <= HOLD_TOLERANCE
@@ -243,6 +259,13 @@ def move_entities(simulation: Simulation) -> None:
             [entity.position for entity in lookahead],
             [entity.path for entity in lookahead],
             obstacles,
+            [
+                collision_radius(entity.kind)
+                if entity.entity_id in simulation._movement_blocked
+                or entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
+                else 0.0
+                for entity in lookahead
+            ],
         )
         for entity, index in zip(lookahead, visible.tolist(), strict=True):
             if index:
@@ -308,7 +331,12 @@ def move_entities(simulation: Simulation) -> None:
             and entity.hold_anchor is None
             and not entity.path
             and recovery_goal is not None
-            and simulation._routes.clear_segment(point, recovery_goal, obstacles)
+            and simulation._routes.disc_segment(
+                point,
+                recovery_goal,
+                obstacles,
+                collision_radius(entity.kind),
+            )
         ):
             # An arrived defender can await its business route allowance while
             # its station remains directly reachable. Dispatch/quiet waiting
@@ -483,7 +511,11 @@ def move_entities(simulation: Simulation) -> None:
                     reason="LOCAL_OBSTACLE",
                     target=[target.x, target.y],
                 )
-        else:
+        elif (
+            hypot(target.x - positions[index, 0], target.y - positions[index, 1])
+            - candidate.distance_to(target)
+            >= simulation.MIN_PROGRESS_DISTANCE
+        ):
             simulation._movement_blocked.discard(key)
         if candidate.distance_to(target) <= 1e-9:
             entity.path.pop(0)
@@ -535,6 +567,7 @@ def _finish_path(simulation: Simulation, entity: Entity) -> None:
     if entity.path:
         return
     entity.move_target = None
+    simulation._movement_blocked.discard(entity.entity_id)
     reset_movement_liveness(entity)
     entity.state = simulation._state_for_assignment(entity.entity_id)
     if entity.state is UnitState.DEFENDING:
@@ -564,12 +597,40 @@ def _recover_path(simulation: Simulation, entity: Entity, obstacles: frozenset[C
         )
     except PathfindingError:
         return
-    entity.path = list(route.waypoints)
+    entity.path = _endpoint_waypoints(
+        simulation,
+        entity,
+        entity.move_target or entity.path[-1],
+        route,
+        _route_obstacles(simulation, entity, obstacles),
+    )
     target = entity.path[0] if entity.path else None
     if target != entity.progress_target:
         entity.progress_target = target
         entity.progress_distance = entity.position.distance_to(target) if target else None
         entity.no_progress_ticks = 0
+
+
+def _endpoint_waypoints(
+    simulation: Simulation,
+    entity: Entity,
+    target: Point,
+    route: PathResult,
+    blocked: frozenset[Cell],
+) -> list[Point]:
+    # Grid turns are safe for current mobile radii (< half a cell), but
+    # continuous source/destination offsets may need their cell's center.
+    points = list(route.waypoints)
+    start = entity.position
+    radius = collision_radius(entity.kind)
+    if points and not simulation._routes.disc_segment(start, points[0], blocked, radius):
+        x, y = simulation.game_map.cell_for(start)
+        points.insert(0, Point(x + 0.5, y + 0.5))
+    previous = points[-2] if len(points) > 1 else start
+    if points and not simulation._routes.disc_segment(previous, target, blocked, radius):
+        x, y = simulation.game_map.cell_for(target)
+        points.insert(len(points) - 1, Point(x + 0.5, y + 0.5))
+    return points
 
 
 def plan_group_paths(
@@ -595,7 +656,9 @@ def plan_group_paths(
             result[key] = direct
             continue
         shared = simulation._routes.shared_path(start, anchor, blocked)
-        for index, point in enumerate(shared.waypoints):
+        index = simulation._routes.branch_index(shared, target, blocked)
+        if index >= 0:
+            point = shared.waypoints[index]
             # A distinct anchor in the start cell has a waypoint but no cell transition.
             last = min(index + 1, len(shared.cells) - 1)
             assert shared.prefix_costs is not None
@@ -607,13 +670,12 @@ def plan_group_paths(
                 initial_cost=float(shared.prefix_costs[last, 0]),
                 initial_correction=float(shared.prefix_costs[last, 1]),
             )
-            if branch is not None:
-                result[key] = PathResult(
-                    shared.cells[: last + 1] + branch.cells[1:],
-                    shared.waypoints[: index + 1] + (target,),
-                    branch.cost,
-                )
-                break
+            assert branch is not None
+            result[key] = PathResult(
+                shared.cells[: last + 1] + branch.cells[1:],
+                shared.waypoints[: index + 1] + (target,),
+                branch.cost,
+            )
         else:
             result[key] = simulation._routes.shared_path(start, target, blocked)
     return result

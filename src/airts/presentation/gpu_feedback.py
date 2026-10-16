@@ -10,8 +10,8 @@ import pygame
 from airts.contracts.automations import AutomationKind, ConstructionParameters
 from airts.contracts.spatial import Point, PointTarget, PolygonRegion, SpatialTarget
 from airts.presentation.build_placement import BuildingLineDraft
-from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
-from airts.presentation.rendering import work_links
+from airts.presentation.palette import RECLAIM_COLOR, REPAIR_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import reclaim_links, work_links
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
 from airts.world.units.catalog import EntityKind
@@ -421,6 +421,8 @@ class GPUFeedback:
             )
         for source, destination in work_links(app.simulation):
             line((source, destination), REPAIR_COLOR, width=WORK_BEAM_WIDTH)
+        for source, destination in reclaim_links(app.simulation):
+            line((source, destination), RECLAIM_COLOR, width=WORK_BEAM_WIDTH)
         self._write(self.shapes, shapes)
         self._write(self.lines, lines)
         self._write(self.triangles, triangles)

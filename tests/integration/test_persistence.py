@@ -532,6 +532,34 @@ def test_save_rejects_invalid_movement_queue_and_attack_gathering_intent(
         )
 
 
+@pytest.mark.parametrize("value", [True, -1, 0.5, 1, "0"])
+def test_save_rejects_invalid_player_control_timestamp(value: object) -> None:
+    simulation = builder_factory_simulation()
+    state = simulation.export_state()
+    state["entities"]["scout"]["last_player_control_tick"] = value
+    with pytest.raises(PersistenceError, match="last_player_control_tick"):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+@pytest.mark.parametrize("subject", ["missing", "builder", "factory", "enemy"])
+def test_save_requires_player_control_timestamp_to_match_its_unit(subject: str) -> None:
+    simulation = builder_factory_simulation()
+    state = simulation.export_state()
+    if subject == "missing":
+        state["entities"]["scout"].pop("last_player_control_tick")
+    elif subject == "enemy":
+        state["entities"]["scout"]["owner"] = "enemy"
+        state["entities"]["scout"]["last_player_control_tick"] = 0
+    else:
+        state["entities"][subject]["last_player_control_tick"] = 0
+    with pytest.raises(PersistenceError, match="last_player_control_tick|player control timestamp"):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
 def test_save_rejects_direct_queue_conflicting_with_automation_control() -> None:
     simulation = builder_factory_simulation()
     assert simulation.execute(CreatePatrolCommand(("scout",), PointTarget(Point(12, 12)))).accepted

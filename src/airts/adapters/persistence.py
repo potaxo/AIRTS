@@ -53,8 +53,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v16"
-MATCH_SAVE_SCHEMA = "airts-match-save-v9"
+SAVE_SCHEMA = "airts-save-v18"
+MATCH_SAVE_SCHEMA = "airts-match-save-v11"
 
 
 class PersistenceError(ValueError):
@@ -476,6 +476,7 @@ def _load_entities(
         except ValueError as error:
             raise PersistenceError(f"invalid entity {entity_id}: {error}") from error
         position = _point(entity.get("position"), "entity.position")
+        owner_id = _string(entity.get("owner"), "entity.owner")
         if "construction_progress" not in entity:
             raise PersistenceError("entity.construction_progress is required")
         progress_raw = entity.get("construction_progress")
@@ -600,6 +601,20 @@ def _load_entities(
             )
         if last_attacked_tick is not None and last_attacked_tick > current_tick:
             raise PersistenceError(f"entity {entity_id} was attacked in the future")
+        if "last_player_control_tick" not in entity:
+            raise PersistenceError(f"entity {entity_id} is missing last_player_control_tick")
+        player_tick_raw = entity["last_player_control_tick"]
+        last_player_control_tick = (
+            None
+            if player_tick_raw is None
+            else _past_tick(player_tick_raw, "entity.last_player_control_tick", current_tick)
+        )
+        if last_player_control_tick is not None and (
+            owner_id != "player" or not kind.profile.combat_support
+        ):
+            raise PersistenceError(
+                f"entity {entity_id} player control timestamp requires a player combat unit"
+            )
         if (progress_target is None) != (progress_distance is None):
             raise PersistenceError(
                 f"entity {entity_id} movement progress fields must both be set or null"
@@ -678,7 +693,7 @@ def _load_entities(
         entities[entity_id] = Entity(
             entity_id=entity_id,
             kind=kind,
-            owner_id=_string(entity.get("owner"), "entity.owner"),
+            owner_id=owner_id,
             position=position,
             health=health,
             state=state,
@@ -700,6 +715,7 @@ def _load_entities(
             ),
             last_attacker_id=last_attacker_id,
             last_attacked_tick=last_attacked_tick,
+            last_player_control_tick=last_player_control_tick,
             progress_target=progress_target,
             progress_distance=progress_distance,
             no_progress_ticks=no_progress_ticks,
@@ -734,6 +750,7 @@ def _load_entities(
                 or target.owner_id != loaded_entity.owner_id
                 or not loaded_entity.is_complete
                 or not target.is_complete
+                or (loaded_entity.kind is EntityKind.REPAIR_HUB and target is loaded_entity)
                 or (
                     loaded_entity.kind is EntityKind.BUILDER
                     and (
@@ -741,7 +758,6 @@ def _load_entities(
                         or loaded_entity.pursue_target
                     )
                 )
-                or (loaded_entity.kind is EntityKind.REPAIR_HUB and not target.is_movable)
                 or loaded_entity.kind not in {EntityKind.BUILDER, EntityKind.REPAIR_HUB}
             ):
                 raise PersistenceError("entity has an invalid repair target")

@@ -618,54 +618,8 @@ def attach_production_defense(
     parameters.patrol_target = None
     parameters.patrol_automation_id = None
     parameters.defend_target = target
-    defend = simulation.automations.get(parameters.defend_automation_id or "")
-    produced_ids = [
-        entity_id
-        for entity_id in parameters.produced_entity_ids
-        if entity_id in simulation.entities
-        and simulation.entities[entity_id].owner_id == production.owner_id
-        and simulation.entities[entity_id].is_movable
-    ]
-    if defend is not None and not defend.status.terminal:
-        previous_stations = _defend_parameters(defend).stations
-        if isinstance(target, PolygonRegion):
-            radius = max(
-                (collision_radius(simulation.entities[item].kind) for item in produced_ids),
-                default=collision_radius(parameters.current_unit_kind),
-            )
-            slots = simulation._gathering_slots(target, max(1, len(produced_ids)), radius)
-            stations = dict(zip(produced_ids, slots, strict=False))
-            parameters_for_defend = DefendParameters(
-                target,
-                stations,
-                auto_repair=parameters.auto_repair,
-                gathering_point=True,
-                deployment_slots=slots[: len(produced_ids)],
-                assembly_radius=max(
-                    (
-                        slot.distance_to(target_center(target))
-                        for slot in slots[: len(produced_ids)]
-                    ),
-                    default=0.0,
-                ),
-            )
-        else:
-            stations = build_defend_stations(target, tuple(produced_ids), simulation.game_map)
-            parameters_for_defend = DefendParameters(
-                target, stations, auto_repair=parameters.auto_repair
-            )
-        defend.entity_ids = list(produced_ids)
-        defend.parameters = parameters_for_defend
-        for entity_id in produced_ids:
-            changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
-            simulation._assign(entity_id, defend)
-            if changed_owner or previous_stations.get(entity_id) != stations.get(entity_id):
-                automation_execution.initialize_runtime_entity(simulation, defend, entity_id)
-        coordinate_shared_defend_stations(simulation, target, production.owner_id)
-        return
+    # Existing defenders keep their orders; the next spawn starts a new linked defense.
     parameters.defend_automation_id = None
-    for entity_id in produced_ids:
-        assign_produced_defender(simulation, production, parameters, entity_id)
 
 
 def assign_produced_patroller(

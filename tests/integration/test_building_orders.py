@@ -28,14 +28,16 @@ from airts.contracts.commands import (
     command_from_dict,
     command_to_dict,
 )
+from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
-from airts.presentation.rendering import RendererBackend
+from airts.presentation.palette import RECLAIM_COLOR, WORK_BEAM_WIDTH
+from airts.presentation.rendering import RendererBackend, SoftwareRenderer, reclaim_links
 from airts.presentation.ui import selection
 from airts.simulation import Simulation
 from airts.systems.opponent_ai import engagement_margin, force_strength
 from airts.systems.repair_positions import service_points
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import Entity, Projectile, UnitState
 from airts.world.map import footprint_cells, load_map_data
 from airts.world.units.catalog import EntityKind
 
@@ -185,6 +187,14 @@ def test_remote_reclaim_save_override_single_refund_and_replay() -> None:
     assert "factory" not in simulation.entities
     assert simulation.resources["player"] == before + 280
     assert all(simulation.entities[key].reclaim_target_id is None for key in command.entity_ids)
+    assert (
+        sum(
+            event.event_type is EventType.RESOURCE_CHANGED
+            and event.details.get("reason") == "BUILDING_RECLAIMED"
+            for event in simulation.events.events
+        )
+        == 1
+    )
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
 
 
@@ -231,15 +241,38 @@ def test_reclaim_paid_scaffold_frees_occupancy_and_fails_its_job() -> None:
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
 
 
-def test_reclaim_removed_target_refunds_nothing_and_invalid_save_is_rejected() -> None:
+@pytest.mark.parametrize("removal", ["external", "combat"])
+def test_reclaim_removed_target_refunds_nothing_and_invalid_save_is_rejected(removal: str) -> None:
     simulation = world()
+    builder = simulation.entities["builder"]
+    builder.position = Point(8.5, 10.5)
+    simulation.occupancy.move(builder.entity_id, builder.occupied_cells)
     assert simulation.execute(ReclaimBuildingCommand(("builder",), "factory")).accepted
     save = capture_save(simulation)
     save.state["entities"]["builder"]["reclaim_target_id"] = "a"
     with pytest.raises(PersistenceError, match="invalid reclaim target"):
         load_simulation_data({"schema": save.schema, "map": save.game_map, "state": save.state})
     before = simulation.resources["player"]
-    simulation.remove_entity("factory")
+    simulation.advance(2)
+    assert simulation.entities["factory"].health == 490
+    if removal == "combat":
+        source = simulation.entities["b"]
+        source.owner_id = "enemy"
+        target = simulation.entities["factory"]
+        projectile = Projectile(
+            "incoming",
+            source.entity_id,
+            target.entity_id,
+            source.owner_id,
+            source.kind,
+            target.selection_position,
+            target.selection_position,
+            target.health,
+            source.kind.profile.projectile_speed,
+        )
+        simulation.projectiles[projectile.projectile_id] = projectile
+    else:
+        simulation.remove_entity("factory")
     simulation.advance(80)
     assert simulation.resources["player"] == before
     assert simulation.entities["builder"].reclaim_target_id is None
@@ -260,7 +293,57 @@ def test_reclaim_respects_ownership_and_starting_building_has_zero_refund() -> N
     before = simulation.resources["player"]
     assert simulation.execute(ReclaimBuildingCommand(("builder",), "center")).accepted
     simulation.advance()
+    assert center.health == 700 - EntityKind.BUILDER.profile.reclaim_rate
+    assert simulation.resources["player"] == before
+    simulation.advance(140)
     assert "center" not in simulation.entities and simulation.resources["player"] == before
+
+
+def test_reclaim_drains_health_without_early_refund_and_restores_work_in_progress() -> None:
+    simulation = world()
+    target = simulation.entities["factory"]
+    target.health = 160
+    builder = simulation.entities["builder"]
+    builder.position = Point(8.5, 10.5)
+    simulation.occupancy.move(builder.entity_id, builder.occupied_cells)
+    before = simulation.resources["player"]
+    assert simulation.execute(ReclaimBuildingCommand(("builder",), "factory")).accepted
+    simulation.advance(simulation.TICKS_PER_SECOND)
+    assert target.health == 160 - simulation.TICKS_PER_SECOND * builder.kind.profile.reclaim_rate
+    assert simulation.resources["player"] == before
+    assert not builder.path and builder.move_target is None
+    assert builder.position == Point(8.5, 10.5)
+    app = AirtsApp(simulation)
+    renderer = SoftwareRenderer()
+    endpoints = (builder.selection_position, target.selection_position)
+    assert tuple(reclaim_links(simulation)) == (endpoints,)
+    paths = renderer._representative_path_points(app)
+    assert paths == ((RECLAIM_COLOR, tuple(app.screen_point(p) for p in endpoints)),)
+    with patch("airts.presentation.rendering.pygame.draw.lines") as lines:
+        renderer.draw_entities(app, pygame.Surface(app.window_size))
+    lines.assert_called_once_with(
+        lines.call_args.args[0], RECLAIM_COLOR, False, paths[0][1], WORK_BEAM_WIDTH
+    )
+    loaded = restored(simulation)
+    assert tuple(reclaim_links(loaded)) == (endpoints,)
+    assert simulation.execute(StopCommand(("builder",))).accepted
+    simulation.advance(30)
+    assert target.health == 110 and simulation.resources["player"] == before
+    assert not tuple(reclaim_links(simulation))
+    loaded.advance(21)
+    assert loaded.entities["factory"].health == 5
+    assert loaded.resources["player"] == before
+    loaded.advance()
+    assert "factory" not in loaded.entities
+    assert loaded.resources["player"] == before + 280
+    assert not tuple(reclaim_links(loaded))
+    refunds = [
+        event
+        for event in loaded.events.events
+        if event.event_type is EventType.RESOURCE_CHANGED
+        and event.details.get("reason") == "BUILDING_RECLAIMED"
+    ]
+    assert len(refunds) == 1 and refunds[0].details["builder_id"] == "builder"
 
 
 def test_factory_produces_artillery_and_turret_is_stationary_armed_only_when_complete() -> None:

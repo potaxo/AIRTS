@@ -19,6 +19,7 @@ from airts.contracts.spatial import Point
 from airts.presentation.palette import (
     ENTITY_COLORS,
     PROJECTILE_COLORS,
+    RECLAIM_COLOR,
     REPAIR_COLOR,
     TERRAIN_COLORS,
     WORK_BEAM_WIDTH,
@@ -28,6 +29,12 @@ from airts.presentation.palette import (
 from airts.presentation.visuals.assets import SpriteCache
 from airts.presentation.visuals.catalog import APPEARANCES, COMPOSITE_PATHS
 from airts.presentation.visuals.facing import FacingHistory
+from airts.presentation.visuals.terrain import (
+    DETAIL_MIN_TILE,
+    DETAIL_SIDE,
+    GRID_COLOR,
+    detailed_surface,
+)
 from airts.simulation import Simulation
 from airts.systems.construction import construction_distance
 from airts.systems.repair import building_distance
@@ -98,8 +105,9 @@ def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
             and target.health < target.kind.profile.max_health
             and (
                 worker.kind is EntityKind.REPAIR_HUB
-                and target.is_movable
-                and worker.selection_position.distance_to(target.position)
+                and target is not worker
+                and target.is_complete
+                and worker.selection_position.distance_to(target.selection_position)
                 <= worker.kind.profile.repair_range
                 or worker.kind is EntityKind.BUILDER
                 and target.category is EntityCategory.BUILDING
@@ -149,13 +157,31 @@ def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
                     yield source.selection_position, target.selection_position
 
 
+def reclaim_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
+    """Read the red beam endpoints of builders currently reclaiming in range."""
+    for builder in simulation.entities.values():
+        if builder.reclaim_target_id is None:
+            continue
+        target = simulation.entities.get(builder.reclaim_target_id)
+        if (
+            target is not None
+            and builder.kind is EntityKind.BUILDER
+            and builder.state is UnitState.RECLAIMING
+            and not builder.path
+            and target.owner_id == builder.owner_id
+            and target.category is EntityCategory.BUILDING
+            and building_distance(builder.position, target) <= builder.kind.profile.build_range
+        ):
+            yield builder.selection_position, target.selection_position
+
+
 class SoftwareRenderer:
     """Draw domain state while owning all terrain, sprite and path caches."""
 
     def __init__(self) -> None:
         self._map_surface: pygame.Surface | None = None
+        self._map_detail_surface: pygame.Surface | None = None
         self._scaled_map_surface: pygame.Surface | None = None
-        self._scaled_map_size: tuple[int, int] | None = None
         self._viewport_terrain_key: tuple[object, ...] | None = None
         self._sprites = SpriteCache()
         self._entity_render_key: tuple[object, ...] | None = None
@@ -170,77 +196,67 @@ class SoftwareRenderer:
     def reset_map(self) -> None:
         """Discard terrain surfaces after the application loads a different world."""
         self._map_surface = None
+        self._map_detail_surface = None
         self._scaled_map_surface = None
-        self._scaled_map_size = None
         self._viewport_terrain_key = None
 
     def draw_map(self, view: SceneView, screen: pygame.Surface) -> None:
-        if view.simulation.game_map.resource_sites is not None:
-            # Cache one pixel per cell, then scale only a viewport-sized crop.
-            # Neither wheel input nor panning rebuilds terrain or allocates a full
-            # zoomed world surface.
-            origin_x, origin_y = view.map_origin
-            tile = view.tile_size
-            clip = screen.get_clip()
-            game_map = view.simulation.game_map
-            if self._map_surface is None:
-                self._map_surface = pygame.Surface((game_map.width, game_map.height))
-                for y, row in enumerate(game_map.terrain):
-                    for x, terrain in enumerate(row):
-                        self._map_surface.set_at((x, y), TERRAIN_COLORS[terrain])
-            left = max(0, floor((clip.left - origin_x) / tile))
-            top = max(0, floor((clip.top - origin_y) / tile))
-            right = min(game_map.width, ceil((clip.right - origin_x) / tile))
-            bottom = min(game_map.height, ceil((clip.bottom - origin_y) / tile))
-            if right <= left or bottom <= top:
-                return
-            crop = pygame.Rect(left, top, right - left, bottom - top)
-            start = (round(origin_x + left * tile), round(origin_y + top * tile))
-            size = (
-                max(1, round(origin_x + right * tile) - start[0]),
-                max(1, round(origin_y + bottom * tile) - start[1]),
-            )
-            key = (tuple(crop), size)
-            if key != self._viewport_terrain_key:
-                self._scaled_map_surface = pygame.transform.scale(
-                    self._map_surface.subsurface(crop), size
-                )
-                self._viewport_terrain_key = key
-            assert self._scaled_map_surface is not None
-            screen.blit(self._scaled_map_surface, start)
+        # Fixed-resolution map sources, then a viewport-sized crop. Zoom never
+        # allocates a full zoomed world, and static frames reuse the same crop.
+        origin_x, origin_y = view.map_origin
+        tile = view.tile_size
+        clip = screen.get_clip()
+        game_map = view.simulation.game_map
+        if self._map_surface is None:
+            self._map_surface = pygame.Surface((game_map.width, game_map.height))
+            for y, row in enumerate(game_map.terrain):
+                for x, terrain in enumerate(row):
+                    self._map_surface.set_at((x, y), TERRAIN_COLORS[terrain])
+        detailed = tile >= DETAIL_MIN_TILE
+        if detailed and self._map_detail_surface is None:
+            self._map_detail_surface = detailed_surface(game_map)
+        source = self._map_detail_surface if detailed else self._map_surface
+        assert source is not None
+        source_scale = DETAIL_SIDE if detailed else 1
+        left = max(0, floor((clip.left - origin_x) / tile))
+        top = max(0, floor((clip.top - origin_y) / tile))
+        right = min(game_map.width, ceil((clip.right - origin_x) / tile))
+        bottom = min(game_map.height, ceil((clip.bottom - origin_y) / tile))
+        if right <= left or bottom <= top:
             return
-        if self._map_surface is not None:
-            if self._scaled_map_surface is None or self._scaled_map_size != view.map_pixel_size:
-                self._scaled_map_surface = pygame.transform.scale(
-                    self._map_surface,
-                    view.map_pixel_size,
-                )
-                self._scaled_map_size = view.map_pixel_size
-            screen.blit(self._scaled_map_surface, view.map_origin)
-            return
-        surface = pygame.Surface((view.MAP_PIXELS, view.MAP_PIXELS))
-        terrain_colors = TERRAIN_COLORS
-        tile = view.MAP_PIXELS / view.simulation.game_map.width
-        for y, row in enumerate(view.simulation.game_map.terrain):
-            for x, terrain in enumerate(row):
-                rectangle = pygame.Rect(
-                    round(x * tile), round(y * tile), round(tile + 1), round(tile + 1)
-                )
-                pygame.draw.rect(surface, terrain_colors[terrain], rectangle)
-        for cell in range(0, view.simulation.game_map.width + 1, 8):
-            pixel = round(cell * tile)
-            pygame.draw.line(surface, (44, 65, 49), (pixel, 0), (pixel, view.MAP_PIXELS))
-            pygame.draw.line(surface, (44, 65, 49), (0, pixel), (view.MAP_PIXELS, pixel))
-        self._map_surface = surface
-        self._scaled_map_surface = pygame.transform.scale(surface, view.map_pixel_size)
-        self._scaled_map_size = view.map_pixel_size
-        screen.blit(self._scaled_map_surface, view.map_origin)
+        crop = pygame.Rect(
+            left * source_scale,
+            top * source_scale,
+            (right - left) * source_scale,
+            (bottom - top) * source_scale,
+        )
+        start = (round(origin_x + left * tile), round(origin_y + top * tile))
+        size = (
+            max(1, round(origin_x + right * tile) - start[0]),
+            max(1, round(origin_y + bottom * tile) - start[1]),
+        )
+        key = (tuple(crop), size, detailed)
+        if key != self._viewport_terrain_key:
+            self._scaled_map_surface = pygame.transform.scale(source.subsurface(crop), size)
+            self._viewport_terrain_key = key
+        assert self._scaled_map_surface is not None
+        screen.blit(self._scaled_map_surface, start)
+        for x in range(((left + 7) // 8) * 8, right + 1, 8):
+            pixel = round(origin_x + x * tile)
+            pygame.draw.line(screen, GRID_COLOR, (pixel, start[1]), (pixel, start[1] + size[1]))
+        for y in range(((top + 7) // 8) * 8, bottom + 1, 8):
+            pixel = round(origin_y + y * tile)
+            pygame.draw.line(screen, GRID_COLOR, (start[0], pixel), (start[0] + size[0], pixel))
 
     def draw_entities(self, view: SceneView, screen: pygame.Surface) -> None:
         colors = ENTITY_COLORS
         for color, points in self._representative_path_points(view):
             pygame.draw.lines(
-                screen, color, False, points, WORK_BEAM_WIDTH if color == REPAIR_COLOR else 1
+                screen,
+                color,
+                False,
+                points,
+                WORK_BEAM_WIDTH if color in (REPAIR_COLOR, RECLAIM_COLOR) else 1,
             )
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
@@ -461,6 +477,10 @@ class SoftwareRenderer:
             paths.extend(
                 (REPAIR_COLOR, (view.screen_point(source), view.screen_point(target)))
                 for source, target in work_links(view.simulation)
+            )
+            paths.extend(
+                (RECLAIM_COLOR, (view.screen_point(source), view.screen_point(target)))
+                for source, target in reclaim_links(view.simulation)
             )
             self._path_render_key = key
             self._path_render_points = tuple(paths)

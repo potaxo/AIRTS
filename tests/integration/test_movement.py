@@ -18,7 +18,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
-from airts.systems.movement import position_clear
+from airts.systems.movement import position_clear, skip_crowded_waypoints
 from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_map_data
 from airts.world.skirmish import create_skirmish_map
@@ -83,6 +83,100 @@ def test_terrain_speed_updates_when_entering_and_leaving_forest() -> None:
     assert max(samples["forest"]) == pytest.approx(1 / 3)
     assert samples["grass"][0] == pytest.approx(0.5)
     assert samples["grass"][-1] == pytest.approx(0.5)
+
+
+def test_forest_diagonal_uses_speed_allowance_without_stopping_at_each_cell() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "forest_diagonal",
+                "name": "Forest diagonal",
+                "width": 32,
+                "height": 32,
+                "terrain": {"default": "forest"},
+                "entities": [{"id": "unit", "kind": "scout", "position": [3.5, 3.5]}],
+            }
+        )
+    )
+    unit = simulation.entities["unit"]
+    target = Point(23.5, 23.5)
+    assert simulation.execute(MoveCommand(("unit",), target)).accepted
+    for _ in range(100):
+        start = unit.position
+        simulation.advance()
+        distance = unit.position.distance_to(start)
+        assert distance <= 1 / 3 + 1e-8
+        if not unit.path:
+            break
+        assert distance >= 0.30
+    assert unit.position == target
+    assert simulation.tick <= 95
+
+
+@pytest.mark.parametrize("obstacle", ["rock", "water", "building"])
+@pytest.mark.parametrize("replanned", [False, True], ids=["stalled", "retained-after-replan"])
+def test_stalled_lookahead_retains_a_turn_around_grazing_obstacles(
+    obstacle: str,
+    replanned: bool,
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "grazing_route",
+                "name": "Grazing route",
+                "width": 24,
+                "height": 16,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [] if obstacle == "building" else [[9, 5, 4, 4, obstacle]],
+                },
+                "entities": [
+                    {"id": "unit", "kind": "heavy_tank", "position": [3.5, 4.5]},
+                    *(
+                        [{"id": "building", "kind": "factory", "position": [9, 5]}]
+                        if obstacle == "building"
+                        else []
+                    ),
+                ],
+            }
+        )
+    )
+    unit = simulation.entities["unit"]
+    assert simulation.execute(MoveCommand(("unit",), Point(20.5, 5.1))).accepted
+    # A clear center ray skims the obstacle, while the heavy tank cannot fit.
+    # Reproduce the retained route at a stalled corner, then exercise recovery.
+    unit.path = [Point(8.5, 4.5), Point(20.5, 5.1)]
+    if replanned:
+        simulation._movement_blocked.add(unit.entity_id)
+    else:
+        unit.no_progress_ticks = simulation.NO_PROGRESS_YIELD_TICKS
+    skip_crowded_waypoints(simulation, unit)
+    assert unit.path[0] == Point(8.5, 4.5)
+    _advance_with_clearance(simulation, 100)
+    assert not unit.path
+    assert unit.position.distance_to(Point(20.5, 5.1)) < 1e-8
+
+
+@pytest.mark.parametrize("target", [Point(0.1, 4.5), Point(8.9, 7.5)])
+def test_single_gather_uses_reachable_capacity_at_edges(target: Point) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "edge_gather",
+                "name": "Edge gather",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass", "rectangles": [[9, 5, 4, 4, "water"]]},
+                "entities": [{"id": "unit", "kind": "heavy_tank", "position": [3.5, 4.5]}],
+            }
+        )
+    )
+    assert simulation.execute(MoveCommand(("unit",), target, gathering=True)).accepted
+    unit = simulation.entities["unit"]
+    goal = unit.move_target
+    assert goal is not None and goal != target
+    _advance_with_clearance(simulation, 100)
+    assert unit.position.distance_to(goal) < 1e-8 and not unit.path
 
 
 @pytest.mark.parametrize(("terrain", "maximum_step"), [("forest", 1 / 6), ("road", 1 / 3)])

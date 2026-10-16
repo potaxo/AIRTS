@@ -30,6 +30,7 @@ class EntityProfile:
     build_range: float = 0.0
     repair_range: float = 0.0
     repair_rate: int = 0
+    reclaim_rate: int = 0
     income_per_second: int = 0
 
     def __post_init__(self) -> None:

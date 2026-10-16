@@ -6,6 +6,7 @@ from airts.world.units.catalog import EntityKind
 type Color = tuple[int, int, int]
 
 REPAIR_COLOR: Color = (105, 232, 172)
+RECLAIM_COLOR: Color = (240, 82, 82)
 WORK_BEAM_WIDTH = 3
 
 TEAM_COLORS: dict[int, Color] = {
@@ -23,12 +24,12 @@ def match_color(game_map: GameMap, owner_id: str) -> Color:
 
 
 TERRAIN_COLORS: dict[Terrain, Color] = {
-    Terrain.GRASS: (64, 102, 60),
-    Terrain.ROAD: (119, 106, 77),
-    Terrain.FOREST: (43, 78, 48),
-    Terrain.WATER: (42, 91, 132),
-    Terrain.ROCK: (66, 69, 72),
-    Terrain.BRIDGE: (148, 126, 82),
+    Terrain.GRASS: (68, 82, 51),
+    Terrain.ROAD: (115, 106, 81),
+    Terrain.FOREST: (41, 61, 43),
+    Terrain.WATER: (44, 76, 94),
+    Terrain.ROCK: (86, 89, 82),
+    Terrain.BRIDGE: (151, 129, 83),
 }
 
 ENTITY_COLORS: dict[EntityKind, Color] = {

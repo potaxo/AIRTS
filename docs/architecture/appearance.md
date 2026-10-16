@@ -1,6 +1,6 @@
-# Battle appearance and assets
+# Battle appearance, terrain and interface
 
-This document owns battle art, its authoring workflow and visual facing. The
+This document owns battle art, terrain detail, interface styling, authoring and visual facing. The
 [performance contract](../milestones/performance.md#fps-and-rendering) owns batching,
 frame staging, latency and workload gates. Production/selection portraits are not implemented.
 
@@ -21,6 +21,31 @@ frame staging, latency and workload gates. Production/selection portraits are no
 - [visuals/facing.py](../../src/airts/presentation/visuals/facing.py) owns display-only facing;
   [visuals/gpu.py](../../src/airts/presentation/visuals/gpu.py) encodes sprite instances through
   the shared [GPU record layout](../../src/airts/presentation/gpu_shapes.py).
+- [visuals/terrain.py](../../src/airts/presentation/visuals/terrain.py) owns deterministic material
+  patterns, water banks, software detail sources and the matching GLSL functions.
+- [ui/theme.py](../../src/airts/presentation/ui/theme.py) owns semantic interface colors and pixel
+  frames. [ui/drawing.py](../../src/airts/presentation/ui/drawing.py) paints shared buttons and text;
+  scoped panels own layout and actions.
+
+## Shared style
+
+The battlefield uses muted olive ground, brown roads, blue-gray water and gray stone. Forest
+clusters, gravel, short water ripples and bridge planks use hard pixel detail. Water banks follow
+actual adjacent terrain inside the water cell; they do not add obstacles or change map geometry.
+Terrain variation is deterministic in world coordinates. Its eight detail pixels per cell become
+visible only at eight or more screen pixels per cell, keeping distant views clear and avoiding
+subpixel texture shimmer. Central pixels retain the exact terrain palette reference.
+
+The interface uses dark green-gray metal panels, hard raised edges, warm light text and gold
+active states. Green retains its resource/work meaning; team colors remain distinct. Selection,
+production, automation tabs, settings, help, saves and the lobby share these primitives. Font
+antialiasing remains enabled for reading small labels. Styling changes preserve button rectangles,
+command routing and the renderer's dirty-region cache; pointer hover adds no redraw work.
+
+Change terrain/entity/team colors in [palette.py](../../src/airts/presentation/palette.py), material
+patterns in `visuals/terrain.py` and panel/button/text roles in `ui/theme.py`. This separation keeps
+appearance out of gameplay profiles. Terrain and chrome use code-native drawing with existing
+dependencies; no generated covers or image-generation service is involved.
 
 ## Art conventions
 
@@ -75,6 +100,14 @@ Software uses 32 heading bins and a 512-entry LRU for scale/tint/rotation varian
 the target's RGB format and binary transparency/RLE, avoiding per-entity RGBA conversion during
 scene drawing. Software renders cached scene transforms at tick boundaries; the default GPU
 backend provides continuous angle interpolation. Neither renderer changes simulation state.
+
+GPU terrain keeps the one-RGB-texel-per-cell map upload, uses procedural material detail in the
+existing world rectangle and reads adjacent cells only at water-edge pixels. No extra texture or
+per-frame world geometry is introduced. Software retains a coarse cell map and lazily builds one
+fixed-resolution eight-pixels-per-cell detail surface (18.75 MiB in its RGB surface storage for
+a 320x320 map). Zoom scales only visible crops; map reset releases both sources. Detail and UI
+pixels are covered by [map appearance integration](../../tests/integration/test_map_appearance.py),
+including native readback across all materials/variants/shorelines and zoom-time texture reuse.
 
 Source/atlas/cache and angle tests live in [visual assets](../../tests/unit/test_visual_assets.py).
 [Visual integration](../../tests/integration/test_unit_visuals.py) covers movement, passive pushes,

@@ -21,9 +21,11 @@ from airts.presentation.palette import (
     match_color,
 )
 from airts.presentation.rendering import SceneView, order_feedback
+from airts.presentation.ui.theme import BACKGROUND
 from airts.presentation.visuals.assets import atlas_pixels
 from airts.presentation.visuals.catalog import APPEARANCES, ATLAS_COLUMNS, TILE_PIXELS
 from airts.presentation.visuals.gpu import append_entity_sprites
+from airts.presentation.visuals.terrain import DETAIL_MIN_TILE, GRID_COLOR, fragment_shader
 from airts.simulation import Simulation
 from airts.world.entities import ProjectileTrace
 from airts.world.units.catalog import EntityKind
@@ -316,7 +318,7 @@ class OpenGLFrameBuilder:
         )
         values[-6] = -4.0  # One texel per exact cell; GPU clips the world rectangle.
         count = map_width * map_height
-        grid_color = _float_color((44, 65, 49))
+        grid_color = _float_color(GRID_COLOR)
         for cell in range(0, simulation.game_map.width + 1, 8):
             append_shape(
                 values,
@@ -847,7 +849,7 @@ class OpenGLRenderer:
             target.use()
             width, height = framebuffer_size
             self._context.viewport = (0, 0, width, height)
-            self._context.clear(18 / 255, 22 / 255, 28 / 255, 1.0)
+            self._context.clear(BACKGROUND[0] / 255, BACKGROUND[1] / 255, BACKGROUND[2] / 255, 1.0)
             self._shape_program["viewport_size"].value = framebuffer_size
             self._shape_program["interpolation_alpha"].value = (
                 1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
@@ -1149,11 +1151,13 @@ void main() {
 }
 """
 
-_SHAPE_FRAGMENT_SHADER = """
+_SHAPE_FRAGMENT_SHADER = (
+    """
 #version 330
 in vec2 local_position;
 in vec2 world_position;
 uniform sampler2D terrain_texture;
+uniform float terrain_tile_size;
 uniform sampler2D sprite_texture;
 uniform ivec2 terrain_size;
 flat in vec2 half_size;
@@ -1163,7 +1167,17 @@ flat in float outline_width;
 flat in vec4 outline_color;
 out vec4 fragment_color;
 
+TERRAIN_DETAIL
 void main() {
+    if (circle_shape < -3.5) {
+        ivec2 cell = clamp(ivec2(floor(world_position)), ivec2(0), terrain_size - ivec2(1));
+        vec3 base = texelFetch(terrain_texture, cell, 0).rgb;
+        if (terrain_tile_size >= DETAIL_MIN_TILE) {
+            base = terrainPixel(base, cell, world_position);
+        }
+        fragment_color = vec4(base, 1.0);
+        return;
+    }
     if (circle_shape > 2.5) {
         int index = int(outline_width + 0.5);
         ivec2 cell = ivec2(index % SPRITE_COLUMNS, index / SPRITE_COLUMNS) * SPRITE_SIDE;
@@ -1186,10 +1200,6 @@ void main() {
         : outer_alpha;
     float outline_band = max(0.0, outer_alpha - inner_alpha);
     vec4 color = fill_color;
-    if (circle_shape < -3.5) {
-        ivec2 cell = clamp(ivec2(floor(world_position)), ivec2(0), terrain_size - ivec2(1));
-        color = vec4(texelFetch(terrain_texture, cell, 0).rgb, 1.0);
-    }
     float fill_alpha = color.a * inner_alpha;
     float outline_alpha = outline_color.a * outline_band;
     float combined_alpha = fill_alpha + outline_alpha;
@@ -1203,7 +1213,11 @@ void main() {
         discard;
     }
 }
-""".replace("SPRITE_COLUMNS", str(ATLAS_COLUMNS)).replace("SPRITE_SIDE", str(TILE_PIXELS))
+""".replace("SPRITE_COLUMNS", str(ATLAS_COLUMNS))
+    .replace("SPRITE_SIDE", str(TILE_PIXELS))
+    .replace("TERRAIN_DETAIL", fragment_shader())
+    .replace("DETAIL_MIN_TILE", f"{DETAIL_MIN_TILE}.0")
+)
 
 
 _LINE_VERTEX_SHADER = """

@@ -52,9 +52,9 @@ diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v16 | Current write/read format; includes developer mode, its income timer and per-assignment auto repair |
-| Match save v9 | Current write/read format with victory based on surviving assets |
-| Sandbox replay v21 / match replay v15 | Current diagnostic formats and exact verification |
+| Sandbox save v18 | Current write/read format; includes player control timestamps for automatic support |
+| Match save v11 | Current write/read format with player control timestamps and victory based on surviving assets |
+| Sandbox replay v24 / match replay v18 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves require construction progress and site references and validate owner, kind,
@@ -84,7 +84,10 @@ Sandbox replay v15 and match replay v8 predate mass-weighted response and are re
 explicit contact-physics diagnostic; use the original implementation to verify their expectations.
 Current replay recording/verification remains enabled, with no automatic replay migration.
 Reclaim targets are authoritative entity references and cannot conflict with repair or automation
-control. Saves retain approaching builders and fixed turret attack orders. Sandbox replay v16 and
+control. Saves retain approaching/working builders, partially reclaimed health and fixed turret attack orders.
+Hub repair targets may reference owned completed buildings as well as mobile units. The current tags
+reject older instantaneous-reclamation and mobile-only hub semantics without migration; exact replay
+recording and verification remain active. Sandbox replay v16 and
 match replay v9 predate range-based repair arrival and are explicitly rejected. New kinds and cadence
 resolve through immutable profiles, while refunds/removal are regenerated from reclaim commands;
 internal removal is never recorded a second time as an external command.
@@ -93,12 +96,24 @@ The current command update retains per-unit FIFO movement destinations, explicit
 positions, and capability-based combat support. Patrol arrival and area-defense distribution change
 execution trajectories and events; older save/replay tags are rejected without migration. Current
 command recording and exact verification remain enabled, with queue/combat continuation tests.
+Player combat units retain their latest successful unit-control tick as a nullable past timestamp.
+Current saves reject missing, non-integer, future and invalid-owner/capability timestamps. The
+five-second support suppression window resumes from the saved simulation tick, while Hold remains
+excluded independently. Prior save/replay schemas are rejected without migration; current exact
+replay verification includes command-driven suppression and recovery after expiry.
 
 Terrain-adjusted speed derives from the saved map and immutable mobile profile each tick;
 it adds no authoritative save state. Current replay recording and exact verification remain
 active. Sandbox replay v17 and match replay v10 predate terrain-adjusted movement and are rejected
 explicitly, since their recorded trajectories and events may differ; verify those recordings
 with their original implementation.
+
+Radius-aware stalled recovery, safe edge gathering and weighted-terrain lookahead change movement
+trajectories and path events without adding authoritative state. Sandbox save v16 and match save v9
+remain current: stored paths continue through the current movement controller and its full collision
+certification. Sandbox replay v22 and match replay v16 reject earlier recordings; current command
+recording and exact verification remain enabled. Shared fields and branch-search scratch rebuild
+after load. Group routing retains its existing dispatch allowances and stable station identities.
 
 ## Save execution and management
 

@@ -38,7 +38,7 @@ cross-references provide context without creating a second specification.
 | --- | --- |
 | Scope, invariants, and current baseline | This document |
 | Module boundaries and change/test policy | [Engineering](architecture/engineering.md) |
-| Battle sprites, art authoring and visual facing | [Appearance](architecture/appearance.md) |
+| Battle sprites, terrain, interface style and visual facing | [Appearance](architecture/appearance.md) |
 | Commands, economy, construction and interaction | [Runtime](milestones/runtime.md) |
 | Movement, routing, collision, combat and repair | [Movement](milestones/movement.md) |
 | Save/load, replay diagnostics and compatibility | [Persistence](milestones/persistence.md) |

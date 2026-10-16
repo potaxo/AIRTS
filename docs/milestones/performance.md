@@ -29,7 +29,9 @@ inspected route. No visual reduction may skip units, collision or simulation.
 Terrain uploads once per map as exact nearest RGB texels on one world rectangle; all eight-cell
 grid lines remain world primitives. Camera pan/zoom/resize changes uniforms, not terrain or dynamic
 world buffers. Dynamic capacity persists; geometry rebuilds on relevant tick/selection/inspection
-changes. Software site maps scale a viewport-sized crop of a one-pixel-per-cell map.
+changes. [Appearance](../architecture/appearance.md#shared-style) owns display-only material detail.
+Software maps scale a viewport-sized crop of a coarse cell map or a lazily cached fixed-resolution
+detail source; zoom never allocates a full zoomed world.
 
 Projectiles, traces, assembly glow, resource sites, blueprints, placement/scaffold feedback, spatial
 references and drafts use cached world primitives. Immutable traces reuse geometry until expiry;
@@ -78,7 +80,7 @@ live in [presentation integration tests](../../tests/integration/test_opengl_pre
 | Executable contract | Additional gates and retained behavior |
 | --- | --- |
 | [Crowd](../../tests/performance/test_crowd_congestion_performance.py) | 999 attackers: >=24 in range after 220 ticks, all in-range attackers stopped, tick p95 <100 ms. 400 scouts around a 2x2 defense: >=90% spacing, tick p95 <100 ms. All 400 cross the nine-cell bridge within fixture limits. |
-| [Large army](../../tests/performance/test_large_army_performance.py) | All 1,000 gathering members receive routes within 32 ticks using the global 32-route allowance. 500-unit choke retains the 6,000 collision-pair limit. Cold/changed 320x320 targets require command <=250 ms for two scouts and <=750 ms for 1,000. Other move/patrol/repair/focus, line, choke and opposing-army cases retain full participants. |
+| [Large army](../../tests/performance/test_large_army_performance.py) | All 1,000 gathering members receive routes within 32 ticks using the global 32-route allowance. 500-unit choke retains the 6,000 collision-pair limit. Cold/changed 320x320 local and cross-river targets require command <=250 ms for two scouts and <=750 ms for 1,000. Other move/patrol/repair/focus, line, choke and opposing-army cases retain full participants. |
 | [Behavior](../../tests/integration/test_large_force_behavior_regressions.py) | Identity, swept clearance, speed, front-rank continuity, 307-scout bridge progress, held-formation traffic/recovery and building clearance. Shared defense: 160 unique stations, 159 after a casualty with <=1 remap. Four factories: 132 spaced stations. |
 | [Severe recovery](../../tests/integration/test_overlap_recovery.py) / [timing](../../tests/performance/test_overlap_recovery_performance.py) | Behavior retains 100/400/1,000 bodies, 80/50/30% spacing and coincident centers, internal extraction and continued settling. Timing retains all 1,000 bodies and 300 ticks for 30% spacing/coincident centers with tick p95 <100 ms. |
 

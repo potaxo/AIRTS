@@ -112,6 +112,7 @@ class Simulation:
     DEFEND_PURSUIT_RADIUS = 7.0
     PATROL_PURSUIT_RADIUS = 7.0
     COMBAT_SUPPORT_RADIUS = 8.0
+    COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS = 5 * TICKS_PER_SECOND
     DEFEND_ATTACK_MEMORY_TICKS = 30
     DEFEND_STATION_TOLERANCE = 0.05
     DEFEND_FORMATION_TOLERANCE = 1.0
@@ -329,7 +330,12 @@ class Simulation:
         return self._movement_replan_count
 
     def execute(self, command: Command) -> CommandResult:
-        return self._execute_command(command, record=True)
+        controlled_ids = command_handlers.player_controlled_entity_ids(self, command)
+        result = self._execute_command(command, record=True)
+        if result.accepted:
+            for key in controlled_ids:
+                self.entities[key].last_player_control_tick = self.tick
+        return result
 
     def are_hostile(self, first_owner: str, second_owner: str) -> bool:
         if first_owner == second_owner:
@@ -775,7 +781,9 @@ class Simulation:
         available = slots
         if len(available) != len(entity_ids):
             raise PathfindingError("INSUFFICIENT_DESTINATIONS")
-        if len(entity_ids) == 1 and self.game_map.cell_for(target) not in blocked:
+        if len(entity_ids) == 1 and movement_system.position_clear(
+            target, maximum_radius, self.game_map.width, self.game_map.height, static_obstacles
+        ):
             available = (target,)
         return assign_formation_slots(
             {key: self.entities[key].position for key in entity_ids}, available, target

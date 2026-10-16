@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pygame
 
+from airts.presentation.ui import theme
 from airts.world.skirmish import DEFAULT_SETUP
 
 if TYPE_CHECKING:
@@ -19,15 +20,16 @@ class Lobby:
         self.buttons: list[tuple[pygame.Rect, str, int]] = []
 
     def draw(self, app: AirtsApp, screen: pygame.Surface) -> None:
-        screen.fill((18, 25, 34))
+        screen.fill(theme.BACKGROUND)
         center_x, center_y = screen.get_rect().center
         x, y = center_x - 290, max(28, center_y - 220)
-        app.ui.text(screen, "AIRTS", (x, y), (112, 224, 173))
-        app.ui.text(screen, "Four Corners River", (x, y + 40), (236, 242, 248))
+        theme.panel(screen, pygame.Rect(x - 24, y - 24, 628, 456))
+        app.ui.text(screen, "AIRTS", (x, y), theme.ACCENT)
+        app.ui.text(screen, "Four Corners River", (x, y + 40), theme.TEXT)
         self.buttons.clear()
         if self.page == "cover":
             app.ui.small_text(
-                screen, "Develop your base. Expand. Fight as a team.", (x, y + 94), (177, 196, 213)
+                screen, "Develop your base. Expand. Fight as a team.", (x, y + 94), theme.MUTED
             )
             rectangle = pygame.Rect(x, y + 152, 580, 48)
             app.ui.button(screen, rectangle, "Start game")
@@ -37,13 +39,13 @@ class Lobby:
             self.buttons.append((rectangle, "saves", 0))
             return
         app.ui.small_text(
-            screen, "320 x 320 | Fixed symmetric map | No fog of war", (x, y + 78), (177, 196, 213)
+            screen, "320 x 320 | Fixed symmetric map | No fog of war", (x, y + 78), theme.MUTED
         )
         app.ui.small_text(
             screen,
             "Click controller / team to cycle. One human player required.",
             (x, y + 102),
-            (177, 196, 213),
+            theme.MUTED,
         )
         for index, ((role, team), location) in enumerate(
             zip(
@@ -53,7 +55,7 @@ class Lobby:
             )
         ):
             row_y = y + 140 + index * 48
-            app.ui.small_text(screen, location, (x, row_y + 10), (236, 242, 248))
+            app.ui.small_text(screen, location, (x, row_y + 10), theme.TEXT)
             controller = pygame.Rect(x + 180, row_y, 180, 34)
             alliance = pygame.Rect(x + 380, row_y, 200, 34)
             app.ui.button(screen, controller, role.title())
@@ -65,7 +67,7 @@ class Lobby:
         ):
             app.ui.button(screen, rectangle, label)
             self.buttons.append((rectangle, action, 0))
-        app.ui.small_text(screen, app.notice, (x, y + 392), (244, 206, 122))
+        app.ui.small_text(screen, app.notice, (x, y + 392), theme.ACCENT)
 
     def click(self, app: AirtsApp, position: tuple[int, int]) -> None:
         for rectangle, action, index in self.buttons:

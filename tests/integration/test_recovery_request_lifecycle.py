@@ -142,7 +142,7 @@ def test_weak_defense_route_and_unchanged_station_preserve_the_return_phase() ->
     ],
     ids=["line", "gathering-area"],
 )
-def test_repeated_production_binding_retains_unchanged_member_return_phases(
+def test_production_retarget_preserves_existing_member_return_phases(
     target: SpatialTarget, replacement: SpatialTarget
 ) -> None:
     simulation = Simulation(runtime_map())
@@ -179,8 +179,10 @@ def test_repeated_production_binding_retains_unchanged_member_return_phases(
     assert simulation.execute(
         ModifyAutomationCommand(production.automation_id, target=replacement)
     ).accepted
+    assert defend.parameters.target == target
+    assert defend.parameters.stations == stations
     for key in ids:
         entity = simulation.entities[key]
-        assert entity.recovery_request_tick is None
-        assert not entity.recovery_released
+        assert entity.recovery_request_tick == simulation.tick
+        assert entity.recovery_released
         assert simulation.assignments[key] == defend.automation_id

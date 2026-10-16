@@ -54,7 +54,7 @@ def pause(simulation: Simulation, automation_id: str, owner_id: str) -> CommandR
         entity.clear_recovery_request()
         entity.path.clear()
         entity.move_target = None
-        if automation.kind is AutomationKind.PATROL:
+        if automation.kind in {AutomationKind.PATROL, AutomationKind.DEFEND}:
             entity.attack_target_id = None
             entity.pursue_target = False
             entity.repair_target_id = None

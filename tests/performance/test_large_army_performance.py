@@ -301,10 +301,12 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
 
 @pytest.mark.parametrize("unit_count", [2, 1000])
 @pytest.mark.parametrize("control", ["move", "defend", "patrol"])
+@pytest.mark.parametrize("across_river", [False, True], ids=["local", "cross-river"])
 def test_gathering_on_large_river_map_does_not_freeze_input(
     check_timing: bool,
     unit_count: int,
     control: str,
+    across_river: bool,
     record_property: Callable[[str, object], None],
 ) -> None:
     game_map = create_skirmish_map()
@@ -320,10 +322,16 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
     simulation = Simulation(replace(game_map, entities=game_map.entities + units))
     selected = tuple(unit.entity_id for unit in units)
     automation_id: str | None = None
-    for index, target in enumerate((Point(80.5, 275.5), Point(90.5, 275.5), Point(110.5, 275.5))):
+    targets = (
+        (Point(230.5, 50.5), Point(240.5, 50.5), Point(250.5, 50.5))
+        if across_river
+        else (Point(80.5, 275.5), Point(90.5, 275.5), Point(110.5, 275.5))
+    )
+    for index, target in enumerate(targets):
         area = rectangle_region(
             Point(target.x - 1, target.y - 1), Point(target.x + 1, target.y + 1)
         )
+        pair_checks = simulation.collision_pair_check_count
         started = perf_counter()
         if control == "move":
             result = simulation.execute(MoveCommand(selected, target, gathering=True))
@@ -335,6 +343,9 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
             result = simulation.execute(CreatePatrolCommand(selected, area))
         elapsed = perf_counter() - started
         record_property(f"gather_{index}_seconds", elapsed)
+        record_property(
+            f"gather_{index}_pair_checks", simulation.collision_pair_check_count - pair_checks
+        )
         assert result.accepted, result.reason
         if control == "move":
             goals = {key: simulation.entities[key].move_target for key in selected}

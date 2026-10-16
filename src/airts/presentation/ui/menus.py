@@ -7,6 +7,7 @@ from typing import Protocol
 import pygame
 
 from airts.presentation.metrics import PresentationMetrics
+from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
 
 
@@ -26,12 +27,12 @@ def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
     x = view.command_bar_rect.x + 14
     y = view.command_bar_rect.y - 244
     view._settings_buttons.clear()
-    pygame.draw.rect(screen, (34, 41, 51), pygame.Rect(x, y, 268, 238), border_radius=4)
+    theme.panel(screen, pygame.Rect(x, y, 268, 238))
     view.ui.small_text(
         screen,
         f"Resolution {view.window_size[0]} x {view.window_size[1]}",
         (x + 10, y + 8),
-        (225, 232, 238),
+        theme.TEXT,
     )
     lower = pygame.Rect(x + 8, y + 30, 120, 24)
     higher = pygame.Rect(x + 140, y + 30, 120, 24)
@@ -43,26 +44,26 @@ def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
         screen,
         f"Frame p95 {metrics.frame_p95_ms:5.1f} ms  Present {metrics.present_p95_ms:5.1f} ms",
         (x + 10, y + 62),
-        (166, 191, 215),
+        theme.MUTED,
     )
     view.ui.small_text(
         screen,
         f"Render {metrics.render_p95_ms:5.1f} ms  Sim {metrics.simulation_p95_ms:5.1f} ms",
         (x + 10, y + 82),
-        (166, 191, 215),
+        theme.MUTED,
     )
     view.ui.small_text(
         screen,
         f"Real FPS {metrics.one_percent_low_fps:4.0f}  Submit FPS {metrics.submit_fps:4.0f}",
         (x + 10, y + 102),
-        (111, 221, 151),
+        theme.SUCCESS,
     )
     y += 122
     toggle = pygame.Rect(x + 8, y, 252, 24)
     state = "ON" if view.developer_mode else "OFF"
-    view.ui.button(screen, toggle, f"Developer mode: {state}")
+    view.ui.button(screen, toggle, f"Developer mode: {state}", active=view.developer_mode)
     view._settings_buttons.append((toggle, "developer_mode"))
-    view.ui.small_text(screen, "+2000 player resources / second", (x + 10, y + 26), (166, 191, 215))
+    view.ui.small_text(screen, "+2000 player resources / second", (x + 10, y + 26), theme.MUTED)
     y += 46
     for action, label in (("saves", "Save manager"), ("new", "New game")):
         rectangle = pygame.Rect(x + 8, y, 252, 24)
@@ -78,9 +79,8 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
         max(320, view.canvas_rect.width - 80),
         288,
     )
-    pygame.draw.rect(screen, (28, 34, 42), rectangle, border_radius=4)
-    pygame.draw.rect(screen, (104, 126, 149), rectangle, 1, border_radius=4)
-    view.ui.text(screen, "Controls", (rectangle.x + 18, rectangle.y + 16), (245, 245, 245))
+    theme.panel(screen, rectangle)
+    view.ui.text(screen, "Controls", (rectangle.x + 18, rectangle.y + 16), theme.TEXT)
     lines = (
         "1 Select   2 Line   3 Rectangle   4 Freehand",
         "Right-click Move/Attack or finish a line   Middle-drag Pan",
@@ -96,5 +96,5 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
             screen,
             line,
             (rectangle.x + 18, rectangle.y + 55 + index * 28),
-            (190, 205, 220),
+            theme.MUTED,
         )

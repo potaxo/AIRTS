@@ -28,11 +28,20 @@ not lose established valid stations. Cache limits bound targets, candidate slots
 An unreachable firing ring remains queued in `WAITING`, with one failure diagnostic until its
 target/obstacles change or the order is replaced; eviction/load must not preserve a stale failure.
 
-The current implementation shares cell centers, computes segment cost once, preserves compensated
-path-prefix sums and cost/index ties, and batches sixteen-waypoint lookahead with farthest-first
-terrain/corner checks. Embedded building endpoints retain per-unit exception masks. Front order
-follows the submitted segment through turns; group priority alternates by tick, with stable ID ties
-and a common passing side. Stalls trigger budgeted replanning without clearing their progress history.
+The current implementation shares cell centers and preserves compensated path-prefix sums and
+cost/index ties. Group branches scan the shared route in one compiled pass, materializing only
+the first valid branch. Normal navigation retains centerline shortcuts and the physical solver's
+certified wall sliding. Sustained stalled travel and Hold return use swept-disc lookahead against
+terrain, buildings and map edges, including rounded corners; recovery routes retain cell-center
+connectors for offset endpoints where needed. The existing blocked marker retains this clearance
+mode through budgeted replanning until actual waypoint progress or completion, rather than losing
+it when a replacement waypoint resets the local stall counter. Single-unit gathering retains a
+safe allocated slot when the clicked center cannot fit the body. Sixteen-waypoint lookahead
+permits terrain no slower than its endpoints
+(with grass as the minimum allowance), so forest travel can skip intermediate cell centers while
+cheaper routes still reject shortcuts across slower terrain. Embedded building endpoints retain
+per-unit exception masks. Front order follows the submitted segment through turns; group priority
+alternates by tick, with stable ID ties and a common passing side.
 These are current execution details, subject to the [engineering change policy](../architecture/engineering.md#change-policy).
 
 ## Patrol, defense and combat
@@ -67,6 +76,12 @@ These are current execution details, subject to the [engineering change policy](
   retain control; patrol/defense support retains its pursuit boundary. Direct moving supporters
   resume their route and queued destinations after the target disappears. Recruitment takes effect
   after the firing pass, so it cannot cascade into additional shots in that same pass.
+- Successful player unit-control orders suppress support recruitment for five seconds of simulation
+  time on the affected units. Further orders, including queued waypoints, restart the window;
+  selection, rejected commands and internal AI/automation commands do not. Player pause or retarget
+  of an assignment also cancels its existing automatic pursuit. Ordinary in-range firing and explicit
+  attack orders remain available. Hold excludes recruitment until another order replaces
+  it, even after the micro window expires. Pausing does not consume the window; saves retain its age.
 - Direct movement queues execute FIFO per unit, preserving ordered destinations across saves.
   The first leg starts through the command boundary; subsequent legs claim the shared routing
   allowance before background automations, preventing busy defenses from starving player orders.
@@ -191,9 +206,10 @@ without canceling repairs already underway. Unavailable facilities reject the in
 with the ordinary diagnostic; other members continue their work and later checks retry.
 API threshold defaults and rates/ranges live in code; UI switches and the shortcut belong to
 [README](../../README.md#controls).
-Completed hubs heal one friendly mobile target at a time within their center-based radius,
-retaining it until full health, departure or destruction, then choosing the nearest wounded body
+Completed hubs heal one other owned mobile unit or completed building at a time within their center-based radius,
+retaining it until full health, departure, reclamation or destruction, then choosing the nearest wounded target
 with stable ID ties. Builders qualify; repair-and-return cannot bypass range or concurrent capacity.
+Unfinished buildings and buildings targeted for reclamation are excluded from automatic hub healing.
 Travel stops as soon as a unit is in service range with disc clearance, even while its old path
 has remaining waypoints. Overlapping arrivals choose another clear slot; traveling repair destinations
 avoid both present occupants and other incoming destinations. Static area goals share a routing field;

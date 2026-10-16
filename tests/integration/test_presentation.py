@@ -686,6 +686,9 @@ def test_enemy_box_counts_visible_hostiles_and_keeps_commands_player_only(
         with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
             app._draw_interface(surface)
         assert any("Enemy selected: 3" in call.args[1] for call in text.call_args_list)
+        assert {"Faction: enemy | Team 2 | x2", "Faction: other_enemy | Team 3 | x1"} <= {
+            call.args[1] for call in text.call_args_list
+        }
         assert {kind for _, kind in app._type_buttons} == {EntityKind.SCOUT, EntityKind.BUILDER}
         builder_button = next(
             rect for rect, kind in app._type_buttons if kind is EntityKind.BUILDER
@@ -695,8 +698,10 @@ def test_enemy_box_counts_visible_hostiles_and_keeps_commands_player_only(
         assert app.selected_entities == {"scout_1", "scout_2", "builder"}
         assert app.simulation.command_count == before
         app._handle_panel_click(builder_button.center)
-        app._draw_interface(surface)
+        with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
+            app._draw_interface(surface)
         assert app.selected_entities == {"builder"}
+        assert "Faction: enemy | Team 2 | x1" in {call.args[1] for call in text.call_args_list}
         assert not any(
             action.startswith(("build:", "queue:", "loop:", "reduce:"))
             or action in {"stop", "hold", "patrol", "defend"}

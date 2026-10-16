@@ -262,6 +262,11 @@ def _join_nearby_combat(
                 and entity.is_complete
                 and not entity.pursue_target
                 and entity.hold_anchor is None
+                and (
+                    entity.last_player_control_tick is None
+                    or simulation.tick - entity.last_player_control_tick
+                    >= simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS
+                )
             ):
                 assigned = simulation.assignments.get(key)
                 if assigned is not None:

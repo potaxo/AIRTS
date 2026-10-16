@@ -2,15 +2,26 @@
 
 import pygame
 
+from airts.presentation.ui import theme
+
 
 class UiPainter:
     def __init__(self) -> None:
         self.font: pygame.font.Font | None = None
         self.small_font: pygame.font.Font | None = None
 
-    def button(self, screen: pygame.Surface, rectangle: pygame.Rect, label: str) -> None:
-        pygame.draw.rect(screen, (59, 72, 88), rectangle, border_radius=3)
-        pygame.draw.rect(screen, (104, 126, 149), rectangle, 1, border_radius=3)
+    def button(
+        self,
+        screen: pygame.Surface,
+        rectangle: pygame.Rect,
+        label: str,
+        *,
+        active: bool = False,
+        enabled: bool = True,
+    ) -> None:
+        theme.frame(screen, rectangle, theme.BUTTON_ACTIVE if active else theme.BUTTON)
+        if active:
+            theme.active_border(screen, rectangle)
         if self.small_font is None:
             raise RuntimeError("font not initialized")
         label = self.fit_small_text(label, rectangle.width - 12)
@@ -19,7 +30,7 @@ class UiPainter:
             screen,
             label,
             (rectangle.centerx - width // 2, rectangle.centery - height // 2),
-            (240, 240, 240),
+            theme.TEXT if enabled else theme.MUTED,
         )
 
     def text(

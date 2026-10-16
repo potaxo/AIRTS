@@ -258,6 +258,38 @@ def test_route_budgets_are_shared_and_reset_per_tick(make_map: Callable[[int], G
     assert router.automation_allowance(1).claim() and router.claim_combat_route()
 
 
+@pytest.mark.parametrize(
+    "start,end,clear",
+    [
+        (Point(1.5, 4.7), Point(9.5, 4.7), False),
+        (Point(1.5, 4.5), Point(9.5, 4.5), True),
+        (Point(4.7, 1.5), Point(4.7, 9.5), False),
+        (Point(4.5, 1.5), Point(4.5, 9.5), True),
+        (Point(4.65, 4.65), Point(4.65, 4.65), True),
+        (Point(4.7, 4.7), Point(4.7, 4.7), False),
+        (Point(1.5, 4.0), Point(8.5, 5.0), False),
+        (Point(0.1, 1.5), Point(3.5, 1.5), False),
+    ],
+)
+def test_shortcuts_require_disc_clearance_in_both_directions(
+    make_map: Callable[[int], GameMap],
+    start: Point,
+    end: Point,
+    clear: bool,
+) -> None:
+    router = RoutingService(make_map(1))
+    blocked = frozenset({(5, 5)})
+    assert router.disc_segment(start, end, blocked, 0.45) is clear
+    assert router.disc_segment(end, start, blocked, 0.45) is clear
+
+
+def test_disc_shortcut_retains_a_one_cell_corridor(make_map: Callable[[int], GameMap]) -> None:
+    router = RoutingService(make_map(1))
+    blocked = frozenset((x, y) for x in range(12) for y in (4, 6))
+    assert router.disc_segment(Point(1.5, 5.5), Point(10.5, 5.5), blocked, 0.45)
+    assert not router.disc_segment(Point(1.5, 5.4), Point(10.5, 5.4), blocked, 0.45)
+
+
 def test_clearance_solver_respects_all_planes_and_speed() -> None:
     planes = [(-1.0, 0.0, -0.2), (0.0, 1.0, 0.1), (1.0, 0.0, -0.1)]
     step = constrained_step(Point(1, 0), 0.5, planes)

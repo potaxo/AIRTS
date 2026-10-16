@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from math import floor, inf
+from math import ceil, floor, inf
 
 import numpy as np
 
@@ -107,7 +107,9 @@ class RoutingService:
             np.zeros((1, 2)),
             np.zeros((0, 2)),
             np.zeros(2, dtype=np.int64),
+            np.zeros(1),
         )
+        _branch_index(self._cost_grid, self.obstacle_mask(frozenset()), np.zeros((0, 2)), 0.5, 0.5)
         self._fields: OrderedDict[tuple[tuple[int, ...], frozenset[Cell]], _SearchField] = (
             OrderedDict()
         )
@@ -230,10 +232,53 @@ class RoutingService:
             inf,
         )
 
+    def disc_segment(
+        self,
+        start: Point,
+        end: Point,
+        blocked: frozenset[Cell],
+        radius: float,
+        maximum_cost: float = inf,
+    ) -> bool:
+        """Certify a shortcut's full body, including rounded static corners."""
+        return _clear_segment(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            float(start.x),
+            float(start.y),
+            float(end.x),
+            float(end.y),
+            maximum_cost,
+            radius,
+        )
+
+    def branch_index(
+        self,
+        path: PathResult,
+        target: Point,
+        blocked: frozenset[Cell],
+    ) -> int:
+        """Find the first safe exit in one numeric pass, materializing only its winner."""
+        return _branch_index(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            np.fromiter(
+                (coordinate for p in path.waypoints for coordinate in (p.x, p.y)),
+                dtype=np.float64,
+                count=2 * len(path.waypoints),
+            ).reshape((-1, 2)),
+            float(target.x),
+            float(target.y),
+        )
+
     def visible_waypoints(
-        self, starts: list[Point], paths: list[list[Point]], blocked: frozenset[Cell]
+        self,
+        starts: list[Point],
+        paths: list[list[Point]],
+        blocked: frozenset[Cell],
+        radii: list[float] | None = None,
     ) -> IntArray:
-        """The same sixteen-waypoint lookahead, with one compiled call per batch."""
+        """Bounded sixteen-waypoint lookahead in one compiled call per batch."""
         offsets = np.zeros(len(paths) + 1, dtype=np.int64)
         for index, path in enumerate(paths):
             offsets[index + 1] = offsets[index] + min(len(path) - 1, 16)
@@ -253,6 +298,7 @@ class RoutingService:
             np.asarray([(point.x, point.y) for point in starts], dtype=np.float64),
             points,
             offsets,
+            np.zeros(len(starts)) if radii is None else np.asarray(radii, dtype=np.float64),
         )
 
     def nearest_cell(self, point: Point, blocked: frozenset[Cell]) -> Cell:
@@ -617,6 +663,7 @@ def _clear_segment(
     bx: float,
     by: float,
     maximum_cost: float = 1.0,
+    radius: float = 0.0,
 ) -> bool:
     """Exact DDA lookahead without allocating a cell list on every movement tick."""
     height, width = costs.shape
@@ -648,7 +695,68 @@ def _clear_segment(
             ty += step_y
         if blocked[y, x] or costs[y, x] > maximum_cost:
             return False
+    return not radius or _disc_clear(blocked, ax, ay, bx, by, radius)
+
+
+@compile_numeric
+def _disc_clear(
+    blocked: BoolArray,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    radius: float,
+) -> bool:
+    """Centerline is already passable; test neighboring rectangles in a narrow sweep."""
+    height, width = blocked.shape
+    if min(ax, bx) < radius or max(ax, bx) > width - radius:
+        return False
+    if min(ay, by) < radius or max(ay, by) > height - radius:
+        return False
+    dx, dy = bx - ax, by - ay
+    length_squared = dx * dx + dy * dy
+    radius_squared = radius * radius - 1e-12
+    # Rows of the swept capsule bound its work by segment length, not rectangle area.
+    for y in range(
+        max(0, floor(min(ay, by) - radius)), min(height, floor(max(ay, by) + radius) + 1)
+    ):
+        if dy:
+            t0 = max(0.0, min(1.0, (y - radius - ay) / dy))
+            t1 = max(0.0, min(1.0, (y + 1 + radius - ay) / dy))
+            x0, x1 = ax + t0 * dx, ax + t1 * dx
+        else:
+            x0, x1 = ax, bx
+        for x in range(max(0, floor(min(x0, x1) - radius)), min(width, ceil(max(x0, x1) + radius))):
+            if not blocked[y, x]:
+                continue
+            # A segment's closest point on a rectangle is an endpoint or a corner
+            # projection unless it intersects its interior (excluded by the DDA).
+            for px, py in ((ax, ay), (bx, by)):
+                ex, ey = max(x - px, 0.0, px - x - 1), max(y - py, 0.0, py - y - 1)
+                if ex * ex + ey * ey < radius_squared:
+                    return False
+            if length_squared:
+                for cx, cy in ((x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)):
+                    t = min(1.0, max(0.0, ((cx - ax) * dx + (cy - ay) * dy) / length_squared))
+                    ex, ey = cx - ax - t * dx, cy - ay - t * dy
+                    if ex * ex + ey * ey < radius_squared:
+                        return False
     return True
+
+
+@compile_numeric
+def _branch_index(
+    costs: FloatArray,
+    blocked: BoolArray,
+    points: FloatArray,
+    bx: float,
+    by: float,
+) -> int:
+    for index in range(len(points)):
+        ax, ay = points[index]
+        if _clear_segment(costs, blocked, ax, ay, bx, by, inf):
+            return index
+    return -1
 
 
 @compile_numeric
@@ -658,13 +766,17 @@ def _visible_waypoints(
     starts: FloatArray,
     points: FloatArray,
     offsets: IntArray,
+    radii: FloatArray,
 ) -> IntArray:
     result = np.zeros(len(starts), dtype=np.int64)
     for index in range(len(starts)):
         ax, ay = starts[index]
         for candidate in range(offsets[index + 1] - 1, offsets[index] - 1, -1):
             bx, by = points[candidate]
-            if _clear_segment(costs, blocked, ax, ay, bx, by):
+            # Forest is slower terrain, not an obstruction. Permit equal-cost
+            # shortcuts inside it while retaining the cheaper route around it.
+            maximum = max(1.0, costs[floor(ay), floor(ax)], costs[floor(by), floor(bx)])
+            if _clear_segment(costs, blocked, ax, ay, bx, by, maximum, radii[index]):
                 result[index] = candidate - offsets[index] + 1
                 break
     return result

@@ -15,4 +15,5 @@ PROFILE = EntityProfile(
     build_range=4.0,
     repair_range=4.0,
     repair_rate=5,
+    reclaim_rate=5,
 )

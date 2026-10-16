@@ -40,6 +40,7 @@ class Entity:
     path_cost: float = 0.0
     move_queue: list[Point] = field(default_factory=list)
     attack_gather_point: Point | None = None
+    last_player_control_tick: int | None = None
     attack_target_id: str | None = None
     pursue_target: bool = False
     repair_target_id: str | None = None
@@ -120,6 +121,7 @@ class Entity:
                 else [self.attack_gather_point.x, self.attack_gather_point.y]
             ),
             "attack_target_id": self.attack_target_id,
+            "last_player_control_tick": self.last_player_control_tick,
             "pursue_target": self.pursue_target,
             "repair_target_id": self.repair_target_id,
             "reclaim_target_id": self.reclaim_target_id,
