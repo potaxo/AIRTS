@@ -156,7 +156,7 @@ def test_new_order_detaches_only_selected_builder_from_active_and_queued_constru
 
 
 @pytest.mark.parametrize("work", ["repair", "reclaim"])
-def test_first_queued_move_replaces_an_approaching_builders_direct_work(work: str) -> None:
+def test_queued_move_waits_for_an_approaching_builders_direct_work(work: str) -> None:
     simulation = world()
     simulation.entities["factory"].health = 200
     command = (
@@ -169,11 +169,16 @@ def test_first_queued_move_replaces_an_approaching_builders_direct_work(work: st
     builder = simulation.entities["builder"]
     assert builder.path
     assert simulation.execute(MoveCommand(("builder",), Point(6.5, 4.5), queued=True)).accepted
-    assert builder.repair_target_id is None and builder.reclaim_target_id is None
-    assert builder.move_target == Point(6.5, 4.5)
-    simulation.advance(80)
+    assert (
+        builder.repair_target_id if work == "repair" else builder.reclaim_target_id
+    ) == "factory"
+    assert builder.move_target != Point(6.5, 4.5)
+    simulation.advance(160)
     assert builder.position == Point(6.5, 4.5)
-    assert simulation.entities["factory"].health == 200
+    if work == "repair":
+        assert simulation.entities["factory"].health == EntityKind.FACTORY.profile.max_health
+    else:
+        assert "factory" not in simulation.entities
 
 
 def test_queued_movement_runs_fifo_survives_save_and_replays_and_can_be_replaced() -> None:
@@ -200,11 +205,11 @@ def test_queued_movement_runs_fifo_survives_save_and_replays_and_can_be_replaced
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
     assert simulation.execute(MoveCommand(("builder",), Point(20.5, 18.5), queued=True)).accepted
     assert simulation.execute(MoveCommand(("builder",), Point(24.5, 18.5), queued=True)).accepted
-    pending = list(simulation.entities["builder"].move_queue)
+    pending = list(simulation.entities["builder"].order_queue)
     assert not simulation.execute(MoveCommand(("builder", "missing"), Point(10, 10))).accepted
-    assert simulation.entities["builder"].move_queue == pending
+    assert simulation.entities["builder"].order_queue == pending
     assert simulation.execute(StopCommand(("builder",))).accepted
-    assert not simulation.entities["builder"].move_queue
+    assert not simulation.entities["builder"].order_queue
     assert not simulation.entities["builder"].path
 
 

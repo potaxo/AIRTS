@@ -13,6 +13,7 @@ from airts.contracts.automations import (
     DefendParameters,
     PatrolParameters,
     RepairPhase,
+    patrol_arrival_radius,
     reinforcement_parameters,
     repair_parameters,
     target_center,
@@ -359,7 +360,6 @@ def drive_patrol(
 ) -> None:
     parameters = _patrol_parameters(automation)
     ordered = sorted(automation.entity_ids)
-    indices = {key: index for index, key in enumerate(ordered)}
     radius = max(collision_radius(simulation.entities[key].kind) for key in ordered)
     _, enemy_index = queries.patrol_index(simulation, automation.owner_id, parameters.target)
     enemies = queries.patrol_enemies[automation.owner_id]
@@ -470,6 +470,21 @@ def drive_patrol(
                 )
                 continue
         entity.state = UnitState.PATROLLING
+    travelers = [
+        simulation.entities[key]
+        for key in ordered
+        if simulation.assignments.get(key) == automation.automation_id
+        and not simulation.entities[key].pursue_target
+        and simulation.entities[key].repair_target_id is None
+    ]
+    center = (
+        Point(
+            sum(entity.position.x for entity in travelers) / len(travelers),
+            sum(entity.position.y for entity in travelers) / len(travelers),
+        )
+        if travelers
+        else None
+    )
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
     for key in scheduled_entity_ids(simulation, automation):
         if simulation.assignments.get(key) != automation.automation_id:
@@ -480,12 +495,15 @@ def drive_patrol(
                 parameters.waypoints
             )
             anchor = parameters.waypoints[previous_index]
-            next_anchor = parameters.waypoints[(previous_index + 1) % len(parameters.waypoints)]
-            tolerance = min(
-                max(0.75, collision_radius(entity.kind) * 2),
-                anchor.distance_to(next_anchor) * 0.35,
+            tolerance = patrol_arrival_radius(
+                parameters.waypoints, previous_index, radius, len(ordered)
             )
-            if entity.position.distance_to(entity.move_target or anchor) <= tolerance:
+            distance = entity.position.distance_to(anchor)
+            if distance <= tolerance + 1e-9 or (
+                center is not None
+                and center.distance_to(anchor) <= tolerance + 1e-9
+                and distance <= tolerance * 2 + 1e-9
+            ):
                 entity.path.clear()
                 entity.move_target = None
                 movement.reset_movement_liveness(entity)
@@ -506,13 +524,22 @@ def drive_patrol(
             break
         waypoint_index = parameters.waypoint_indices.get(key, 0)
         anchor = parameters.waypoints[waypoint_index]
-        target = (
-            simulation._gathering_slots(PointTarget(anchor), len(ordered), radius)[indices[key]]
-            if len(ordered) > 1
-            else anchor
-        )
         try:
-            paths = movement.plan_group_paths(simulation, (key,), {key: target}, shared_goal=anchor)
+            blocked = simulation._building_cells()
+            goals = simulation._routes.arrival_goals(
+                anchor,
+                patrol_arrival_radius(parameters.waypoints, waypoint_index, radius, len(ordered)),
+                radius,
+                blocked,
+            )
+            if not goals:
+                raise PathfindingError(f"NO_PATROL_APPROACH:{waypoint_index}")
+            target = min(goals, key=entity.position.distance_to)
+            path = simulation._routes.segment_path(entity.position, target, blocked)
+            if path is None:
+                target, path = simulation._routes.shared_path_to_any(
+                    entity.position, goals, blocked
+                )
         except PathfindingError as error:
             automation_lifecycle.transition(
                 simulation, automation, AutomationStatus.BLOCKED, str(error)
@@ -520,7 +547,7 @@ def drive_patrol(
             return
         parameters.waypoint_indices[key] = (waypoint_index + 1) % len(parameters.waypoints)
         movement.start_path(
-            simulation, entity, target, paths[key], automation.automation_id, UnitState.PATROLLING
+            simulation, entity, target, path, automation.automation_id, UnitState.PATROLLING
         )
 
 

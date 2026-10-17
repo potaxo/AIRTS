@@ -120,6 +120,7 @@ class AttackCommand:
     entity_ids: tuple[str, ...]
     target_entity_id: str
     owner_id: str = "player"
+    queued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +128,7 @@ class RepairBuildingCommand:
     entity_ids: tuple[str, ...]
     target_entity_id: str
     owner_id: str = "player"
+    queued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +490,11 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "entity_ids": list(command.entity_ids),
             "target_entity_id": command.target_entity_id,
             "owner_id": command.owner_id,
+            **(
+                {"queued": True}
+                if isinstance(command, AttackCommand | RepairBuildingCommand) and command.queued
+                else {}
+            ),
         }
     if isinstance(command, StopCommand | HoldPositionCommand):
         return {
@@ -680,17 +687,18 @@ def command_from_dict(raw_data: object) -> Command:
             queued=_boolean(data.get("queued", False), "queued"),
         )
     if command_type in {"attack", "repair_building", "reclaim_building"}:
-        command_class = (
-            AttackCommand
-            if command_type == "attack"
-            else RepairBuildingCommand
-            if command_type == "repair_building"
-            else ReclaimBuildingCommand
-        )
-        return command_class(
-            _entity_ids(data.get("entity_ids")),
-            _string(data.get("target_entity_id"), "target_entity_id"),
+        entity_ids = _entity_ids(data.get("entity_ids"))
+        target_id = _string(data.get("target_entity_id"), "target_entity_id")
+        if command_type == "reclaim_building":
+            return ReclaimBuildingCommand(entity_ids, target_id, owner_id)
+        queued = _boolean(data.get("queued", False), "queued")
+        if command_type == "attack":
+            return AttackCommand(entity_ids, target_id, owner_id, queued=queued)
+        return RepairBuildingCommand(
+            entity_ids,
+            target_id,
             owner_id,
+            queued=queued,
         )
     if command_type in {"stop", "hold_position"}:
         entity_ids = _entity_ids(data.get("entity_ids"))

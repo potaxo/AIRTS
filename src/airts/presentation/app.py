@@ -71,6 +71,7 @@ from airts.presentation.palette import match_color
 from airts.presentation.rendering import RendererBackend, SoftwareRenderer
 from airts.presentation.ui import automations, menus, saves, selection, theme
 from airts.presentation.ui.drawing import UiPainter
+from airts.presentation.ui.minimap import Minimap
 from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
 from airts.systems import construction
@@ -132,6 +133,8 @@ class AirtsApp:
         self.renderer_backend = renderer_backend
         self.lobby: Lobby | None = Lobby() if show_lobby else None
         self.camera = Camera()
+        self.minimap = Minimap()
+        self._minimap_dragging = False
         self.facing = FacingHistory()
         self.mode = InputMode.SELECT
         self.selected_entities: set[str] = set()
@@ -232,13 +235,14 @@ class AirtsApp:
         left_width = max(200, round(self.LEFT_PANEL_WIDTH * self.ui_scale))
         right_width = max(280, round(self.RIGHT_PANEL_WIDTH * self.ui_scale))
         command_height = max(82, round(self.COMMAND_BAR_HEIGHT * self.ui_scale))
-        center_width = max(280, width - left_width - right_width)
+        center_width = max(1, width - left_width - right_width)
         self.left_panel_rect = pygame.Rect(0, 0, left_width, height)
         self.right_panel_rect = pygame.Rect(width - right_width, 0, right_width, height)
         self.canvas_rect = pygame.Rect(left_width, 0, center_width, height - command_height)
         self.command_bar_rect = pygame.Rect(
             left_width, height - command_height, center_width, command_height
         )
+        self.minimap.layout(self.canvas_rect, self.simulation.game_map, self.ui_scale)
         self.camera.reset_view(
             self.canvas_rect, (self.simulation.game_map.width, self.simulation.game_map.height)
         )
@@ -301,6 +305,14 @@ class AirtsApp:
     def pan_camera(self, dx: float, dy: float) -> None:
         self.camera.pan(dx, dy, self.canvas_rect, self.map_pixel_size)
 
+    def _center_from_minimap(self, position: tuple[int, int]) -> None:
+        game_map = self.simulation.game_map
+        self.camera.center_on(
+            self.minimap.world_point(position, game_map),
+            self.canvas_rect,
+            (game_map.width, game_map.height),
+        )
+
     def _move_camera_from_keys(self, seconds: float) -> None:
         if (
             self.lobby is not None
@@ -346,7 +358,9 @@ class AirtsApp:
         self.notice = "Match started. Build extractors on the red resource sites."
 
     def _in_canvas(self, position: tuple[int, int]) -> bool:
-        return self.canvas_rect.collidepoint(position)
+        return self.canvas_rect.collidepoint(position) and not self.minimap.panel.collidepoint(
+            position
+        )
 
     def run(self, max_frames: int | None = None) -> None:
         display_initialized = False
@@ -513,6 +527,7 @@ class AirtsApp:
             return
         if event.type == pygame.WINDOWFOCUSLOST:
             self._camera_keys.clear()
+            self._minimap_dragging = False
             self.building_line_draft = None
             return
         if self.save_panel.open and event.type not in {
@@ -667,6 +682,17 @@ class AirtsApp:
             if button == 1:
                 self._handle_command_click(position)
             return
+        if self.minimap.panel.collidepoint(position):
+            if (
+                button == 1
+                and self.minimap.map_rect.collidepoint(position)
+                and not self.help_open
+                and not self.settings_open
+                and self.naming_reference_id is None
+            ):
+                self._minimap_dragging = True
+                self._center_from_minimap(position)
+            return
         if button == 2 and self._in_canvas(position):
             self._camera_drag_position = position
             return
@@ -785,10 +811,6 @@ class AirtsApp:
                 self.notice = "Enemy units cannot receive orders."
                 return
             entity_ids = tuple(sorted(self.selected_entities))
-            if shift_down:
-                result = self.simulation.execute(MoveCommand(entity_ids, point, queued=True))
-                self.notice = "Movement waypoint queued." if result.accepted else result.reason
-                return
             hits = sorted(
                 (distance, entity.entity_id)
                 for entity in self.simulation.entities.values()
@@ -809,7 +831,8 @@ class AirtsApp:
             )
             click_tick = pygame.time.get_ticks()
             gathering = (
-                last_move_click is not None
+                not shift_down
+                and last_move_click is not None
                 and last_move_click[0] == entity_ids
                 and 0 <= click_tick - last_move_click[2] <= self.DOUBLE_CLICK_MS
                 and last_move_click[1].distance_to(point) * self.tile_size
@@ -833,7 +856,11 @@ class AirtsApp:
                     for key in entity_ids
                     if self.simulation.entities[key].kind.profile.attack_damage > 0
                 )
-                command = AttackCommand(armed or entity_ids, enemy_id)
+                command = (
+                    AttackCommand(armed or entity_ids, enemy_id, queued=shift_down)
+                    if armed or not shift_down
+                    else MoveCommand(entity_ids, point, gathering=True, queued=True)
+                )
             elif (
                 repair_builders
                 and hit is not None
@@ -842,13 +869,17 @@ class AirtsApp:
                 and hit.is_complete
                 and hit.health < hit.kind.profile.max_health
             ):
-                command = RepairBuildingCommand(repair_builders, hit.entity_id)
+                command = RepairBuildingCommand(repair_builders, hit.entity_id, queued=shift_down)
             else:
-                command = MoveCommand(entity_ids, point)
+                command = MoveCommand(entity_ids, point, gathering=shift_down, queued=shift_down)
             result = self.simulation.execute(command)
-            if result.accepted and not gathering:
+            if result.accepted and not gathering and not shift_down:
                 self._last_move_click = (entity_ids, point, click_tick)
-            self.notice = "Command issued." if result.accepted else result.reason
+            self.notice = (
+                ("Command queued." if shift_down else "Command issued.")
+                if result.accepted
+                else result.reason
+            )
             return
         if button != 1:
             return
@@ -863,6 +894,12 @@ class AirtsApp:
     def _handle_mouse_motion(
         self, position: tuple[int, int], buttons: tuple[bool, bool, bool]
     ) -> None:
+        if self._minimap_dragging:
+            if buttons[0] and not (self.settings_open or self.help_open or self.save_panel.open):
+                self._center_from_minimap(position)
+            else:
+                self._minimap_dragging = False
+            return
         if self.ui.font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
             position = (position[0] + origin_x, position[1] + origin_y)
@@ -894,6 +931,9 @@ class AirtsApp:
             self._camera_drag_position = position
 
     def _handle_mouse_up(self, button: int, position: tuple[int, int]) -> None:
+        if button == 1 and self._minimap_dragging:
+            self._minimap_dragging = False
+            return
         if self.ui.font is None and position[0] < self.canvas_rect.width:
             origin_x, origin_y = self.map_origin
             position = (position[0] + origin_x, position[1] + origin_y)
@@ -1490,6 +1530,8 @@ class AirtsApp:
         self.notice = "New game started."
 
     def _clear_selection_state(self) -> None:
+        self._minimap_dragging = False
+        self.minimap.layout(self.canvas_rect, self.simulation.game_map, self.ui_scale)
         self._camera_keys.clear()
         self._last_move_click = None
         self.selected_entities.clear()
@@ -1826,6 +1868,7 @@ class AirtsApp:
         selection.draw_selection(self, screen)
         if self.simulation.game_map.match_slots:
             self._draw_match_status(screen)
+        self.minimap.draw(self, screen)
         automations.draw_details(self, screen)
         if self.settings_open:
             menus.draw_settings(self, screen)
@@ -1880,6 +1923,15 @@ class AirtsApp:
                         refresh_right or refresh_commands
                     ):
                         self._draw_match_status(screen)
+                    if canvas_region.colliderect(self.minimap.panel) and not (
+                        refresh_right or refresh_commands
+                    ):
+                        self.minimap.draw(self, screen)
+                    details = automations.details_rect(self)
+                    if details is not None and canvas_region.colliderect(details):
+                        buttons = self._command_buttons.copy()
+                        automations.draw_details(self, screen)
+                        self._command_buttons[:] = buttons
                 screen.set_clip(previous_clip)
             if refresh_right or refresh_commands:
                 self._draw_interface(screen)
@@ -1948,7 +2000,7 @@ class AirtsApp:
             tuple(self.right_panel_rect),
             tuple(self.canvas_rect),
             tuple(self.command_bar_rect),
-            None,
+            (self.map_origin, self.map_pixel_size),
             (),
             None,
             None if self.lobby is None else (self.lobby.page, tuple(self.lobby.setup)),
@@ -1968,20 +2020,24 @@ class AirtsApp:
             return None
         if self.lobby is not None or self.save_panel.open or previous[-2] != current[-2]:
             return None
-        # A flyout can move with its list row or disappear after completion.
-        # Recompose it together with the underlying canvas to erase old pixels.
-        if self.automation_panel.details_open or previous[26] != current[26]:
-            return None
         changed = {
             index
             for index, (old_value, new_value) in enumerate(zip(previous, current, strict=True))
             if old_value != new_value
         }
+        if changed == {31} and not (self.settings_open or self.help_open):
+            return (self.minimap.panel.copy(),)
+        # A flyout can move with its list row or disappear after completion.
+        # Recompose it together with the underlying canvas to erase old pixels.
+        if self.automation_panel.details_open or previous[26] != current[26]:
+            return None
         left_panel_changes = {1, 2, 4, 5, 6, 13, 22, 26}
         right_panel_changes = {1, 2, 6, 13, 14, 15, 26}
-        if not changed or not changed <= (left_panel_changes | right_panel_changes):
+        if not changed or not changed <= (left_panel_changes | right_panel_changes | {31}):
             return None
         regions: list[pygame.Rect] = []
+        if changed & {1, 2, 6, 31}:
+            regions.append(self.minimap.panel.copy())
         if changed & left_panel_changes:
             if changed & {4, 5, 22, 26}:
                 regions.append(self.left_panel_rect.copy())
@@ -2200,7 +2256,7 @@ class AirtsApp:
             if entity_id in self.simulation.entities
             and (
                 self.simulation.entities[entity_id].path
-                or self.simulation.entities[entity_id].move_queue
+                or self.simulation.entities[entity_id].order_queue
                 or self.simulation.entities[entity_id].pursue_target
             )
         )
@@ -2217,7 +2273,7 @@ class AirtsApp:
             and inspected in self.simulation.entities
             and (
                 self.simulation.entities[inspected].path
-                or self.simulation.entities[inspected].move_queue
+                or self.simulation.entities[inspected].order_queue
                 or self.simulation.entities[inspected].pursue_target
             )
             and inspected not in representatives
@@ -2230,7 +2286,7 @@ class AirtsApp:
 
     @staticmethod
     def simplified_path(entity: Entity) -> tuple[Point, ...]:
-        points = (entity.position, *entity.path, *entity.move_queue)
+        points = (entity.position, *entity.path, *(order.position for order in entity.order_queue))
         if len(points) <= 2:
             return points
         simplified = [points[0]]

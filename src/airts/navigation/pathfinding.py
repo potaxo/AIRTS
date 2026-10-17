@@ -118,6 +118,9 @@ class RoutingService:
         )
         self._centers: dict[Cell, Point] = {}
         self._cells: dict[int, Cell] = {}
+        self._arrival_goal_cache: OrderedDict[
+            tuple[Point, float, float, frozenset[Cell]], tuple[Point, ...]
+        ] = OrderedDict()
 
     @property
     def cached_field_count(self) -> int:
@@ -127,6 +130,44 @@ class RoutingService:
         self._fields.clear()
         self._obstacle_masks.clear()
         self._connected_regions.clear()
+        self._arrival_goal_cache.clear()
+
+    def arrival_goals(
+        self, anchor: Point, distance: float, radius: float, blocked: frozenset[Cell]
+    ) -> tuple[Point, ...]:
+        """Bounded, body-clear entry points for an arrival disk; mobile occupancy is local."""
+        key = anchor, distance, radius, blocked
+        cached = self._arrival_goal_cache.get(key)
+        if cached is not None:
+            self._arrival_goal_cache.move_to_end(key)
+            return cached
+        candidates = [anchor]
+        candidates.extend(
+            Point(x + 0.5, y + 0.5)
+            for y in range(
+                max(0, floor(anchor.y - distance)),
+                min(self.game_map.height, floor(anchor.y + distance) + 1),
+            )
+            for x in range(
+                max(0, floor(anchor.x - distance)),
+                min(self.game_map.width, floor(anchor.x + distance) + 1),
+            )
+        )
+        goals = tuple(
+            sorted(
+                {
+                    point
+                    for point in candidates
+                    if point.distance_to(anchor) <= distance + 1e-9
+                    and self.disc_segment(point, point, blocked, radius)
+                },
+                key=lambda point: (point.distance_to(anchor), point.y, point.x),
+            )
+        )
+        self._arrival_goal_cache[key] = goals
+        if len(self._arrival_goal_cache) > self.maximum_fields * 4:
+            self._arrival_goal_cache.popitem(last=False)
+        return goals
 
     def movement_costs_at(self, positions: FloatArray) -> FloatArray:
         """Batch-sample the shared static terrain costs at continuous body centers."""

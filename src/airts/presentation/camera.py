@@ -47,3 +47,14 @@ class Camera:
             max(minimum_x, min(maximum_x, self.offset.x + dx)),
             max(minimum_y, min(maximum_y, self.offset.y + dy)),
         )
+
+    def center_on(self, point: Point, viewport: pygame.Rect, map_size: tuple[int, int]) -> None:
+        """Center on a world point using the same map bounds as ordinary panning."""
+        origin_x, origin_y = self.origin(viewport, self.pixel_size(viewport, map_size))
+        tile = self.tile_size(viewport, map_size)
+        self.pan(
+            viewport.centerx - origin_x - point.x * tile,
+            viewport.centery - origin_y - point.y * tile,
+            viewport,
+            self.pixel_size(viewport, map_size),
+        )

@@ -52,7 +52,8 @@ submission. Adapters restore authoritative recovery state; scratch, graphs and l
 membership and cleanup; `automation_runtime.py` owns entity initialization and shared formations.
 `automation_control.py` composes these for player pause/resume/cancel; `automation_execution.py`
 advances tasks. `production.py` owns queues, payment and progress; `production_orders.py` assigns
-new units. Shared leaves own validation (`validation.py`), IDs (`entity_registry.py`), spawn clearance
+new units. `unit_orders.py` owns direct FIFO admission and dispatch across movement, attack and repair;
+dispatch reuses the command boundary for target work. Shared leaves own validation (`validation.py`), IDs (`entity_registry.py`), spawn clearance
 (`spawning.py`) and firing approach geometry (`combat_geometry.py`).
 `repair_positions.py` owns service geometry/capacity without importing repair controllers;
 `reclamation.py` owns builder approach and the single removal/refund transaction. Building-line

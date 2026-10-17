@@ -14,9 +14,12 @@ fitting them inside map edges; terrain, buildings or compressed source geometry 
 reachable, separated destination slots. Explicit `gathering` also gathers nearby selections.
 Both ordinary and explicit gathering marches reuse weighted group routing; members split near
 the arrival area, without waiting to restore their original formation. Distances use world cells,
-independently of camera zoom or army size. Queued legs use the preceding queued destination or
-active move goal as their source geometry and validate connectivity without allocating per-slot
-search fields. Mobile units are local colliders, not whole-cell static walls; occupied destinations
+independently of camera zoom or army size. Every queued movement leg gathers, even nearby clicks.
+Queued moves use preceding movement goals as their source geometry; a preceding target order
+instead validates from the unit's current reachable component. Validation does not allocate per-slot
+search fields. Dispatching a queued leg first checks the same cheap direct segment as initial
+group planning; obstacles or slower terrain require the weighted field instead. Mobile units
+are local colliders, not whole-cell static walls; occupied destinations
 may wait. Groups share an approach route before branching.
 
 Actual travel speed is the mobile profile's base speed divided by terrain movement cost.
@@ -55,15 +58,38 @@ These are current execution details, subject to the [engineering change policy](
 - Armed patrollers interrupt for the nearest hostile in their own vision, retain pursuit, then
   resume the interrupted leg after destruction or departure beyond the patrol margin. That margin
   is measured outside the point disk, polyline or filled polygon, not from the moving unit.
-- Patrol members advance independently when near their current route point, without waiting for
-  exact arrival or the rest of the army. Each leg keeps separated approach destinations, with a
-  shared maximum unit radius, and turns near its assigned destination rather than parking there.
+- Line and area patrol members advance independently on entering their current waypoint's
+  arrival disk, without waiting for a fixed station or the rest of the army. The ordinary disk
+  radius is two cells; short legs use 35% of adjacent nonzero leg lengths, with a minimum of
+  0.75 cells, the group's maximum body diameter plus 0.12 cells, or
+  `1.5 * maximum_body_radius * sqrt(member_count)`, whichever is largest. Large armies can
+  pass near a waypoint as a formation instead of feeding every member through a small disk;
+  their ordinary arrival radius expands to this minimum when it exceeds two cells.
+  When the active traveling group's center enters that disk, nearby followers within twice
+  the radius may also continue their dispatched leg. Distant stragglers still approach it.
+  This prevents front ranks circulating in place from blocking the tail outside a small patrol
+  region. Combat/repair interruptions are excluded from the traveling center.
+  Dense generated routes therefore do not recreate a sub-unit arrival bottleneck.
+  A waypoint may lie on terrain or a building when its disk has a reachable, body-clear approach.
+  Validation requires every member to reach each disk; it does not require reaching the center.
+  Members share bounded cached entry points and multi-goal navigation fields, using the group's
+  maximum unit radius. Patrol has no per-member stationary slot/capacity requirement. Static
+  obstacle changes invalidate approach caches; mobile occupancy remains collision work.
   Route admission rotates within the existing budgets, including small regions.
 - Builders patrol to repair the nearest damaged, completed owned building within their vision
   and patrol margin, then resume after full repair or removal. Ownership remains active throughout
   either interruption; pause, cancel and manual replacement stop it through the command boundary.
-- Line defenses spread stations along the line; ordinary area defenses cover the filled region
-  with spatially distributed stations. Explicit gathering keeps its compact center-first layout.
+- Line defenses cover their full frontage. When one rank cannot safely fit the army, they add
+  parallel ranks, extending short lines as needed while preserving the line's direction. Partial
+  ranks also span the frontage; neither ordinary nor gathering-marked line defenses become a
+  central or endpoint disk. Safe existing stations survive shared membership changes where possible,
+  with unit-width aisles between ranks and between columns in expanded formations. Casualties
+  retain the shared immutable slot geometry instead of rebuilding the whole surviving formation,
+  and factory reinforcements use the same allocator. Ordinary area defenses cover the filled region
+  with spatially distributed stations. Explicit gathering for points/areas keeps its compact layout.
+  Factory creation and retargeting validate future units with the same line geometry and body
+  clearance as actual deployment. An obstructed midpoint can use a clear parallel rank; a
+  passable midpoint still needs enough space for the produced unit's body.
   Area defenses expand small gathering areas into hexagonal slots with a unit-width aisle.
   Same-owner defenses sharing a target
   retain unique stations across membership changes. Ordinary defenses may expand unsafe deployment
@@ -88,10 +114,19 @@ These are current execution details, subject to the [engineering change policy](
   of an assignment also cancels its existing automatic pursuit. Ordinary in-range firing and explicit
   attack orders remain available. Hold excludes recruitment until another order replaces
   it, even after the micro window expires. Pausing does not consume the window; saves retain its age.
-- Direct movement queues execute FIFO per unit, preserving ordered destinations across saves.
-  The first leg starts through the command boundary; subsequent legs claim the shared routing
-  allowance before background automations, preventing busy defenses from starving player orders.
-  Route failures wait with a diagnostic and retain the pending destination for retry or replacement.
+- Direct orders execute FIFO per unit across movement, attack and builder repair, preserving
+  kind, destination, target identity and shared movement goal across saves. A movement leg must
+  finish before the following job starts; explicit attacks finish when their target disappears,
+  repairs when the building is fully healed. Appending does not interrupt current direct work.
+  Dispatch rotates within a bounded order allowance. Movement claims the shared routing allowance
+  before background automations; activating attack/repair intent leaves routing capacity for those
+  systems' actual paths instead of charging twice. Queued marches share their group goal's weighted
+  approach and branch near their compact destinations. Movement route failures wait with a
+  diagnostic and retain the pending destination. Removed, fully repaired or otherwise invalid
+  queued targets are skipped with an `order_skipped` diagnostic, preserving the FIFO tail.
+  After an attack with pending orders, units continue that queue instead of inserting an extra
+  gathering move at the destroyed target. Existing target gathering remains for attacks without
+  subsequent orders. An ordinary replacement or Stop/Hold clears every pending order kind.
 - In the current combat pass, route admission rotates with the tick and firing uses stable entity
   order. Same-target/range firing rings are shared only within that pass. Projectile impacts remove
   casualties immediately in projectile-ID order; references, affected defense stations and builder

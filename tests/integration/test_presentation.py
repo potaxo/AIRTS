@@ -840,7 +840,7 @@ def test_double_right_click_on_enemy_gathers_instead_of_attacking() -> None:
 @pytest.mark.parametrize(
     "repeat_target", [False, True], ids=["different-points", "rapid-same-point"]
 )
-def test_shift_right_click_queues_waypoints_without_changing_selection_or_attacking(
+def test_shift_right_click_queues_context_orders_without_changing_selection(
     repeat_target: bool,
 ) -> None:
     app = AirtsApp(interaction_simulation())
@@ -857,10 +857,15 @@ def test_shift_right_click_queues_waypoints_without_changing_selection_or_attack
     assert app.selected_entities == {"unit", "tank"}
     commands = [entry["command"] for entry in app.simulation.command_history]
     assert len(commands) == 3
-    assert all(command["type"] == "move" and command["queued"] for command in commands)
-    assert not any(command.get("gathering", False) for command in commands)
-    assert all(len(app.simulation.entities[key].move_queue) == 2 for key in app.selected_entities)
-    assert all(app.simulation.entities[key].path for key in app.selected_entities)
+    assert [command["type"] for command in commands] == (
+        ["attack"] * 3 if repeat_target else ["move", "attack", "move"]
+    )
+    assert all(command["queued"] for command in commands)
+    assert all(command.get("gathering") for command in commands if command["type"] == "move")
+    assert all(
+        len(app.simulation.entities[key].order_queue) == (3 if repeat_target else 2)
+        for key in app.selected_entities
+    )
     assert not any(app.simulation.entities[key].pursue_target for key in app.selected_entities)
 
 
@@ -878,7 +883,7 @@ def test_shift_left_click_toggles_selection_without_issuing_movement(clicked: st
     assert all(
         entry["command"]["type"] == "set_selection" for entry in app.simulation.command_history
     )
-    assert not any(entity.move_queue or entity.path for entity in app.simulation.entities.values())
+    assert not any(entity.order_queue or entity.path for entity in app.simulation.entities.values())
 
 
 @pytest.mark.parametrize("friendly_id", ["unit", "factory"], ids=["unit", "building"])

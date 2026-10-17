@@ -9,7 +9,12 @@ import pygame
 import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
-from airts.contracts.automations import AutomationStatus, DefendParameters, patrol_parameters
+from airts.contracts.automations import (
+    AutomationStatus,
+    DefendParameters,
+    patrol_arrival_radius,
+    patrol_parameters,
+)
 from airts.contracts.commands import (
     AttackCommand,
     CreateDefendCommand,
@@ -284,7 +289,17 @@ def test_tiny_patrol_area_follows_route_points_and_keeps_turning_under_crowding(
     concrete = tuple(destination for destination in destinations if destination is not None)
     automation = simulation.automations[result.automation_id or ""]
     parameters = patrol_parameters(automation)
-    assert len(set(concrete)) == len(entity_ids)
+    # Patrol entry points are shared; mobile clearance, rather than a distinct
+    # permanent parking station, separates members throughout the route below.
+    for key, destination in zip(entity_ids, concrete, strict=True):
+        index = (parameters.waypoint_indices[key] - 1) % len(parameters.waypoints)
+        radius = patrol_arrival_radius(
+            parameters.waypoints,
+            index,
+            collision_radius(simulation.entities[key].kind),
+            len(entity_ids),
+        )
+        assert destination.distance_to(parameters.waypoints[index]) <= radius + 1e-9
     visited = {key: set() for key in entity_ids}
     for _ in range(400):
         previous = {key: simulation.entities[key].position for key in entity_ids}

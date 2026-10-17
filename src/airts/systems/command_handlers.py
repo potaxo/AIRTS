@@ -14,7 +14,6 @@ from airts.contracts.automations import (
     RepairParameters,
     RepairPhase,
     assign_formation_slots,
-    build_defend_stations,
     build_patrol_waypoints,
     defend_parameters,
     production_parameters,
@@ -57,10 +56,11 @@ from airts.systems import (
     automation_runtime,
     movement,
     production_orders,
+    unit_orders,
 )
 from airts.systems.assignment_state import state_for_assignment
 from airts.systems.validation import validate_entities, validate_geometry
-from airts.world.entities import UnitState
+from airts.world.entities import OrderKind, UnitOrder, UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -207,7 +207,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
         if automation.kind is AutomationKind.PATROL:
             try:
                 waypoints = build_patrol_waypoints(command.target, simulation.game_map)
-                movement.validate_paths(simulation, tuple(automation.entity_ids), waypoints)
+                movement.validate_patrol_paths(simulation, tuple(automation.entity_ids), waypoints)
             except (ValueError, PathfindingError) as error:
                 return simulation._reject_validation(
                     "modify_automation",
@@ -300,14 +300,9 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
             if geometry_failure is not None:
                 return simulation._reject_validation("modify_automation", geometry_failure)
             try:
-                if isinstance(command.target, PolygonRegion):
-                    simulation._gathering_slots(
-                        command.target,
-                        1,
-                        collision_radius(parameters.current_unit_kind),
-                    )
-                else:
-                    build_defend_stations(command.target, ("preview",), simulation.game_map)
+                production_orders.validate_defense_target(
+                    simulation, command.target, parameters.current_unit_kind
+                )
             except ValueError as error:
                 return simulation._reject_validation(
                     "modify_automation",
@@ -449,22 +444,23 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             ),
         )
     try:
-        continuing = frozenset(
-            key
-            for key in command.entity_ids
+        continuing = (
+            unit_orders.continuing_ids(simulation, command.entity_ids)
             if command.queued
-            and key not in simulation.assignments
-            and not simulation.entities[key].pursue_target
-            and simulation.entities[key].repair_target_id is None
-            and simulation.entities[key].reclaim_target_id is None
-            and (simulation.entities[key].path or simulation.entities[key].move_queue)
+            else frozenset()
         )
         origins = movement.move_origins(simulation, command.entity_ids, continuing=continuing)
-        gathering = command.gathering or movement.is_march(origins, command.target)
+        gathering = (
+            command.queued or command.gathering or movement.is_march(origins, command.target)
+        )
         destinations = simulation._allocate_destinations(
             command.entity_ids, command.target, gathering=gathering, origins=origins
         )
         if command.queued:
+            shared_goal = min(
+                destinations.values(),
+                key=lambda point: (point.distance_to(command.target), point.y, point.x),
+            )
             blocked = simulation._building_cells()
             for key in command.entity_ids:
                 simulation._routes.validate_connection(origins[key], destinations[key], blocked)
@@ -474,6 +470,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                     simulation,
                     replacing,
                     {key: destinations[key] for key in replacing},
+                    shared_goal=shared_goal,
                     compact_approach=gathering,
                 )
                 if replacing
@@ -492,8 +489,9 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                 )
             for key in command.entity_ids:
                 if key in continuing:
-                    simulation.entities[key].move_queue.append(destinations[key])
-                    simulation.entities[key].state = UnitState.MOVING
+                    simulation.entities[key].order_queue.append(
+                        UnitOrder(OrderKind.MOVE, destinations[key], group_goal=shared_goal)
+                    )
             return simulation._accept("move")
         paths = movement.plan_group_paths(
             simulation, command.entity_ids, destinations, compact_approach=gathering
@@ -545,6 +543,20 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
                 "attack",
                 ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
             )
+        if command.queued and not entity.is_movable:
+            return simulation._reject_validation(
+                "attack",
+                ValidationFailure(
+                    ValidationPhase.CAPABILITY, "QUEUED_ATTACK_REQUIRES_MOBILE_UNIT", "entity_ids"
+                ),
+            )
+    if command.queued:
+        unit_orders.append_target_order(
+            simulation,
+            command.entity_ids,
+            UnitOrder(OrderKind.ATTACK, target.selection_position, target.entity_id),
+        )
+        return simulation._accept("attack")
     automation_assignments.manual_override_many(simulation, command.entity_ids)
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
@@ -593,7 +605,7 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
         return simulation._reject_validation("create_patrol", failure)
     try:
         waypoints = build_patrol_waypoints(command.target, simulation.game_map)
-        movement.validate_paths(simulation, command.entity_ids, waypoints)
+        movement.validate_patrol_paths(simulation, command.entity_ids, waypoints)
     except (ValueError, PathfindingError) as error:
         return simulation._reject_validation(
             "create_patrol",
@@ -907,20 +919,13 @@ def _allocate_defend_stations(
     *,
     gathering_point: bool,
 ) -> tuple[dict[str, Point], tuple[Point, ...], bool]:
-    spread = not gathering_point and not isinstance(target, PolylineTarget)
-    if not gathering_point and not spread:
-        stations = build_defend_stations(target, entity_ids, simulation.game_map)
-        if (
-            len(entity_ids) < 2
-            or min(
-                a.distance_to(b)
-                for a, b in zip(
-                    tuple(stations.values()), tuple(stations.values())[1:], strict=False
-                )
-            )
-            >= 1
-        ):
-            return stations, (), False
+    if isinstance(target, PolylineTarget):
+        stations, slots = automation_runtime.allocate_line_defense(simulation, target, entity_ids)
+        expanded = bool(slots)
+        if gathering_point and not slots:
+            slots = tuple(stations.values())
+        return stations, slots, expanded
+    spread = not gathering_point
     radius = max(collision_radius(simulation.entities[key].kind) for key in entity_ids)
     slots = simulation._gathering_slots(target, len(entity_ids), radius, spread=spread)
     stations = assign_formation_slots(

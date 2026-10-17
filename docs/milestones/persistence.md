@@ -34,6 +34,11 @@ owners must be movable Hold units or valid unpaused arrived defenders. Progress 
 its anchor or ordinary next waypoint; malformed intent is rejected, not normalized away.
 Patrol interruptions reuse attack/repair targets and waypoint cursors.
 
+Patrol anchors denote arrival areas with reachable approaches. Saves retain their cursors and
+paths, along with defense stations and deployment slots. Entry-point caches and multi-goal fields
+rebuild after load. Formation geometry and arrival rules are owned by
+[movement](movement.md#patrol-defense-and-combat).
+
 Spatial buckets, numeric scratch, contact graphs/directions/leaders, navigation fields, per-tick
 diagnostics and unfinished-automation query indexes rebuild from authoritative state. Presentation
 history is not saved. Mobile bodies may share occupancy cells; real buildings remain exclusive.
@@ -52,9 +57,9 @@ diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v25 | Current write/read format |
-| Match save v19 | Current write/read format |
-| Sandbox replay v32 / match replay v31 | Current diagnostic formats and exact verification |
+| Sandbox save v27 | Current write/read format |
+| Match save v21 | Current write/read format |
+| Sandbox replay v34 / match replay v33 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves validate cross-field invariants before publishing a world: ownership and references,
@@ -62,8 +67,8 @@ construction sites/payment/progress, production kind/timing/progress, assignment
 recovery, combat targets, upgrade state, income cadence and developer-mode timing. Saved production
 controllers carry at most the latest 128 produced entity IDs; longer input is malformed rather than
 silently truncated. The event log retains the complete production audit trail.
-The retired `congestion_stopped` placeholder and its normalization logic are removed from the current
-entity format; recovery continues through the authoritative movement intent fields above.
+Movement persistence contains active intent and recovery progress. Unused congestion placeholders
+are neither written nor restored; derived navigation and coordination state rebuilds after load.
 
 Income settlement uses the saved tick's global one-second phase. Per-building income timers are
 removed; cached owner totals are derived from complete buildings and their effective tiers on load.
@@ -90,12 +95,15 @@ in-flight shells never predict again after load. Velocity lookup rows and their 
 movement scratch, reconstructed before the next firing pass; no extra history is required in saves.
 Current command recording and exact replay diagnostics remain enabled.
 
-Direct Move now selects compact marching for distant targets and formation micro for nearby
-targets, as owned by [movement](movement.md#orders-and-routing). Queued geometry uses preceding
-goals, and compact routes retain their shared weighted approach until the arrival area. Replay
-tags change because replaying the same click can now produce different paths/events. Save tags
-remain unchanged: allocated goals, paths and FIFO queues already capture the complete intent,
-and loading does not reclassify an active leg. No saved group controller or cache is required.
+Direct Move selects compact marching for distant targets and formation micro for nearby targets;
+Shift movement always gathers, as owned by [movement](movement.md#orders-and-routing). The direct
+FIFO replaces the point-only movement queue with tagged move/attack/repair orders. It stores
+allocated destinations, shared movement goals, target IDs and click positions; current active
+work retains its path and attack/repair target. Target orders keep their positions for route
+display but execute against the referenced entity. Queues validate kind, finite coordinates,
+capabilities, references and assignment conflicts. Earlier save/replay tags are rejected without
+migration; they cannot represent mixed FIFO intent. Navigation fields remain derived, loading
+does not reclassify active legs, and current exact replay diagnostics remain enabled.
 
 Current replays retain external commands and expectations. AI decisions and automatic repair commands
 are regenerated from authoritative state instead of being recorded as duplicate external inputs.

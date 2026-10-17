@@ -46,7 +46,15 @@ from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems import economy
 from airts.systems.movement import CONTACT_WAIT_TICKS
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, UpgradeState
+from airts.world.entities import (
+    Entity,
+    OrderKind,
+    Projectile,
+    ProjectileTrace,
+    UnitOrder,
+    UnitState,
+    UpgradeState,
+)
 from airts.world.map import (
     GameMap,
     MapValidationError,
@@ -59,8 +67,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v25"
-MATCH_SAVE_SCHEMA = "airts-match-save-v19"
+SAVE_SCHEMA = "airts-save-v27"
+MATCH_SAVE_SCHEMA = "airts-match-save-v21"
 
 
 class PersistenceError(ValueError):
@@ -201,7 +209,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
     simulation.assignments = _load_assignments(state.get("assignments"), simulation)
     if any(
         entity.entity_id in simulation.assignments
-        and (entity.move_queue or entity.attack_gather_point is not None)
+        and (entity.order_queue or entity.attack_gather_point is not None)
         for entity in simulation.entities.values()
     ):
         raise PersistenceError("direct movement or attack intent conflicts with automation control")
@@ -282,11 +290,6 @@ def load_simulation_data(raw_data: object) -> Simulation:
     )
     if not simulation._movement_blocked.issubset(simulation.entities):
         raise PersistenceError("movement_blocked references an unknown entity")
-    blocked_ticks = _mapping(state.get("blocked_ticks", {}), "state.blocked_ticks")
-    for entity_id, value in blocked_ticks.items():
-        _integer(value, f"blocked_ticks.{entity_id}", minimum=0)
-    if not set(blocked_ticks).issubset(simulation.entities):
-        raise PersistenceError("blocked_ticks references an unknown entity")
     if state.get("traffic_reservations") is not None:
         raise PersistenceError("traffic reservations are unsupported by current saves")
     if game_map.match_slots:
@@ -578,10 +581,7 @@ def _load_entities(
             None if move_target_raw is None else _point(move_target_raw, "entity.move_target")
         )
         path = [_point(item, "entity.path item") for item in _list(entity.get("path"), "path")]
-        move_queue = [
-            _point(item, "entity.move_queue item")
-            for item in _list(entity.get("move_queue"), "entity.move_queue")
-        ]
+        order_queue = _load_unit_orders(entity.get("order_queue"))
         attack_gather_raw = entity.get("attack_gather_point")
         attack_gather_point = (
             None
@@ -673,10 +673,16 @@ def _load_entities(
             or not game_map.contains(attack_gather_point)
         ):
             raise PersistenceError(f"entity {entity_id} has an invalid attack gathering intent")
-        if move_queue and (hold_anchor is not None or not kind.profile.movable):
-            raise PersistenceError(f"entity {entity_id} cannot carry a movement queue")
-        if any(not game_map.is_passable(point) for point in move_queue):
-            raise PersistenceError(f"entity {entity_id} has an invalid queued movement target")
+        if order_queue and (hold_anchor is not None or not kind.profile.movable):
+            raise PersistenceError(f"entity {entity_id} cannot carry a direct order queue")
+        for order in order_queue:
+            if not game_map.contains(order.position):
+                raise PersistenceError(f"entity {entity_id} has an out-of-map queued order")
+            if order.kind is OrderKind.MOVE and (
+                not game_map.is_passable(order.position)
+                or (order.group_goal is not None and not game_map.is_passable(order.group_goal))
+            ):
+                raise PersistenceError(f"entity {entity_id} has an invalid queued movement target")
         if hold_anchor is not None and (path or move_target is not None or pursue_target):
             raise PersistenceError(
                 "Hold recovery cannot carry an ordinary movement or pursuit order"
@@ -716,7 +722,7 @@ def _load_entities(
             move_target=move_target,
             path=path,
             path_cost=path_cost,
-            move_queue=move_queue,
+            order_queue=order_queue,
             attack_gather_point=attack_gather_point,
             attack_target_id=attack_target_id,
             repair_target_id=_nullable_string(
@@ -749,6 +755,25 @@ def _load_entities(
             upgrade=UpgradeState(tier=tier, remaining_ticks=remaining),
         )
     for loaded_entity in entities.values():
+        for order in loaded_entity.order_queue:
+            if order.kind is OrderKind.MOVE:
+                continue
+            target = entities.get(order.target_entity_id or "")
+            if target is None:
+                raise PersistenceError("queued order has an unknown target")
+            if order.kind is OrderKind.ATTACK:
+                if (
+                    loaded_entity.profile.attack_damage <= 0
+                    or target.owner_id == loaded_entity.owner_id
+                ):
+                    raise PersistenceError("queued attack has an invalid target or attacker")
+            elif (
+                not loaded_entity.profile.can_repair
+                or not target.is_complete
+                or target.category is not EntityCategory.BUILDING
+                or target.owner_id != loaded_entity.owner_id
+            ):
+                raise PersistenceError("queued repair has an invalid target or builder")
         if loaded_entity.reclaim_target_id is not None:
             target = entities.get(loaded_entity.reclaim_target_id)
             if (
@@ -792,6 +817,26 @@ def _load_entities(
     if not entities:
         raise PersistenceError("saved state must contain at least one entity")
     return entities
+
+
+def _load_unit_orders(value: object) -> list[UnitOrder]:
+    orders = []
+    for raw in _list(value, "entity.order_queue"):
+        data = _mapping(raw, "entity.order_queue item")
+        try:
+            kind = OrderKind(_string(data.get("kind"), "queued order.kind"))
+        except ValueError as error:
+            raise PersistenceError("queued order has an invalid kind") from error
+        position = _point(data.get("position"), "queued order.position")
+        target = _nullable_string(data.get("target_entity_id"), "queued order.target_entity_id")
+        goal_raw = data.get("group_goal")
+        group_goal = None if goal_raw is None else _point(goal_raw, "queued order.group_goal")
+        if (kind is OrderKind.MOVE) != (target is None):
+            raise PersistenceError("queued order kind disagrees with its target")
+        if group_goal is not None and kind is not OrderKind.MOVE:
+            raise PersistenceError("only queued movement may carry a group goal")
+        orders.append(UnitOrder(kind, position, target, group_goal))
+    return orders
 
 
 def _build_occupancy(simulation: Simulation) -> OccupancyGrid:

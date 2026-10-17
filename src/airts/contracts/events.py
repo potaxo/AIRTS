@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 class EventType(StrEnum):
+    ORDER_SKIPPED = "order_skipped"
     UPGRADE_STARTED = "upgrade_started"
     UPGRADE_COMPLETED = "upgrade_completed"
     UPGRADE_CANCELED = "upgrade_canceled"

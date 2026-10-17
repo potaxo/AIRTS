@@ -39,6 +39,9 @@ active projectiles update per tick. Concave fills triangulate on edit. Grid/line
 height, text and projectile cores stay fixed in pixels. Construction percentages/region names use
 a cached text atlas. Panels/font textures upload dirty regions; camera changes never dirty the
 whole canvas. Status refreshes in three-tick buckets; explicit interaction remains immediate.
+The minimap caches one terrain texel per cell and its scaled overview; contacts refresh with the
+status bucket or explicit commands/selection. Camera changes update only its small overlay rectangle,
+reusing terrain and contact surfaces and all world GPU buffers. Map replacement releases its sources.
 
 Artillery prediction reads original positions by binary search of the existing sorted movement
 workspace rows, allocating no per-army velocity/index table. It solves one scalar intercept per actual

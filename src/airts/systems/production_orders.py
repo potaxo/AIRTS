@@ -10,7 +10,6 @@ from airts.contracts.automations import (
     DefendParameters,
     PatrolParameters,
     ProductionParameters,
-    build_defend_stations,
     build_patrol_waypoints,
     defend_parameters,
     patrol_parameters,
@@ -21,9 +20,21 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import PolygonRegion, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.systems import automation_assignments, automation_lifecycle, automation_runtime
+from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+def validate_defense_target(
+    simulation: Simulation, target: PolygonRegion | PolylineTarget, unit_kind: EntityKind
+) -> None:
+    """Check future defenders with the same body clearance and geometry as deployment."""
+    radius = collision_radius(unit_kind)
+    if isinstance(target, PolylineTarget):
+        automation_runtime.line_defense_slots(simulation, target, 1, radius)
+    else:
+        simulation._gathering_slots(target, 1, radius)
 
 
 def shared_production_defense(
@@ -112,8 +123,10 @@ def assign_produced_defender(
             )
             stations = {entity_id: slots[0]}
         else:
-            stations = build_defend_stations(target, (entity_id,), simulation.game_map)
-            slots = ()
+            assert isinstance(target, PolylineTarget)
+            stations, slots = automation_runtime.allocate_line_defense(
+                simulation, target, (entity_id,)
+            )
         defend = automation_lifecycle.new_automation(
             simulation,
             AutomationKind.DEFEND,

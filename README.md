@@ -55,6 +55,9 @@ each selected faction's owner, team (in matches), and unit count. With a mixed s
 a type row to narrow the selection to that type and reveal its controls; right-click
 a type row in a mixed selection of your units to remove that type from the selection. The bottom
 command bar shows actions available for the current selection and spatial target, plus **Settings**.
+The battlefield's upper-right minimap shows terrain, gold resource sites, and every army in team
+colors (green friendly/red enemy in the sandbox). Squares mark buildings; small dots mark units,
+with pale outlines for selected entities. The pale rectangle shows the camera's current view.
 
 ## Controls
 
@@ -68,7 +71,7 @@ Art locations, regeneration and replacement are documented in the
 | --- | --- |
 | `1` | Selection mode: click an entity, point, route, or region; drag to select units |
 | `Shift` + left-click or selection drag | Toggle additions to the selection |
-| `Shift` + right-click with selected units | Append a movement waypoint; units follow clicks in order, including clicks on enemies |
+| `Shift` + right-click with selected units | Append an order: ground gathers and moves, enemies are attacked, damaged owned buildings are repaired by builders; finish each order before the next |
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
 | Right-click ground or a friendly entity | Nearby: preserve formation; beyond 12 cells from the group center: gather and march along shared routes |
@@ -77,6 +80,7 @@ Art locations, regeneration and replacement are documented in the
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
 | Middle-drag | Pan the map |
+| Left-click or left-drag on the minimap | Center the camera on that location, including while paused |
 | Mouse wheel over the map | Zoom around the cursor, from the full-map view up to 32 pixels per cell |
 | `Space` or Pause/Resume | Pause or resume simulation time |
 | `Esc` | Clear selection, spatial target, placement, and inspection; return to selection mode |
@@ -114,7 +118,8 @@ Changing the new-area switch does not change existing assignments; disabling an 
 switch prevents future automatic retreats and lets repairs already underway finish.
 
 Direct orders override the selected units' current automation and pending construction/movement
-queues; other members keep working. Shift movement appends to an existing direct movement route.
+queues; other members keep working. Shift orders append to direct movement, attack, repair, or
+reclamation already in progress. Every Shift movement leg gathers, including nearby clicks.
 Successful player unit orders also prevent automatic combat support from taking over those units
 for five seconds of game time; each new order restarts this micro window. Hold units never join
 automatic support until another order replaces Hold. Units can still fire at enemies in range.

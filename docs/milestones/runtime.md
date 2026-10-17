@@ -22,7 +22,7 @@ Exact schemas/profiles live in their code owners.
 
 [commands.py](../../src/airts/contracts/commands.py) owns tagged commands, validation and control claims;
 [automations.py](../../src/airts/contracts/automations.py) owns parameters and legal lifecycle transitions.
-Move (including FIFO queued waypoints), stop, hold, attack, spatial edits, and automation actions
+Move, FIFO direct orders, stop, hold, attack, spatial edits, and automation actions
 share the same validation rules.
 Failures identify their operation, subject, and reason; no invalid proposal silently changes state.
 
@@ -31,9 +31,11 @@ explicit repair. Direct control detaches units, records override, and leaves rem
 working. Creating a new patrol/defend on explicitly selected units replaces their older ordinary
 assignment even at lower priority. Background claims use emergency status, priority, and recency.
 Replacement also removes selected builders from waiting construction jobs while preserving other
-builders' membership and progress. Rejected commands retain prior intent. Queued movement appends
-to direct movement; the first queued move replaces another controlling order. New ordinary orders
-clear selected units' movement queues.
+builders' membership and progress. Rejected commands retain prior intent. Shift-right-click queues
+contextual direct movement, attack or builder repair. Finite direct movement, attack, repair and
+reclamation finish before pending orders start; persistent automation is replaced by the first
+queued direct order. New ordinary orders clear the selected units' entire direct-order queues.
+Movement, attack and repair share one ordered queue rather than separate queues per activity.
 Empty ordinary work is canceled; valid future-unit sources may wait. Terminal work leaves live UI.
 Manual factory override pauses its controller; resume must reclaim the factory.
 
@@ -154,6 +156,8 @@ and attaches only subsequently produced units to a shared production defense. Pr
 with the same owner and exact spatial target join one live controller, with one assembly circle and
 one entry under Units for inspection, pause/resume, auto-repair and cancellation. Polygons gather;
 polylines spread along the line. Ordinary manually created defenses and other owners stay separate.
+Future-unit target validation shares the deployment rules owned by
+[movement](movement.md#patrol-defense-and-combat), both on creation and retargeting.
 Retargeting a factory affects only its future units; already produced units keep their orders.
 Editing the shared controller's target or auto-repair updates every linked source. Joining an
 existing controller inherits its auto-repair setting; an explicit auto-repair edit changes the group.

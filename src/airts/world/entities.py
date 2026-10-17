@@ -37,6 +37,32 @@ class UpgradeState:
     remaining_ticks: int = 0
 
 
+class OrderKind(StrEnum):
+    MOVE = "move"
+    ATTACK = "attack"
+    REPAIR = "repair"
+
+
+@dataclass(frozen=True, slots=True)
+class UnitOrder:
+    """One pending direct order, with a position for route geometry and display."""
+
+    kind: OrderKind
+    position: Point
+    target_entity_id: str | None = None
+    group_goal: Point | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "position": [self.position.x, self.position.y],
+            "target_entity_id": self.target_entity_id,
+            "group_goal": (
+                None if self.group_goal is None else [self.group_goal.x, self.group_goal.y]
+            ),
+        }
+
+
 @dataclass(slots=True)
 class Entity:
     entity_id: str
@@ -48,7 +74,7 @@ class Entity:
     move_target: Point | None = None
     path: list[Point] = field(default_factory=list)
     path_cost: float = 0.0
-    move_queue: list[Point] = field(default_factory=list)
+    order_queue: list[UnitOrder] = field(default_factory=list)
     attack_gather_point: Point | None = None
     last_player_control_tick: int | None = None
     attack_target_id: str | None = None
@@ -142,7 +168,7 @@ class Entity:
             ),
             "path": [[point.x, point.y] for point in self.path],
             "path_cost": self.path_cost,
-            "move_queue": [[p.x, p.y] for p in self.move_queue],
+            "order_queue": [order.to_dict() for order in self.order_queue],
             "attack_gather_point": (
                 None
                 if self.attack_gather_point is None
@@ -180,9 +206,6 @@ class Entity:
                 else [list(cell) for cell in sorted(self.recovery_blocked_cells)]
             ),
         }
-
-
-Unit = Entity
 
 
 @dataclass(slots=True)

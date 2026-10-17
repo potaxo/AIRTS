@@ -13,6 +13,26 @@ from airts.navigation.pathfinding import PathfindingError, RoutingService, passa
 from airts.world.map import GameMap, load_map_data
 
 
+def test_arrival_area_uses_body_clear_goals_and_bounds_its_cache(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1), maximum_fields=2)
+    anchor = Point(5.5, 5.5)
+    blocked = frozenset({(5, 5)})
+    goals = router.arrival_goals(anchor, 2, 0.45, blocked)
+    assert goals and anchor not in goals
+    assert all(point.distance_to(anchor) <= 2 for point in goals)
+    assert all(router.disc_segment(point, point, blocked, 0.45) for point in goals)
+    assert not router.arrival_goals(anchor, 0.2, 0.45, blocked)
+    for index in range(20):
+        router.arrival_goals(Point(1.5 + index % 8, 1.5 + index // 8), 2, 0.45, blocked)
+        assert len(router._arrival_goal_cache) <= router.maximum_fields * 4
+    assert router.arrival_goals(anchor, 2, 0.45, blocked) == goals
+    assert anchor in router.arrival_goals(anchor, 2, 0.45, frozenset())
+    router.clear()
+    assert not router._arrival_goal_cache
+
+
 def test_batch_terrain_costs_sample_centers_and_reject_invalid_coordinates() -> None:
     game_map = load_map_data(
         {

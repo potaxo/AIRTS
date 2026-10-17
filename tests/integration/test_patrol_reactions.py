@@ -2,14 +2,18 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+from tests.integration.recovery_checks import RecoveryChecks
 
 from airts.adapters.persistence import PersistenceError, load_simulation, save_simulation
 from airts.adapters.replay import capture_replay, run_replay
-from airts.contracts.automations import patrol_parameters
+from airts.contracts.automations import patrol_arrival_radius, patrol_parameters
 from airts.contracts.commands import (
     CancelAutomationCommand,
     CreatePatrolCommand,
+    HoldPositionCommand,
+    ModifyAutomationCommand,
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
@@ -24,6 +28,7 @@ from airts.contracts.spatial import (
     distance_to_target,
     rectangle_region,
 )
+from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems.automation_execution import AutomationQueries
 from airts.world.entities import UnitState
@@ -60,6 +65,133 @@ def patrol_simulation(kind: str = "scout", *, enemy_x: float = 11.5) -> Simulati
 
 
 ROUTE = PolylineTarget((Point(4.5, 4.5), Point(20.5, 4.5)))
+
+
+def obstructed_patrol(
+    count: int, obstacle: str
+) -> tuple[Simulation, tuple[str, ...], PolylineTarget]:
+    ids = tuple(f"patroller_{i:03d}" for i in range(count))
+    entities = [
+        {"id": key, "kind": "scout", "position": [3.5 + i % 8 * 1.2, 5.5 + i // 8 * 1.2]}
+        for i, key in enumerate(ids)
+    ]
+    if obstacle == "building":
+        entities.append({"id": "obstacle", "kind": "factory", "position": [24, 14]})
+    elif obstacle == "occupied":
+        entities.append({"id": "obstacle", "kind": "heavy_tank", "position": [24.5, 15.5]})
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "obstructed_patrol",
+                "name": "Obstructed patrol",
+                "width": 60,
+                "height": 32,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [[24, 15, 1, 1, obstacle]]
+                    if obstacle in {"rock", "water"}
+                    else [],
+                },
+                "entities": entities,
+            }
+        )
+    )
+    if obstacle == "occupied":
+        assert simulation.execute(HoldPositionCommand(("obstacle",))).accepted
+    return simulation, ids, PolylineTarget((Point(8.5, 15.5), Point(24.5, 15.5), Point(40.5, 15.5)))
+
+
+@pytest.mark.parametrize("count", [1, 48])
+@pytest.mark.parametrize("obstacle", ["rock", "water", "building", "occupied"])
+@pytest.mark.parametrize("area", [False, True], ids=["line", "area"])
+def test_patrol_visits_nearby_areas_when_exact_vertices_are_blocked(
+    count: int, obstacle: str, area: bool
+) -> None:
+    simulation, ids, route = obstructed_patrol(count, obstacle)
+    target = (
+        PolygonRegion((Point(24.5, 15.5), Point(40.5, 15.5), Point(40.5, 27.5), Point(24.5, 27.5)))
+        if area
+        else route
+    )
+    result = simulation.execute(CreatePatrolCommand(ids, target))
+    assert result.accepted, result.reason
+    parameters = patrol_parameters(simulation.automations[result.automation_id or ""])
+    arrivals = tuple(
+        (
+            point,
+            patrol_arrival_radius(parameters.waypoints, index, 0.3, count)
+            * (2 if count > 1 else 1),
+        )
+        for index, point in enumerate(parameters.waypoints)
+    )
+    members = tuple(key for key, entity in simulation.entities.items() if entity.is_movable)
+    oracle = RecoveryChecks(simulation, members)
+    before = np.array(
+        [
+            (simulation.entities[key].position.x, simulation.entities[key].position.y)
+            for key in members
+        ]
+    )
+    visited: dict[str, set[int]] = {key: set() for key in ids}
+    blocked = simulation._building_cells()
+    for _ in range(max(600, len(arrivals) * 50)):
+        previous = {key: simulation.entities[key].position for key in members}
+        before, _ = oracle.advance(before)
+        for key in members:
+            entity = simulation.entities[key]
+            assert simulation._routes.disc_segment(
+                previous[key], entity.position, blocked, collision_radius(entity.kind) - 1e-8
+            )
+        for key in ids:
+            for index, (point, distance) in enumerate(arrivals):
+                if simulation.entities[key].position.distance_to(point) <= distance + 1e-9:
+                    visited[key].add(index)
+        assert simulation.automation_route_count <= Simulation.TOTAL_AUTOMATION_ROUTE_BUDGET
+    assert all(len(points) == len(arrivals) for points in visited.values()), visited
+    assert simulation.automations[result.automation_id or ""].status.value == "active"
+    assert simulation.navigation_field_build_count <= 2 * len(parameters.waypoints)
+    if obstacle == "occupied":
+        assert simulation.entities["obstacle"].state is UnitState.HOLDING
+
+
+def test_blocked_patrol_regions_modify_save_and_replay(tmp_path: Path) -> None:
+    simulation, ids, route = obstructed_patrol(3, "building")
+    result = simulation.execute(CreatePatrolCommand(ids, PointTarget(Point(8, 8))))
+    assert simulation.execute(
+        ModifyAutomationCommand(result.automation_id or "", target=route)
+    ).accepted
+    simulation.advance(30)
+    destination = tmp_path / "nearby-patrol.json"
+    save_simulation(simulation, destination)
+    restored = load_simulation(destination)
+    simulation.advance(180)
+    restored.advance(180)
+    assert restored.export_state() == simulation.export_state()
+    assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
+
+
+def test_patrol_rejects_unreachable_regions_without_taking_control() -> None:
+    simulation, ids, _ = obstructed_patrol(1, "rock")
+    route = PolylineTarget((Point(8.5, 15.5), Point(80, 15.5)))
+    assert not simulation.execute(CreatePatrolCommand(ids, route)).accepted
+    assert not simulation.assignments
+    isolated = Simulation(
+        load_map_data(
+            {
+                "id": "isolated_patrol",
+                "name": "Isolated patrol",
+                "width": 32,
+                "height": 20,
+                "terrain": {"default": "grass", "rectangles": [[14, 0, 3, 20, "water"]]},
+                "entities": [{"id": "unit", "kind": "scout", "position": [4.5, 10.5]}],
+            }
+        )
+    )
+    rejected = isolated.execute(
+        CreatePatrolCommand(("unit",), PolylineTarget((Point(5.5, 10.5), Point(25.5, 10.5))))
+    )
+    assert not rejected.accepted and "NO_PATH_TO_PATROL_AREA" in rejected.reason
+    assert not isolated.assignments
 
 
 @pytest.mark.parametrize("count", [48, 96])
@@ -120,7 +252,12 @@ def test_patrol_chases_beyond_weapon_range_kills_and_replays() -> None:
     assert "enemy" not in simulation.entities
     assert not unit.pursue_target
     assert unit.state is UnitState.PATROLLING
-    assert unit.position.distance_to(Point(4.5, 4.5)) > 5
+    assert any(
+        Point(*event.details["position"]).distance_to(ROUTE.points[1]) <= 2
+        for event in simulation.events.query(
+            event_types=frozenset({EventType.MOVEMENT_COMPLETED}), subject_id="unit"
+        )
+    )
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
@@ -231,7 +368,8 @@ def test_builder_encounters_repairs_and_resumes_interrupted_leg(tmp_path: Path) 
     assert builder.repair_target_id is None
     assert builder.state is UnitState.PATROLLING
     assert any(
-        Point(*event.details["position"]).distance_to(Point(20.5, 4.5)) <= 0.75
+        Point(*event.details["position"]).distance_to(Point(20.5, 4.5))
+        <= patrol_arrival_radius(ROUTE.points, 1, collision_radius(builder.kind))
         for event in simulation.events.query(
             event_types=frozenset({EventType.MOVEMENT_COMPLETED}), subject_id="unit"
         )

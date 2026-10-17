@@ -26,7 +26,9 @@ system/developer instructions and tool permissions.
    authorization is absent. Boundaries/types/tests need no approval. Continue independent
    authorized work while awaiting an answer; retain authorization already given in the conversation.
 3. Reuse meaningful tests; add coverage only for uncovered behavior. Follow
-   [test ownership](docs/architecture/engineering.md#test-ownership).
+   [test ownership](docs/architecture/engineering.md#test-ownership). When replacing behavior,
+   trace its callers, state, tests and documentation; remove retired paths and descriptions in
+   the same change. Verify current callers/contracts before deleting code.
 4. Run required validation. Report the outcome, key decisions, results, and remaining uncertainty
    concisely in the user's language.
 
@@ -36,16 +38,14 @@ conflict. Distinguish an explicit requirement from an interpretation; do not inv
 Preserve the public `Simulation` facade, shared command boundary, renderer-independent headless core,
 and [dependency direction](docs/architecture/engineering.md#ownership). Keep changes focused;
 no speculative abstractions, silent error swallowing, or fallbacks that conceal failure.
-Follow [product priorities](docs/design.md#product-priorities) and
-[save/replay policy](docs/milestones/persistence.md#save-reliability-and-replay-policy) when changing
-execution. Exact replay equality is not a prerequisite for authorized gameplay or performance
-changes; handle affected diagnostics and tests under the engineering change policy.
-Fix root causes and provide useful diagnostics. Prioritize the latest implementation and optimization;
-do not preserve old save compatibility or add save migrations. Follow the current-format-only
-[save policy](docs/milestones/persistence.md#supported-formats).
-For a requested rewrite, define replacement scope, save schema/rejection policy and replay diagnostic
-impact in the owning document as part of the work; ask only for consequential choices that the request
-and existing contracts do not resolve.
+Follow [product priorities](docs/design.md#product-priorities), the
+[engineering change policy](docs/architecture/engineering.md#change-policy), and the current-format-only
+[save/replay policy](docs/milestones/persistence.md#supported-formats). Fix root causes and provide useful
+diagnostics. Preserve current-format restoration; do not add old-save compatibility or migrations.
+Exact replay equality is not a prerequisite for authorized gameplay/performance changes; retain useful
+diagnostics and update affected tests under the owner policy. For a rewrite, document replacement scope
+and save/replay consequences. Apply the owner's versioning criteria rather than bumping schemas for
+every cleanup. Ask only for consequential choices unresolved by the request or existing contracts.
 
 ## Git and outputs
 
@@ -57,8 +57,18 @@ PRs unless requested. Put validation artifacts under ignored `outputs/` when nee
 
 ## Validation
 
-Choose validation based on this task's changes, not unrelated pre-existing worktree changes.
-For coding or test/config changes, run from the repository root:
+Choose validation from the current task's changes and their impact, not unrelated pre-existing
+worktree changes. Use these local requirements; packaging CI may run broader checks.
+
+| Change | Required validation |
+| --- | --- |
+| Documentation only | Verify affected facts/links and run the documentation structure test below |
+| Executable source | Ruff lint/format, mypy, focused tests while iterating, then a complete functional pytest run |
+| Tests only | Ruff lint/format and affected tests; run full functional pytest for shared-fixture, collection or selection changes |
+| Tool/dependency configuration | Run the affected tools and tests; use full functional pytest when test collection, shared execution or runtime behavior can change |
+| Dependency or environment changes | Also run `pip check` after installing/updating declared dependencies |
+
+Command reference, from the repository root (the table determines which apply):
 
 - `.\.venv\Scripts\python -m ruff check .`
 - `.\.venv\Scripts\python -m ruff format --check .`
@@ -66,27 +76,42 @@ For coding or test/config changes, run from the repository root:
 - `.\.venv\Scripts\python -m pytest`
 - `.\.venv\Scripts\python -m pip check`
 
-Default pytest selection excludes the `performance` marker. Mixed workload tests still run their
-full behavior variant, including collision/route operation budgets; hardware and wall-clock gates
-run explicitly with `.\.venv\Scripts\python -m pytest -m performance` on the designated native-Windows
-acceptance machine. Run this selection when a change affects measured workloads, timing or their
-configuration; otherwise report hardware performance as unverified. To run every functional and
-performance variant together, use `-m "performance or not performance"`. Selecting a path alone
-does not override the default marker filter.
+Batch related edits and focused checks before the final full functional run. After that run,
+small corrections may use affected tests; rerun the full suite when changes have cross-system
+impact or focused checks cannot bound the risk. State which full run and subsequent targeted
+checks cover the delivered changes; a run before later edits does not prove the final tree passed.
 
-For performance evidence, keep each complete run (including failures) in separate ignored outputs.
+Default pytest excludes the `performance` marker. Mixed workload tests still run their complete
+behavior variant, including collision/route operation budgets. For hot-path, measured-workload or
+timing-configuration changes, and for performance claims, explicitly run the affected timing tests:
+`.\.venv\Scripts\python -m pytest tests/performance/<affected-file>.py -m performance`.
+Use the complete `-m performance` selection for broad performance impact or full acceptance;
+do not run unrelated timing workloads automatically for every local edit. Hardware acceptance
+uses native Windows meeting the [performance owner's requirements](docs/milestones/performance.md);
+record the tested environment and report unavailable hardware checks as unverified. Packaging CI
+does not certify target hardware. To include all variants, use `-m "performance or not performance"`;
+selecting a path alone does not override the default marker filter.
+
+Run timing measurements serially, without concurrent resource-heavy validation. Plan a bounded
+set of comparable runs (usually two for repeatability); retain every result, not only the best.
+Investigate a failure with diagnostics and a comparable baseline where needed. Reuse applicable
+evidence while code, workload and environment remain comparable; do not repeatedly reproduce the
+same known failure without a new change or hypothesis. A pre-existing failure is not a pass and
+does not prove there is no new regression. Fix task-introduced regressions; report unrelated
+remaining failures without automatically expanding the task into a separate optimization project.
+
+Keep each complete performance run (including failures) in separate ignored outputs.
 For JUnit properties use `-o junit_family=xunit1 --junitxml=outputs/<run-name>.xml`; the parent directory
-must exist. Report repeated-run results rather than retrying until one passes or taking only the best.
-The performance owner defines gates; generic Windows packaging CI does not certify target hardware.
+must exist. The performance owner defines gates; do not change workloads, metrics or thresholds
+to make cleanup pass.
 
-Behavior changes need a relevant integration or manual test; an integration case in the full
-suite suffices. Use focused tests while iterating and the full suite at completion; avoid repeated
-full runs without a new change/failure to investigate. Never lower performance gates for cleanup.
+Behavior changes need a relevant integration or manual test; an integration case already run
+in the full suite suffices. Do not require an extra manual session for the same covered behavior.
 Report exact failed/blocked checks and unverified behavior; do not claim an unrun check passed.
 
 For documentation-only edits, verify affected facts/links and run
 `.\.venv\Scripts\python -m pytest tests/architecture/test_documentation_structure.py`.
-The full coding suite is unnecessary unless executable code or tool configuration also changes.
+Unrelated dirty source files do not turn a documentation-only task into a coding task.
 
 ## Documentation
 

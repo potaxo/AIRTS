@@ -212,7 +212,8 @@ def test_camera_uses_gpu_uniforms_without_redrawing_or_uploading_world_feedback(
             feedback.draw(app, app.WINDOW_SIZE)
             build.assert_not_called()
         assert (app.map_origin, app.tile_size) != initial_transform
-        assert app._opengl_overlay_key() == key
+        regions = app._opengl_partial_overlay_regions(key, app._opengl_overlay_key())
+        assert regions == (app.minimap.panel,)
         assert feedback.shapes.write.call_count == uploads
         assert feedback.texture is texture
         assert feedback.shape_program["origin"].value == app.map_origin

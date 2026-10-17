@@ -27,6 +27,13 @@ frame staging, latency and workload gates. Production/selection portraits are no
   frames. [ui/drawing.py](../../src/airts/presentation/ui/drawing.py) paints shared buttons and text;
   scoped panels own layout and actions.
 
+The upper-right tactical overview belongs to
+[ui/minimap.py](../../src/airts/presentation/ui/minimap.py). It uses the terrain palette, team-colored
+unit dots/building squares, gold resource rings, selected-contact outlines and a pale camera frame.
+The aspect-correct map has only a thin border, without title/help bars or letterboxing.
+It follows the current full-visibility battlefield;
+it introduces no observation history or fog rules. README owns its camera controls.
+
 ## Shared style
 
 The battlefield uses muted olive ground, brown roads, blue-gray water and gray stone. Forest

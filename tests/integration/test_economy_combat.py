@@ -253,7 +253,7 @@ def test_destroyed_ordered_target_converts_survivors_to_gathering_and_continues_
             if "enemy" not in world.entities:
                 break
         assert "enemy" not in world.entities
-        assert all(world.entities[key].move_queue for key in ids)
+        assert all(world.entities[key].order_queue for key in ids)
         assert all(world.entities[key].state is UnitState.MOVING for key in ids)
         world.advance(120)
         assert all(world.entities[key].position.distance_to(Point(16.5, 10.5)) < 2 for key in ids)

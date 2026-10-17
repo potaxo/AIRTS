@@ -333,7 +333,7 @@ def test_move_mode_depends_on_distance_and_intent_not_army_size(
 
 
 @pytest.mark.parametrize("distance", [12.0, 12.01])
-def test_move_distance_boundary_and_queued_micro_use_previous_goals(distance: float) -> None:
+def test_move_distance_boundary_and_queued_legs_always_gather(distance: float) -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -360,22 +360,30 @@ def test_move_distance_boundary_and_queued_micro_use_previous_goals(distance: fl
     fields = simulation.navigation_field_build_count
     micro = Point(target.x + 3, target.y)
     assert simulation.execute(MoveCommand(ids, micro, queued=True)).accepted
-    center = Point((a.x + b.x) / 2, (a.y + b.y) / 2)
     for key in ids:
         goal = goals[key]
         assert goal is not None
-        queue = simulation.entities[key].move_queue
+        queue = simulation.entities[key].order_queue
         assert len(queue) == 1
-        assert (
-            queue[0].distance_to(Point(goal.x + micro.x - center.x, goal.y + micro.y - center.y))
-            < 1e-9
-        )
+        assert queue[0].position.distance_to(micro) < 2
+    assert (
+        simulation.entities["a"]
+        .order_queue[0]
+        .position.distance_to(simulation.entities["b"].order_queue[0].position)
+        < 2
+    )
     # Validating a queue must not build a map-sized field for each final slot.
     assert simulation.navigation_field_build_count == fields
     assert simulation.execute(MoveCommand(ids, Point(4.5, 18.5), queued=True)).accepted
-    queued = [simulation.entities[key].move_queue[-1] for key in ids]
+    queued = [simulation.entities[key].order_queue[-1].position for key in ids]
     assert queued[0].distance_to(queued[1]) < 2
     assert simulation.navigation_field_build_count == fields
+    _advance_with_clearance(simulation, 200)
+    assert simulation.navigation_field_build_count == fields
+    for key, goal in zip(ids, queued, strict=True):
+        entity = simulation.entities[key]
+        assert not entity.path and not entity.order_queue
+        assert entity.position.distance_to(goal) <= collision_radius(entity.kind) + 1e-8
 
 
 @pytest.mark.parametrize("gathering", [False, True], ids=["single", "double"])
@@ -410,15 +418,21 @@ def test_march_shares_weighted_detour_and_restores_through_save_and_replay(
             simulation._routes.clear_segment(start, end, frozenset())
             for start, end in pairwise((entity.position, *entity.path))
         )
+    assert simulation.execute(MoveCommand(ids, Point(4.5, 11.5), queued=True)).accepted
+    return_goals = {key: simulation.entities[key].order_queue[-1].position for key in ids}
     simulation.advance(15)
     save_path = tmp_path / "march.json"
     save_simulation(simulation, save_path)
     restored = load_simulation(save_path)
     for world in (simulation, restored):
-        _advance_with_clearance(world, 160)
+        _advance_with_clearance(world, 320)
+        # The queued return retains one common approach field, rather than
+        # expanding a separate weighted search for every member's final slot.
+        assert world.navigation_field_build_count <= 3
         for key in ids:
             assert not world.entities[key].path
-            assert world.entities[key].position.distance_to(expected[key]) <= 0.3
+            assert not world.entities[key].order_queue
+            assert world.entities[key].position.distance_to(return_goals[key]) <= 0.3
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
 
 
@@ -430,12 +444,12 @@ def test_queued_manual_override_uses_current_positions_instead_of_automation_goa
     assert simulation.execute(CreatePatrolCommand(ids, PointTarget(Point(9.5, 9.5)))).accepted
     simulation.advance()
     target = Point(4.5, 3.5)
-    expected = simulation._allocate_destinations(ids, target)
+    expected = simulation._allocate_destinations(ids, target, gathering=True)
     assert simulation.execute(MoveCommand(ids, target, queued=True)).accepted
     for key in ids:
         assert key not in simulation.assignments
         assert simulation.entities[key].move_target == expected[key]
-        assert not simulation.entities[key].move_queue
+        assert not simulation.entities[key].order_queue
 
 
 @pytest.mark.parametrize("count", [1, 4, 120, 2000])

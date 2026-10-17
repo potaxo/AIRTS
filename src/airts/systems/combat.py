@@ -17,7 +17,15 @@ from airts.contracts.spatial import Point, distance_to_target
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import automation_execution, combat_geometry, movement
-from airts.world.entities import SHELL_BLAST_TICKS, Entity, Projectile, ProjectileTrace, UnitState
+from airts.world.entities import (
+    SHELL_BLAST_TICKS,
+    Entity,
+    OrderKind,
+    Projectile,
+    ProjectileTrace,
+    UnitOrder,
+    UnitState,
+)
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -324,7 +332,7 @@ def _join_nearby_combat(
                 else:
                     continue
             elif entity.move_target is not None:
-                entity.move_queue.insert(0, entity.move_target)
+                entity.order_queue.insert(0, UnitOrder(OrderKind.MOVE, entity.move_target))
             entity.path.clear()
             entity.move_target = None
             entity.attack_target_id = target.entity_id

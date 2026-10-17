@@ -129,7 +129,7 @@ def manual_override_many(simulation: Simulation, entity_ids: tuple[str, ...]) ->
     for entity_id in entity_ids:
         automation_id = simulation.assignments.pop(entity_id, None)
         entity = simulation.entities[entity_id]
-        entity.move_queue.clear()
+        entity.order_queue.clear()
         entity.attack_gather_point = None
         entity.attack_target_id = None
         entity.pursue_target = False

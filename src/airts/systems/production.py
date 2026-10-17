@@ -9,7 +9,6 @@ from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
     ProductionParameters,
-    build_defend_stations,
     build_patrol_waypoints,
     production_parameters,
 )
@@ -27,7 +26,6 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget
-from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import (
     automation_assignments,
@@ -117,14 +115,9 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
         if geometry_failure is not None:
             return simulation._reject_validation("create_production", geometry_failure)
         try:
-            if isinstance(command.defend_target, PolygonRegion):
-                simulation._gathering_slots(
-                    command.defend_target,
-                    1,
-                    collision_radius(command.unit_kind),
-                )
-            else:
-                build_defend_stations(command.defend_target, ("preview",), simulation.game_map)
+            production_orders.validate_defense_target(
+                simulation, command.defend_target, command.unit_kind
+            )
         except ValueError as error:
             return simulation._reject_validation(
                 "create_production",

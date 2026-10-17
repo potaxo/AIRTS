@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from math import ceil, floor
+from math import ceil, floor, sqrt
 
 from airts.contracts.spatial import (
     Point,
@@ -466,11 +466,12 @@ def transition_is_allowed(previous: AutomationStatus, current: AutomationStatus)
 
 
 def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Point, ...]:
+    """Build in-map arrival anchors; movement validates their reachable approach areas."""
     candidates: tuple[Point, ...]
     if isinstance(target, PointTarget):
         center = target.point
-        if not game_map.is_passable(center):
-            raise ValueError("patrol point is not passable")
+        if not game_map.contains(center):
+            raise ValueError("patrol point lies outside the map")
         radius = target.radius
         candidates = (
             Point(center.x, center.y - radius),
@@ -479,7 +480,7 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
             Point(center.x - radius, center.y),
         )
     elif isinstance(target, PolylineTarget):
-        if any(not game_map.is_passable(point) for point in target.points):
+        if any(not game_map.contains(point) for point in target.points):
             raise ValueError("patrol line contains an invalid waypoint")
         reverse_interior = tuple(reversed(target.points[1:-1]))
         candidates = target.points + reverse_interior
@@ -487,10 +488,25 @@ def build_patrol_waypoints(target: SpatialTarget, game_map: GameMap) -> tuple[Po
         if any(not game_map.contains(point) for point in target.points):
             raise ValueError("patrol area extends outside the map")
         candidates = _area_waypoints(target)
-    passable = tuple(point for point in candidates if game_map.is_passable(point))
-    if not passable:
-        raise ValueError("patrol target contains no passable waypoints")
-    return passable
+    waypoints = tuple(point for point in candidates if game_map.contains(point))
+    if not waypoints:
+        raise ValueError("patrol target contains no in-map waypoints")
+    return waypoints
+
+
+def patrol_arrival_radius(
+    waypoints: tuple[Point, ...], index: int, unit_radius: float, unit_count: int = 1
+) -> float:
+    """Short legs use smaller areas, but never a sub-unit bottleneck."""
+    anchor = waypoints[index]
+    separations = [
+        anchor.distance_to(waypoints[neighbor % len(waypoints)])
+        for neighbor in (index - 1, index + 1)
+        if anchor != waypoints[neighbor % len(waypoints)]
+    ]
+    minimum = max(0.75, unit_radius * 2 + 0.12, unit_radius * sqrt(unit_count) * 1.5)
+    ordinary = max(2.0, minimum)
+    return min(ordinary, max(minimum, min(separations) * 0.35)) if separations else ordinary
 
 
 def target_center(target: SpatialTarget) -> Point:
@@ -504,38 +520,33 @@ def target_center(target: SpatialTarget) -> Point:
     )
 
 
-def build_defend_stations(
-    target: SpatialTarget, entity_ids: tuple[str, ...], game_map: GameMap
-) -> dict[str, Point]:
-    """Evenly distribute stations along a line or the target's patrol perimeter."""
-    points = (
-        target.points
-        if isinstance(target, PolylineTarget)
-        else build_patrol_waypoints(target, game_map)
+def line_formation_points(
+    target: PolylineTarget, count: int, *, offset: float = 0.0, span: float = 0.0
+) -> tuple[Point, ...]:
+    """Uniform arc-length samples, optionally extended at both ends and offset sideways."""
+    segments = tuple(
+        (a, b, a.distance_to(b))
+        for a, b in zip(target.points, target.points[1:], strict=False)
+        if a != b
     )
-    if not isinstance(target, PolylineTarget):
-        return {
-            key: points[round(i * (len(points) - 1) / max(1, len(entity_ids) - 1))]
-            for i, key in enumerate(entity_ids)
-        }
-    segments = tuple(zip(points, points[1:], strict=False))
-    lengths = tuple(a.distance_to(b) for a, b in segments)
-    stations: dict[str, Point] = {}
-    for i, entity_id in enumerate(entity_ids):
-        distance = sum(lengths) * (i / (len(entity_ids) - 1) if len(entity_ids) > 1 else 0.5)
-        for (a, b), length in zip(segments, lengths, strict=True):
-            if distance <= length and length > 0:
-                point = Point(
-                    a.x + (b.x - a.x) * distance / length, a.y + (b.y - a.y) * distance / length
-                )
+    length = sum(segment[2] for segment in segments)
+    extension = max(0.0, span - length) / 2
+    result = []
+    for index in range(count):
+        distance = (length + 2 * extension) * (
+            index / (count - 1) if count > 1 else 0.5
+        ) - extension
+        chosen = segments[-1]
+        for segment_index, segment in enumerate(segments):
+            chosen = segment
+            if distance <= segment[2]:
                 break
-            distance -= length
-        else:
-            point = points[-1]
-        if not game_map.is_passable(point):
-            raise ValueError("defend station is not passable")
-        stations[entity_id] = point
-    return stations
+            if segment_index < len(segments) - 1:
+                distance -= segment[2]
+        a, b, segment_length = chosen
+        dx, dy = (b.x - a.x) / segment_length, (b.y - a.y) / segment_length
+        result.append(Point(a.x + dx * distance - dy * offset, a.y + dy * distance + dx * offset))
+    return tuple(result)
 
 
 def assign_formation_slots(

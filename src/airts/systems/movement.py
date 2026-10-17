@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from airts.contracts.automations import DefendParameters
+from airts.contracts.automations import DefendParameters, patrol_arrival_radius
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.collision.geometry import collision_radius
@@ -16,7 +16,7 @@ from airts.navigation.collision.solver import advance_positions
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
 from airts.systems.assignment_state import state_for_assignment
 from airts.world._numeric import BoolArray, FloatArray, IntArray
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import Entity, OrderKind, UnitState
 from airts.world.map import Cell, footprint_cells
 from airts.world.units.catalog import EntityKind
 
@@ -30,13 +30,15 @@ FORMATION_MOVE_DISTANCE = 12.0
 def move_origins(
     simulation: Simulation, entity_ids: tuple[str, ...], *, continuing: frozenset[str]
 ) -> dict[str, Point]:
-    """Queued micro uses the preceding destination rather than the current army shape."""
+    """Reuse a preceding move goal; target work stays in the current reachable component."""
     origins = {}
     for key in entity_ids:
         entity = simulation.entities[key]
         origins[key] = (
-            entity.move_queue[-1]
-            if key in continuing and entity.move_queue
+            entity.order_queue[-1].position
+            if key in continuing
+            and entity.order_queue
+            and entity.order_queue[-1].kind is OrderKind.MOVE
             else entity.move_target
             if key in continuing and entity.move_target
             else entity.position
@@ -577,41 +579,6 @@ def move_entities(simulation: Simulation) -> None:
     workspace.tick = simulation.tick
 
 
-def drive_move_queues(simulation: Simulation) -> None:
-    pending = sorted(
-        key
-        for key, entity in simulation.entities.items()
-        if entity.move_queue and not entity.path and not entity.pursue_target
-    )
-    if not pending:
-        return
-    offset = simulation.tick % len(pending)
-    allowance = simulation._routes.automation_allowance(simulation.GATHERING_PATH_BUDGET)
-    for key in pending[offset:] + pending[:offset]:
-        if not allowance.claim():
-            break
-        entity = simulation.entities[key]
-        target = entity.move_queue[0]
-        try:
-            route = simulation._routes.shared_path(
-                entity.position, target, simulation._building_cells()
-            )
-        except PathfindingError as error:
-            if entity.state is not UnitState.WAITING:
-                simulation.events.record(
-                    simulation.tick,
-                    EventType.PATHFINDING_FAILED,
-                    key,
-                    operation="queued_move",
-                    reason=str(error),
-                    target=[target.x, target.y],
-                )
-            entity.state = UnitState.WAITING
-            continue
-        entity.move_queue.pop(0)
-        start_path(simulation, entity, target, route, "human_queue", UnitState.MOVING)
-
-
 def _finish_path(simulation: Simulation, entity: Entity) -> None:
     if entity.path:
         return
@@ -755,3 +722,25 @@ def validate_paths(
         )
     for point in targets[1:]:
         simulation._routes.validate_connection(point, targets[0], blocked)
+
+
+def validate_patrol_paths(
+    simulation: Simulation, entity_ids: tuple[str, ...], waypoints: tuple[Point, ...]
+) -> None:
+    """Every member must reach each arrival area, not its possibly obstructed center."""
+    blocked = simulation._building_cells()
+    radius = max(collision_radius(simulation.entities[key].kind) for key in entity_ids)
+    for index, anchor in enumerate(waypoints):
+        goals = simulation._routes.arrival_goals(
+            anchor,
+            patrol_arrival_radius(waypoints, index, radius, len(entity_ids)),
+            radius,
+            blocked,
+        )
+        if not goals:
+            raise PathfindingError(f"NO_PATROL_APPROACH:{index}")
+        if any(
+            not simulation._routes.can_reach_any(simulation.entities[key].position, goals, blocked)
+            for key in entity_ids
+        ):
+            raise PathfindingError(f"NO_PATH_TO_PATROL_AREA:{index}")

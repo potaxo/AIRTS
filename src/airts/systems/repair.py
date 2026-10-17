@@ -16,9 +16,9 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import automation_assignments, movement
+from airts.systems import automation_assignments, movement, unit_orders
 from airts.systems.validation import validate_entities
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import Entity, OrderKind, UnitOrder, UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
@@ -55,6 +55,14 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
             "repair_building",
             ValidationFailure(ValidationPhase.CAPABILITY, reason, "target_entity_id"),
         )
+    if command.queued:
+        assert target is not None
+        unit_orders.append_target_order(
+            simulation,
+            command.entity_ids,
+            UnitOrder(OrderKind.REPAIR, target.selection_position, target.entity_id),
+        )
+        return simulation._accept("repair_building")
     automation_assignments.manual_override_many(simulation, command.entity_ids)
     for key in command.entity_ids:
         builder = simulation.entities[key]

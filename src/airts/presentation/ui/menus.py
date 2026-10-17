@@ -123,7 +123,7 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
         view.canvas_rect.x + 40,
         80,
         max(320, view.canvas_rect.width - 80),
-        288,
+        316,
     )
     theme.panel(screen, rectangle)
     view.ui.text(screen, "Controls", (rectangle.x + 18, rectangle.y + 16), theme.TEXT)
@@ -133,6 +133,7 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
         "Single right-click preserves formation; double right-click gathers.",
         "WASD Camera   T Patrol   Y Defend   X Stop   H Hold",
         "R Repair   Space Pause   Wheel Zoom",
+        "Minimap click/drag: Camera",
         "Shift+Right-click Queue move   Shift+Left-click/drag Select",
         "N Name   E Edit   U Retarget   [ ] Priority",
         "Choose a selected type in the right rail to show its actions.",

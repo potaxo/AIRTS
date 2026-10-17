@@ -515,11 +515,11 @@ def test_new_save_rejects_corrupted_recovery_state(field: str, value: object) ->
 @pytest.mark.parametrize(
     "entity_id,field,value",
     [
-        ("builder", "move_queue", None),
-        ("builder", "move_queue", [[-1, 4]]),
-        ("builder", "move_queue", [[20.5, 20.5]]),
-        ("builder", "move_queue", [[float("nan"), 4]]),
-        ("factory", "move_queue", [[12, 12]]),
+        ("builder", "order_queue", None),
+        ("builder", "order_queue", [{"kind": "move", "position": [-1, 4]}]),
+        ("builder", "order_queue", [{"kind": "move", "position": [20.5, 20.5]}]),
+        ("builder", "order_queue", [{"kind": "move", "position": [float("nan"), 4]}]),
+        ("factory", "order_queue", [{"kind": "move", "position": [12, 12]}]),
         ("scout", "attack_gather_point", [12, 12]),
         ("builder", "attack_gather_point", [12, 12]),
     ],
@@ -568,7 +568,7 @@ def test_save_rejects_direct_queue_conflicting_with_automation_control() -> None
     simulation = builder_factory_simulation()
     assert simulation.execute(CreatePatrolCommand(("scout",), PointTarget(Point(12, 12)))).accepted
     state = simulation.export_state()
-    state["entities"]["scout"]["move_queue"] = [[14, 14]]
+    state["entities"]["scout"]["order_queue"] = [{"kind": "move", "position": [14, 14]}]
     with pytest.raises(PersistenceError, match="conflicts with automation control"):
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}

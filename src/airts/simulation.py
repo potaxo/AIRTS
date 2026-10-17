@@ -79,6 +79,7 @@ from airts.systems import (
     command_handlers,
     opponent_ai,
     spatial_commands,
+    unit_orders,
 )
 from airts.systems import combat as combat_system
 from airts.systems import construction as construction_system
@@ -92,7 +93,14 @@ from airts.systems import upgrades as upgrade_system
 from airts.systems.assignment_state import state_for_assignment
 from airts.systems.repair_positions import service_route
 from airts.world._numeric import BoolArray
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
+from airts.world.entities import (
+    Entity,
+    OrderKind,
+    Projectile,
+    ProjectileTrace,
+    UnitOrder,
+    UnitState,
+)
 from airts.world.map import Cell, GameMap, OccupancyGrid
 from airts.world.opponents import OpponentState
 from airts.world.units.catalog import EntityKind
@@ -442,7 +450,7 @@ class Simulation:
             economy_system.spawn_ambient_enemy(self)
             if self.game_map.match_slots:
                 opponent_ai.drive_opponents(self)
-            movement_system.drive_move_queues(self)
+            unit_orders.drive_order_queues(self)
             self._drive_automations()
             repair_system.drive_builders(self)
             reclamation_system.drive_reclamation(self)
@@ -618,11 +626,27 @@ class Simulation:
         gatherings: dict[tuple[str, Point], list[str]] = {}
         for key in sorted(self.entities):
             entity = self.entities[key]
+            if entity.order_queue:
+                retained_orders = []
+                for order in entity.order_queue:
+                    if order.target_entity_id in removed_ids:
+                        self.events.record(
+                            self.tick,
+                            EventType.ORDER_SKIPPED,
+                            key,
+                            kind=order.kind.value,
+                            target_entity_id=order.target_entity_id,
+                            reason="TARGET_REMOVED",
+                        )
+                    else:
+                        retained_orders.append(order)
+                entity.order_queue = retained_orders
             if entity.attack_target_id in removed_ids:
                 if entity.attack_gather_point is not None:
-                    gatherings.setdefault((entity.owner_id, entity.attack_gather_point), []).append(
-                        entity.entity_id
-                    )
+                    if not entity.order_queue:
+                        gatherings.setdefault(
+                            (entity.owner_id, entity.attack_gather_point), []
+                        ).append(entity.entity_id)
                     entity.attack_gather_point = None
                 if entity.pursue_target:
                     entity.path.clear()
@@ -653,7 +677,7 @@ class Simulation:
             except PathfindingError as error:
                 for key in ids:
                     self.entities[key].state = UnitState.WAITING
-                    self.entities[key].move_queue[:] = [point]
+                    self.entities[key].order_queue[:] = [UnitOrder(OrderKind.MOVE, point)]
                     self.events.record(
                         self.tick,
                         EventType.PATHFINDING_FAILED,
@@ -663,7 +687,7 @@ class Simulation:
                     )
                 continue
             for key in ids:
-                self.entities[key].move_queue[:] = [destinations[key]]
+                self.entities[key].order_queue[:] = [UnitOrder(OrderKind.MOVE, destinations[key])]
                 self.entities[key].state = UnitState.MOVING
 
     def snapshot(self) -> dict[str, object]:
@@ -726,7 +750,6 @@ class Simulation:
             "next_entity_number": self._next_entity_number,
             "next_projectile_number": self._next_projectile_number,
             "movement_blocked": sorted(self._movement_blocked),
-            "blocked_ticks": {},  # Retired save-v11 field; no runtime congestion counter.
         }
 
     def _invalidate_navigation_cache(self) -> None:
