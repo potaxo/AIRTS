@@ -600,7 +600,21 @@ def test_large_force_passes_held_group_with_bounded_motion_and_anchor_recovery()
     assert crossed == len(mover_ids), (
         f"only {crossed}/{len(mover_ids)} moving units passed the held formation"
     )
-    simulation.advance(180)
+    # Compact marches apply different pressure to the held ranks. Observe actual
+    # recovery within the scenario's existing liveness guard instead of assuming
+    # that crossing one x-coordinate starts an identical settling schedule.
+    while simulation.tick < 1_500 and any(
+        simulation.entities[key].position.distance_to(holder_starts[key]) > 0.05
+        for key in holder_ids
+    ):
+        before = {key: simulation.entities[key].position for key in holder_ids}
+        simulation.advance()
+        assert all(simulation.entities[key].state is UnitState.HOLDING for key in holder_ids)
+        assert all(
+            simulation.entities[key].position.distance_to(before[key])
+            <= simulation.entities[key].speed * Simulation.TICK_SECONDS / 2 + 1e-8
+            for key in holder_ids
+        )
     assert all(
         simulation.entities[entity_id].position.distance_to(holder_starts[entity_id]) <= 0.05
         for entity_id in holder_ids

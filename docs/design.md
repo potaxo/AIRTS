@@ -68,6 +68,6 @@ measurement limits belong to the performance document, not a blanket claim of pa
 
 No language provider, voice, MCP, scouting reports, map editor, multiplayer, Unity, dynamic terrain,
 semantic map regions, or multi-region automation is implemented. Visibility has no occlusion,
-last-known enemy memory, or fog overlay. Artillery fires fixed-destination shells with splash damage;
-moving targets can escape the blast. There is no technology tree, armor, cover, random shot spread,
+last-known enemy memory, or fog overlay. Artillery predicts movement and fires fixed-destination
+shells with splash damage; targets can evade the estimate. There is no technology tree, armor, cover, random shot spread,
 learned enemy policies, individual kiting, builder gathering, vertex-level editing.

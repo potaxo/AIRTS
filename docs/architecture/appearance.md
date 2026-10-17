@@ -49,7 +49,7 @@ dependencies; no generated covers or image-generation service is involved.
 
 Artillery feedback uses shared [projectile effects](../../src/airts/presentation/projectile_effects.py)
 in both backends: a larger orange shell with a pale rim follows a display-only parabolic arc above
-its ground shadow. Impact shows a one-second full damage-radius outline, expanding shockwave,
+its ground shadow. Impact shows a 0.3-second full damage-radius outline, expanding shockwave,
 central flash and radial embers, even when no enemy is hit. Radius follows the combat profile;
 expiry follows the saved trace and freezes with simulation pause. Ordinary projectiles keep their
 small fixed-pixel cores. OpenGL packs these effects into existing world shape batches.
@@ -71,6 +71,12 @@ factory bays, repair crosses, command antennas, extractor plumbing and synthesis
 building silhouettes. Vehicle/turret weapons have separate centered layers. Display sizes preserve
 a smaller scout/light tank and a broader heavy tank without imposing different grid occupancies.
 Health bars sit above visual extents rather than inside large building roofs.
+Active unit production and building upgrades show blue progress tracks below the building's
+visual extent in both renderers, independent of selection. Each track follows the current item;
+queued/preempted items do not replace it and completed work waiting for spawn space stays full.
+Production rows and upgrade controls use the same blue feedback. When several selected producers
+work on the same kind, its row shows the least advanced current item. Tracks disappear on completion
+or cancellation; paused work retains its progress.
 
 Authoring is offline and uses the existing Pygame dependency:
 

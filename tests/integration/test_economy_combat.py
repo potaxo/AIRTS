@@ -38,7 +38,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
-from airts.systems import automation_execution
+from airts.systems import automation_runtime
 from airts.world.entities import Projectile, UnitState
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -294,16 +294,24 @@ def test_combat_route_admission_rotates_and_dispatches_every_pending_member() ->
     assert dispatched == set(reachable)
 
 
-def test_economy_automation_collects_generator_income_to_target() -> None:
+def test_economy_tracker_completes_without_controlling_or_capping_passive_income() -> None:
     simulation = economy_combat_simulation()
-    result = simulation.execute(CreateEconomyCommand(("generator",), 508))
-    simulation.advance(40)
+    initial = simulation.resources["player"]
+    rate = simulation.entities["generator"].profile.income_per_second
+    result = simulation.execute(CreateEconomyCommand(("generator",), initial + 2 * rate))
+    assert result.accepted
     automation = simulation.automations[result.automation_id or ""]
-
-    assert simulation.resources["player"] == 508
+    simulation.advance(19)
+    assert simulation.resources["player"] == initial + rate
     assert automation.kind is AutomationKind.ECONOMY
+    assert automation.status is AutomationStatus.ACTIVE
+    simulation.advance()
+    assert simulation.resources["player"] == initial + 2 * rate
     assert automation.status is AutomationStatus.COMPLETED
-    assert automation.parameters.to_dict()["collected"] == 8
+    assert automation.parameters.to_dict()["collected"] == 2 * rate
+    assert "generator" not in simulation.assignments
+    simulation.advance(20)
+    assert simulation.resources["player"] == initial + 4 * rate
 
 
 def test_seeded_enemy_tank_reinforcements_spawn_on_the_right_each_second() -> None:
@@ -663,16 +671,18 @@ def test_tank_projectiles_use_source_damage_and_never_damage_nearby_entities(
 def test_developer_mode_bonus_is_player_only_and_resets_when_disabled() -> None:
     simulation = interaction_simulation()
     assert not simulation.developer_mode
+    initial = simulation.resources["player"]
+    rate = EntityKind.RESOURCE_GENERATOR.profile.income_per_second
     enemy_balance = simulation.resources["enemy"]
     simulation.advance(3)
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted
     simulation.advance(9)
-    assert simulation.resources["player"] == 500  # First income cycle is not complete.
+    assert simulation.resources["player"] == initial + rate  # Settlement at tick 10.
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted  # Preserve timer.
     simulation.advance()
-    assert simulation.resources["player"] == 2500
+    assert simulation.resources["player"] == initial + rate + 2000
     simulation.advance(20)
-    assert simulation.resources["player"] == 6504
+    assert simulation.resources["player"] == initial + 3 * rate + 6000
     assert simulation.resources["enemy"] == enemy_balance
     bonuses = [
         event
@@ -686,12 +696,12 @@ def test_developer_mode_bonus_is_player_only_and_resets_when_disabled() -> None:
     assert simulation.execute(SetDeveloperModeCommand(False)).accepted
     assert simulation.developer_income_ticks == 0
     simulation.advance(20)
-    assert simulation.resources["player"] == 6512  # Normal income continues.
+    assert simulation.resources["player"] == initial + 6 * rate + 6000
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted
     simulation.advance(9)
-    assert simulation.resources["player"] == 6512
+    assert simulation.resources["player"] == initial + 7 * rate + 6000
     simulation.advance()
-    assert simulation.resources["player"] == 8512
+    assert simulation.resources["player"] == initial + 7 * rate + 8000
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
@@ -705,14 +715,6 @@ def test_developer_mode_rejects_other_owners_without_changing_the_setting() -> N
         assert result.reason == "DEVELOPER_MODE_PLAYER_ONLY"
         assert simulation.developer_mode
         assert simulation.developer_income_ticks == 4
-
-
-def test_resource_generators_produce_without_an_automation() -> None:
-    simulation = interaction_simulation()
-
-    simulation.advance(20)
-
-    assert simulation.resources["player"] == 504
 
 
 def test_defenders_keep_their_route_when_firing_at_an_enemy_far_from_their_station() -> None:
@@ -786,9 +788,9 @@ def test_simultaneous_casualties_coordinate_survivors_once_and_continue_after_lo
             str(index), "enemy", key, "enemy", EntityKind.SCOUT, point, point, 1000, 1000
         )
     with patch.object(
-        automation_execution,
+        automation_runtime,
         "coordinate_shared_defend_stations",
-        wraps=automation_execution.coordinate_shared_defend_stations,
+        wraps=automation_runtime.coordinate_shared_defend_stations,
     ) as coordinate:
         simulation.advance()
     assert coordinate.call_count == 1
@@ -813,9 +815,9 @@ def test_simultaneous_casualties_coordinate_survivors_once_and_continue_after_lo
     ]
     # A direct removal remains complete before its command returns.
     with patch.object(
-        automation_execution,
+        automation_runtime,
         "coordinate_shared_defend_stations",
-        wraps=automation_execution.coordinate_shared_defend_stations,
+        wraps=automation_runtime.coordinate_shared_defend_stations,
     ) as coordinate:
         assert simulation.execute(RemoveEntityCommand(ids[4])).accepted
     assert coordinate.call_count == 1

@@ -1,15 +1,20 @@
 """Physical guarantees of the replacement controller."""
 
 from collections.abc import Callable
+from itertools import pairwise
 from math import ceil, floor, sqrt
+from pathlib import Path
 
 import pytest
 from tests.integration.scenarios import hold_contact_simulation
 
+from airts.adapters.persistence import load_simulation, save_simulation
+from airts.adapters.replay import capture_replay, run_replay
 from airts.contracts.automations import DefendParameters
 from airts.contracts.commands import (
     CancelAutomationCommand,
     CreateDefendCommand,
+    CreatePatrolCommand,
     HoldPositionCommand,
     MoveCommand,
     StopCommand,
@@ -264,14 +269,17 @@ def test_move_preserves_existing_physically_legal_translated_layout() -> None:
             }
         )
     )
-    assert simulation.execute(MoveCommand(("scout", "heavy"), Point(16.5, 8.5))).accepted
-    assert simulation.entities["scout"].move_target == Point(15.5, 8.5)
-    assert simulation.entities["heavy"].move_target == Point(17.5, 8.5)
+    assert simulation.execute(MoveCommand(("scout", "heavy"), Point(12.5, 8.5))).accepted
+    assert simulation.entities["scout"].move_target == Point(11.5, 8.5)
+    assert simulation.entities["heavy"].move_target == Point(13.5, 8.5)
 
 
 @pytest.mark.parametrize("unit_count", [1, 3, 120])
-@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
-def test_move_formation_mode_is_independent_of_army_size(unit_count: int, gathering: bool) -> None:
+@pytest.mark.parametrize("gathering", [False, True], ids=["single", "double"])
+@pytest.mark.parametrize("far", [False, True], ids=["micro", "march"])
+def test_move_mode_depends_on_distance_and_intent_not_army_size(
+    unit_count: int, gathering: bool, far: bool
+) -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -297,19 +305,19 @@ def test_move_formation_mode_is_independent_of_army_size(unit_count: int, gather
         sum(point.x for point in positions.values()) / unit_count,
         sum(point.y for point in positions.values()) / unit_count,
     )
-    target = Point(60.5, 35.5)
+    target = Point(60.5, 35.5) if far else Point(center.x + 6, center.y + 4)
     assert simulation.execute(MoveCommand(ids, target, gathering=gathering)).accepted
     goals = []
     for key in ids:
         goal = simulation.entities[key].move_target
         assert goal is not None
         goals.append(goal)
-        if not gathering:
+        if not gathering and not far:
             assert goal == Point(
                 positions[key].x + target.x - center.x,
                 positions[key].y + target.y - center.y,
             )
-    if gathering and unit_count > 1:
+    if (gathering or far) and unit_count > 1:
         assert max(goal.distance_to(target) for goal in goals) < max(
             point.distance_to(center) for point in positions.values()
         )
@@ -322,6 +330,112 @@ def test_move_formation_mode_is_independent_of_army_size(unit_count: int, gather
             assert entity.move_target is None
             # Arrived idle bodies can yield to companions finishing their approach.
             assert entity.position.distance_to(goal) <= collision_radius(entity.kind) + 1e-8
+
+
+@pytest.mark.parametrize("distance", [12.0, 12.01])
+def test_move_distance_boundary_and_queued_micro_use_previous_goals(distance: float) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "move_distance_boundary",
+                "name": "Move distance boundary",
+                "width": 48,
+                "height": 24,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "a", "kind": "scout", "position": [3.5, 6.5]},
+                    {"id": "b", "kind": "scout", "position": [7.5, 6.5]},
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    target = Point(5.5 + distance, 6.5)
+    assert simulation.execute(MoveCommand(ids, target)).accepted
+    goals = {key: simulation.entities[key].move_target for key in ids}
+    assert all(goal is not None for goal in goals.values())
+    a, b = goals["a"], goals["b"]
+    assert a is not None and b is not None
+    assert (a.distance_to(b) == pytest.approx(4.0)) is (distance == 12.0)
+    fields = simulation.navigation_field_build_count
+    micro = Point(target.x + 3, target.y)
+    assert simulation.execute(MoveCommand(ids, micro, queued=True)).accepted
+    center = Point((a.x + b.x) / 2, (a.y + b.y) / 2)
+    for key in ids:
+        goal = goals[key]
+        assert goal is not None
+        queue = simulation.entities[key].move_queue
+        assert len(queue) == 1
+        assert (
+            queue[0].distance_to(Point(goal.x + micro.x - center.x, goal.y + micro.y - center.y))
+            < 1e-9
+        )
+    # Validating a queue must not build a map-sized field for each final slot.
+    assert simulation.navigation_field_build_count == fields
+    assert simulation.execute(MoveCommand(ids, Point(4.5, 18.5), queued=True)).accepted
+    queued = [simulation.entities[key].move_queue[-1] for key in ids]
+    assert queued[0].distance_to(queued[1]) < 2
+    assert simulation.navigation_field_build_count == fields
+
+
+@pytest.mark.parametrize("gathering", [False, True], ids=["single", "double"])
+@pytest.mark.parametrize("terrain", ["forest", "water"])
+def test_march_shares_weighted_detour_and_restores_through_save_and_replay(
+    gathering: bool, terrain: str, tmp_path: Path
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "shared_march_detour",
+                "name": "Shared march detour",
+                "width": 48,
+                "height": 24,
+                "terrain": {"default": "grass", "rectangles": [[12, 8, 20, 6, terrain]]},
+                "entities": [
+                    {"id": "a", "kind": "scout", "position": [3.5, 10.5]},
+                    {"id": "b", "kind": "scout", "position": [3.5, 14.5]},
+                ],
+            }
+        )
+    )
+    ids = tuple(simulation.entities)
+    target = Point(40.5, 11.5)
+    expected = simulation._allocate_destinations(ids, target, gathering=True)
+    assert simulation.execute(MoveCommand(ids, target, gathering=gathering)).accepted
+    assert simulation.navigation_field_build_count == 1
+    for key in ids:
+        entity = simulation.entities[key]
+        assert entity.move_target == expected[key]
+        assert all(
+            simulation._routes.clear_segment(start, end, frozenset())
+            for start, end in pairwise((entity.position, *entity.path))
+        )
+    simulation.advance(15)
+    save_path = tmp_path / "march.json"
+    save_simulation(simulation, save_path)
+    restored = load_simulation(save_path)
+    for world in (simulation, restored):
+        _advance_with_clearance(world, 160)
+        for key in ids:
+            assert not world.entities[key].path
+            assert world.entities[key].position.distance_to(expected[key]) <= 0.3
+    assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
+
+
+def test_queued_manual_override_uses_current_positions_instead_of_automation_goals(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    simulation = Simulation(make_map(3))
+    ids = tuple(simulation.entities)
+    assert simulation.execute(CreatePatrolCommand(ids, PointTarget(Point(9.5, 9.5)))).accepted
+    simulation.advance()
+    target = Point(4.5, 3.5)
+    expected = simulation._allocate_destinations(ids, target)
+    assert simulation.execute(MoveCommand(ids, target, queued=True)).accepted
+    for key in ids:
+        assert key not in simulation.assignments
+        assert simulation.entities[key].move_target == expected[key]
+        assert not simulation.entities[key].move_queue
 
 
 @pytest.mark.parametrize("count", [1, 4, 120, 2000])
@@ -871,7 +985,7 @@ def test_group_route_metadata_ends_at_each_assigned_destination(
             simulation.game_map.cell_for(entity.move_target)
         )
 
-    assert len(translations) == 1
+    assert len(translations) == (1 if target == Point(8.5, 8.5) else len(ids))
 
 
 def test_arrival_rounding_cannot_snap_through_a_held_collider(

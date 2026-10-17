@@ -12,6 +12,7 @@ from airts.presentation.app import AirtsApp
 from airts.presentation.gpu_shapes import SHAPE_FLOATS
 from airts.presentation.opengl_renderer import OpenGLFrameBuilder
 from airts.simulation import Simulation
+from airts.world.entities import SHELL_BLAST_TICKS
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
@@ -82,13 +83,14 @@ def test_artillery_arc_and_blast_use_both_backends_without_mutating_simulation(
     assert shapes[0][4:6] == array("f", [kind.profile.splash_radius] * 2)
     assert shapes[0][19] == 1  # GPU outline, with a transparent interior.
     assert shapes[0][17] == 0
+    assert simulation.projectile_traces[-1].expires_tick - simulation.tick == SHELL_BLAST_TICKS
     simulation.remove_entity("gun")
     initial_wave_radius = shapes[1][4]
     initial_flash_radius = shapes[2][4]
-    simulation.advance(3)
+    simulation.advance()
     _, shapes = draw_feedback()
     assert shapes[1][4] > initial_wave_radius
     assert shapes[2][4] < initial_flash_radius
-    simulation.advance(7)
+    simulation.advance(SHELL_BLAST_TICKS - 1)
     circles, shapes = draw_feedback()
     assert not circles and not shapes

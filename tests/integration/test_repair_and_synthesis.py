@@ -366,7 +366,7 @@ def test_synthesizer_builds_off_site_and_earns_only_after_completion(tmp_path: P
     assert site.is_complete
     balance = simulation.resources["player"]
     simulation.advance(20)
-    assert simulation.resources["player"] == balance + 2
+    assert simulation.resources["player"] == balance + 2 * site.profile.income_per_second
 
 
 def test_synthesis_commands_replay() -> None:

@@ -6,10 +6,11 @@ import pytest
 
 from airts.adapters.persistence import load_simulation, save_simulation
 from airts.adapters.replay import capture_replay, run_replay
-from airts.contracts.commands import AttackCommand, MoveCommand, RemoveEntityCommand
+from airts.contracts.commands import AttackCommand, MoveCommand, RemoveEntityCommand, StopCommand
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.simulation import Simulation
+from airts.systems import movement
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
@@ -46,6 +47,90 @@ def artillery_simulation() -> Simulation:
             }
         )
     )
+
+
+def moving_artillery_simulation(kind: EntityKind, terrain: str = "grass") -> Simulation:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "artillery_prediction",
+                "name": "Artillery prediction",
+                "width": 40,
+                "height": 32,
+                "terrain": {"default": terrain},
+                "entities": [
+                    {"id": "gun", "kind": kind.value, "position": [3.5, 10.5]},
+                    {"id": "target", "kind": "builder", "owner": "enemy", "position": [11.5, 10.5]},
+                ],
+            }
+        )
+    )
+    assert simulation.execute(
+        MoveCommand(("target",), Point(11.5, 28.5), owner_id="enemy")
+    ).accepted
+    assert simulation.execute(AttackCommand(("gun",), "target")).accepted
+    return simulation
+
+
+@pytest.mark.parametrize("kind", [EntityKind.ARTILLERY, EntityKind.LIGHT_ARTILLERY])
+@pytest.mark.parametrize("terrain,speed", [("grass", 3), ("road", 4)])
+def test_artillery_leads_actual_movement_and_reconstructs_it_after_load(
+    kind: EntityKind,
+    terrain: str,
+    speed: float,
+    tmp_path: Path,
+) -> None:
+    simulation = moving_artillery_simulation(kind, terrain)
+    # Save before the first shot: motion scratch must be reconstructed, not required in saves.
+    path = tmp_path / "before-leading-shot.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    for current in (simulation, restored):
+        current.advance()
+        target = current.entities["target"]
+        shell = next(iter(current.projectiles.values()))
+        assert movement.observed_velocity(current, target) == pytest.approx((0, speed))
+        assert shell.destination.y > target.position.y
+        assert shell.destination.x == pytest.approx(target.position.x)
+        flight_time = shell.position.distance_to(shell.destination) / shell.speed
+        assert shell.destination.y == pytest.approx(target.position.y + speed * flight_time)
+        destination = shell.destination
+        current.advance(2)
+        assert shell.destination == destination
+    assert restored.export_state() == simulation.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+    # Continue through impact after saving a projectile that is already in flight.
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    simulation.advance(10)
+    restored.advance(10)
+    assert restored.export_state() == simulation.export_state()
+
+
+@pytest.mark.parametrize("kind", [EntityKind.ARTILLERY, EntityKind.LIGHT_ARTILLERY])
+def test_target_can_turn_away_after_predicted_ground_shot(kind: EntityKind) -> None:
+    simulation = moving_artillery_simulation(kind)
+    simulation.advance()
+    shell = next(iter(simulation.projectiles.values()))
+    destination = shell.destination
+    assert simulation.execute(MoveCommand(("target",), Point(11.5, 2.5), owner_id="enemy")).accepted
+    while shell.projectile_id in simulation.projectiles:
+        simulation.advance()
+        assert shell.destination == destination
+    assert simulation.entities["target"].health == 80
+    assert simulation.projectile_traces[-1].points[-1] == destination
+
+
+def test_stopped_target_has_no_stale_lead() -> None:
+    simulation = moving_artillery_simulation(EntityKind.ARTILLERY)
+    simulation.advance()
+    assert simulation.execute(StopCommand(("target",), owner_id="enemy")).accepted
+    simulation.entities["gun"].attack_cooldown = 0
+    simulation.advance()
+    latest = list(simulation.projectiles.values())[-1]
+    target = simulation.entities["target"]
+    assert movement.observed_velocity(simulation, target) == (0, 0)
+    assert latest.destination == target.position
 
 
 @pytest.mark.parametrize(

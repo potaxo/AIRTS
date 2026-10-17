@@ -13,9 +13,9 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.navigation.pathfinding import PathfindingError
-from airts.systems import automation_control, movement
-from airts.systems.command_handlers import validate_entities
+from airts.systems import automation_assignments, movement
 from airts.systems.repair import building_distance
+from airts.systems.validation import validate_entities
 from airts.world.entities import UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
@@ -28,7 +28,7 @@ def reclaim_building(simulation: Simulation, command: ReclaimBuildingCommand) ->
     failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("reclaim_building", failure)
-    if any(simulation.entities[key].kind is not EntityKind.BUILDER for key in command.entity_ids):
+    if any(not simulation.entities[key].profile.can_reclaim for key in command.entity_ids):
         reason = "ENTITY_NOT_BUILDER"
     else:
         target = simulation.entities.get(command.target_entity_id)
@@ -45,7 +45,7 @@ def reclaim_building(simulation: Simulation, command: ReclaimBuildingCommand) ->
             "reclaim_building",
             ValidationFailure(ValidationPhase.CAPABILITY, reason, "target_entity_id"),
         )
-    automation_control.manual_override_many(simulation, command.entity_ids)
+    automation_assignments.manual_override_many(simulation, command.entity_ids)
     for entity in simulation.entities.values():
         if (
             entity.kind is EntityKind.REPAIR_HUB
@@ -76,12 +76,12 @@ def drive_reclamation(simulation: Simulation) -> None:
         target = simulation.entities.get(builder.reclaim_target_id or "")
         if target is None:
             continue  # Removal clears the other builders' targets and paths immediately.
-        if building_distance(builder.position, target) <= builder.kind.profile.build_range:
+        if building_distance(builder.position, target) <= builder.profile.build_range:
             builder.path.clear()
             builder.move_target = None
             builder.state = UnitState.RECLAIMING
             movement.reset_movement_liveness(builder)
-            target.health = max(0, target.health - builder.kind.profile.reclaim_rate)
+            target.health = max(0, target.health - builder.profile.reclaim_rate)
             if target.health > 0:
                 continue
             refund = target.kind.profile.construction_cost * 70 // 100

@@ -45,6 +45,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
@@ -150,6 +151,9 @@ class AirtsApp:
         self._camera_drag_position: tuple[int, int] | None = None
         self.production_detail_kind: EntityKind | None = None
         self.settings_open = False
+        self.developer_settings_open = False
+        self.show_ai_income = False
+        self.game_speed = 1.0
         self.help_open = False
         self.placement_kind: EntityKind | None = None
         self.building_line_draft: BuildingLineDraft | None = None
@@ -427,7 +431,7 @@ class AirtsApp:
                     and self.lobby is None
                     and self.simulation.match_result is None
                 ):
-                    accumulator += elapsed
+                    accumulator += elapsed * self.game_speed
                     simulation_started = perf_counter()
                     while accumulator >= Simulation.TICK_SECONDS:
                         self._advance_presentation_tick()
@@ -710,7 +714,7 @@ class AirtsApp:
             reclaim_builders = tuple(
                 key
                 for key in sorted(self.selected_entities)
-                if self.simulation.entities[key].kind is EntityKind.BUILDER
+                if self.simulation.entities[key].profile.can_reclaim
             )
             result = self.simulation.execute(
                 ReclaimBuildingCommand(reclaim_builders, targets[0][1])
@@ -729,7 +733,7 @@ class AirtsApp:
             builders = [
                 entity_id
                 for entity_id in sorted(self.selected_entities)
-                if self.simulation.entities[entity_id].kind is EntityKind.BUILDER
+                if self.simulation.entities[entity_id].profile.can_build
             ]
             if not builders:
                 self.notice = "Select one or more builders."
@@ -815,7 +819,8 @@ class AirtsApp:
             repair_builders = tuple(
                 key
                 for key in entity_ids
-                if self.simulation.entities[key].kind is EntityKind.BUILDER
+                if self.simulation.entities[key].profile.movable
+                and self.simulation.entities[key].profile.can_repair
             )
             command: AttackCommand | MoveCommand | RepairBuildingCommand
             if gathering:
@@ -1506,6 +1511,7 @@ class AirtsApp:
                 continue
             if action == "settings":
                 self.settings_open = not self.settings_open
+                self.developer_settings_open = False
                 return
             if action == "saves":
                 self._open_save_manager()
@@ -1636,10 +1642,33 @@ class AirtsApp:
     def developer_mode(self) -> bool:
         return self.simulation.developer_mode
 
+    @property
+    def ai_income_multiplier(self) -> int:
+        return self.simulation.ai_income_multiplier
+
     def _handle_settings_click(self, position: tuple[int, int]) -> bool:
         for rectangle, action in self._settings_buttons:
             if not rectangle.collidepoint(position):
                 continue
+            if action in {"developer_settings", "settings_back"}:
+                self.developer_settings_open = action == "developer_settings"
+                return True
+            if action.startswith("speed:"):
+                self.game_speed = float(action.split(":")[1])
+                self.notice = f"Game speed: {self.game_speed:g}x."
+                return True
+            if action == "ai_income":
+                multiplier = 1 if self.ai_income_multiplier == 5 else 5
+                result = self.simulation.execute(SetAIIncomeMultiplierCommand(multiplier))
+                self.notice = (
+                    f"AI building income: {multiplier}x."
+                    if result.accepted
+                    else f"AI income change failed: {result.reason}"
+                )
+                return True
+            if action == "show_ai_income":
+                self.show_ai_income = not self.show_ai_income
+                return True
             if action == "developer_mode":
                 result = self.simulation.execute(SetDeveloperModeCommand(not self.developer_mode))
                 if result.accepted:
@@ -1899,7 +1928,14 @@ class AirtsApp:
             None,
             None,
             self.automation_panel.scroll,
-            (self.settings_open, self.developer_mode),
+            (
+                self.settings_open,
+                self.developer_settings_open,
+                self.developer_mode,
+                self.ai_income_multiplier,
+                self.game_speed,
+                self.show_ai_income,
+            ),
             self.help_open,
             (self.placement_kind, self.reclaim_mode),
             (

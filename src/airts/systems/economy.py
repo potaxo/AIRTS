@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 from airts.contracts.automations import Automation, AutomationStatus, economy_parameters
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
-from airts.systems.production import spawn_cell_available
+from airts.systems import automation_assignments, automation_lifecycle
+from airts.systems.entity_registry import allocate_entity_id
+from airts.systems.spawning import spawn_cell_available
 from airts.world.entities import Entity, UnitState
 from airts.world.units.catalog import EntityKind
 
@@ -24,8 +26,10 @@ def drive_economy(simulation: Simulation, automation: Automation) -> None:
         simulation.resources.get(automation.owner_id, 0) - parameters.starting_resources,
     )
     if simulation.resources.get(automation.owner_id, 0) >= parameters.target_resources:
-        simulation._transition(automation, AutomationStatus.COMPLETED, "RESOURCE_TARGET_REACHED")
-        simulation._release_automation(automation)
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.COMPLETED, "RESOURCE_TARGET_REACHED"
+        )
+        automation_assignments.release_automation(simulation, automation)
         return
     active = [
         generator_id
@@ -34,23 +38,53 @@ def drive_economy(simulation: Simulation, automation: Automation) -> None:
         and generator_id in simulation.entities
     ]
     if not active:
-        simulation._transition(automation, AutomationStatus.FAILED, "NO_RESOURCE_GENERATORS")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.FAILED, "NO_RESOURCE_GENERATORS"
+        )
+
+
+def rebuild_income(simulation: Simulation) -> None:
+    """Reconstruct derived owner totals at initialization and after loading."""
+
+    simulation._income_per_second = {}
+    for entity in simulation.entities.values():
+        if entity.is_complete:
+            change_income(simulation, entity.owner_id, entity.profile.income_per_second)
+
+
+def change_income(simulation: Simulation, owner_id: str, amount: int) -> None:
+    """Apply a producer's completion, upgrade delta or removal exactly once."""
+
+    if not amount:
+        return
+    total = simulation._income_per_second.get(owner_id, 0) + amount
+    if total < 0:
+        raise ValueError(f"negative income total for {owner_id}: {total}")
+    if total:
+        simulation._income_per_second[owner_id] = total
+    else:
+        simulation._income_per_second.pop(owner_id, None)
+
+
+def building_income_per_second(simulation: Simulation, owner_id: str) -> int:
+    multiplier = simulation.ai_income_multiplier if owner_id != "player" else 1
+    return simulation._income_per_second.get(owner_id, 0) * multiplier
+
+
+def income_per_second(simulation: Simulation, owner_id: str) -> int:
+    """Total advertised income per game second, including developer bonuses."""
+
+    bonus = 2000 if owner_id == "player" and simulation.developer_mode else 0
+    return building_income_per_second(simulation, owner_id) + bonus
 
 
 def generate_income(simulation: Simulation) -> None:
-    """Keep each completed producer's two-second cycle across upgrades and saves."""
+    """Settle cached owner totals once per game second without scanning producers."""
 
-    generators: dict[str, int] = {}
-    for entity in simulation.entities.values():
-        if not entity.profile.income_per_second or not entity.is_complete:
-            continue
-        entity.income_ticks += 1
-        if entity.income_ticks < simulation.INCOME_INTERVAL_TICKS:
-            continue
-        entity.income_ticks = 0
-        income = entity.profile.income_per_second * 2
-        generators[entity.owner_id] = generators.get(entity.owner_id, 0) + income
-    for owner_id, amount in sorted(generators.items()):
+    if simulation.tick % simulation.TICKS_PER_SECOND:
+        return
+    for owner_id in sorted(simulation._income_per_second):
+        amount = building_income_per_second(simulation, owner_id)
         simulation.resources[owner_id] = simulation.resources.get(owner_id, 0) + amount
         simulation.events.record(
             simulation.tick,
@@ -127,11 +161,7 @@ def spawn_ambient_enemy(simulation: Simulation) -> None:
     )
     if cell is None:
         return
-    while True:
-        entity_id = f"enemy_tank_{simulation._next_entity_number:03d}"
-        simulation._next_entity_number += 1
-        if entity_id not in simulation.entities:
-            break
+    entity_id = allocate_entity_id(simulation, "enemy_tank")
     position = Point(cell[0] + 0.5, cell[1] + 0.5)
     entity = Entity(
         entity_id=entity_id,

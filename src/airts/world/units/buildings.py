@@ -39,7 +39,7 @@ RESOURCE_GENERATOR = EntityProfile(
     footprint=(2, 2),
     collision_radius=0.5,
     construction_cost=200,
-    income_per_second=2,
+    income_per_second=4,
 )
 
 MATTER_SYNTHESIZER = EntityProfile(
@@ -49,23 +49,23 @@ MATTER_SYNTHESIZER = EntityProfile(
     footprint=(3, 3),
     collision_radius=0.5,
     construction_cost=1200,
-    income_per_second=1,
+    income_per_second=2,
 )
 
 RESOURCE_GENERATOR_UPGRADES = (
     UpgradeDefinition(
-        cost=120, duration_ticks=300, profile=replace(RESOURCE_GENERATOR, income_per_second=4)
+        cost=120, duration_ticks=300, profile=replace(RESOURCE_GENERATOR, income_per_second=8)
     ),
     UpgradeDefinition(
-        cost=360, duration_ticks=600, profile=replace(RESOURCE_GENERATOR, income_per_second=8)
+        cost=360, duration_ticks=600, profile=replace(RESOURCE_GENERATOR, income_per_second=16)
     ),
 )
 
 MATTER_SYNTHESIZER_UPGRADES = (
     UpgradeDefinition(
-        cost=200, duration_ticks=450, profile=replace(MATTER_SYNTHESIZER, income_per_second=2)
+        cost=200, duration_ticks=450, profile=replace(MATTER_SYNTHESIZER, income_per_second=4)
     ),
     UpgradeDefinition(
-        cost=600, duration_ticks=900, profile=replace(MATTER_SYNTHESIZER, income_per_second=4)
+        cost=600, duration_ticks=900, profile=replace(MATTER_SYNTHESIZER, income_per_second=8)
     ),
 )

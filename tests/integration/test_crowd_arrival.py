@@ -168,7 +168,9 @@ def test_continuous_mixed_production_defense_arrivals_and_internal_squad_exit() 
         if isinstance(automation.parameters, DefendParameters)
         for key, station in automation.parameters.stations.items()
     }
-    for _ in range(100):
+    # One shared controller changes mixed-arrival dispatch order. Allow one normal replan
+    # interval for the last arrival to release its return corridor, retaining every safety check.
+    for _ in range(100 + Simulation.DESTINATION_REPATH_TICKS):
         simulation.advance()
         _assert_physical_clearance(simulation)
         if all(

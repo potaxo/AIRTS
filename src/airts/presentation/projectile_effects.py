@@ -4,7 +4,7 @@ from math import cos, pi, sin
 
 from airts.contracts.spatial import Point
 from airts.presentation.palette import Color
-from airts.world.entities import Projectile, ProjectileTrace
+from airts.world.entities import SHELL_BLAST_TICKS, Projectile, ProjectileTrace
 
 SHELL_CORE_RADIUS = 4
 SHELL_RIM_RADIUS = 6
@@ -20,16 +20,14 @@ def shell_visual_position(projectile: Projectile, position: Point) -> Point:
     return Point(position.x, position.y - height)
 
 
-def blast_circles(
-    trace: ProjectileTrace, tick: int, ticks_per_second: int
-) -> tuple[tuple[Point, float, Color, int], ...]:
-    """One-second range marker, expanding shockwave, flash and radial embers.
+def blast_circles(trace: ProjectileTrace, tick: int) -> tuple[tuple[Point, float, Color, int], ...]:
+    """Fast range marker, expanding shockwave, flash and radial embers.
 
     Radii use map cells and outline widths use pixels. Age derives from the saved trace,
     so pauses freeze effects and load resumes them without presentation-owned timers.
     """
 
-    age = min(1.0, max(0.0, 1 - (trace.expires_tick - tick) / ticks_per_second))
+    age = min(1.0, max(0.0, 1 - (trace.expires_tick - tick) / SHELL_BLAST_TICKS))
     radius = trace.weapon_kind.profile.splash_radius
     center = trace.points[-1]
     fade = 1 - age

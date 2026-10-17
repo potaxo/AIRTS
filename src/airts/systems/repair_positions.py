@@ -23,7 +23,7 @@ def in_service_range(simulation: Simulation, entity: Entity, building: Entity) -
     if building.kind is EntityKind.REPAIR_HUB:
         return (
             entity.position.distance_to(building.selection_position)
-            <= building.kind.profile.repair_range
+            <= building.profile.repair_range
         )
     return simulation.game_map.cell_for(entity.position) in {
         simulation.game_map.cell_for(point) for point in simulation._interaction_points(building)
@@ -54,7 +54,7 @@ def service_area(simulation: Simulation, building: Entity) -> tuple[Point, ...]:
     candidates: Iterator[Point]
     if building.kind is EntityKind.REPAIR_HUB:
         center = building.selection_position
-        radius = building.kind.profile.repair_range
+        radius = building.profile.repair_range
         candidates = (
             Point(x + 0.5, y + 0.5)
             for y in range(floor(center.y - radius), ceil(center.y + radius))

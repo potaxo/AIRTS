@@ -12,7 +12,8 @@ from airts.contracts.commands import (
     ValidationPhase,
 )
 from airts.contracts.events import EventType
-from airts.systems.command_handlers import validate_entities
+from airts.systems import economy
+from airts.systems.validation import validate_entities
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -79,7 +80,11 @@ def advance_upgrades(simulation: Simulation) -> None:
             continue
         entity.upgrade.remaining_ticks -= 1
         if entity.upgrade.remaining_ticks == 0:
+            previous_income = entity.profile.income_per_second
             entity.upgrade.tier += 1
+            economy.change_income(
+                simulation, entity.owner_id, entity.profile.income_per_second - previous_income
+            )
             simulation.events.record(
                 simulation.tick,
                 EventType.UPGRADE_COMPLETED,

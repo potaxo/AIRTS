@@ -19,9 +19,9 @@ def owner_status(
         return "out"
     if any(
         (
-            entity.kind in {EntityKind.FACTORY, EntityKind.BUILDER}
-            or command_centers_produce
-            and entity.kind is EntityKind.COMMAND_CENTER
+            entity.profile.can_build
+            or bool(entity.kind.production_kinds)
+            and (command_centers_produce or entity.kind is not EntityKind.COMMAND_CENTER)
         )
         and entity.is_complete
         for entity in assets
@@ -45,8 +45,8 @@ def evaluate_result(simulation: Simulation, *, command_centers_produce: bool = T
         entity.is_complete
         and (
             entity.kind.production_kinds
-            or entity.kind is EntityKind.BUILDER
-            or entity.kind.profile.attack_damage > 0
+            or entity.profile.can_build
+            or entity.profile.attack_damage > 0
         )
         for entity in simulation.entities.values()
     ):

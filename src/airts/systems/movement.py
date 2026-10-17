@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from math import floor, hypot
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from airts.contracts.spatial import Point
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.collision.solver import advance_positions
 from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
+from airts.systems.assignment_state import state_for_assignment
 from airts.world._numeric import BoolArray, FloatArray, IntArray
 from airts.world.entities import Entity, UnitState
 from airts.world.map import Cell, footprint_cells
@@ -20,6 +22,34 @@ from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+FORMATION_MOVE_DISTANCE = 12.0
+
+
+def move_origins(
+    simulation: Simulation, entity_ids: tuple[str, ...], *, continuing: frozenset[str]
+) -> dict[str, Point]:
+    """Queued micro uses the preceding destination rather than the current army shape."""
+    origins = {}
+    for key in entity_ids:
+        entity = simulation.entities[key]
+        origins[key] = (
+            entity.move_queue[-1]
+            if key in continuing and entity.move_queue
+            else entity.move_target
+            if key in continuing and entity.move_target
+            else entity.position
+        )
+    return origins
+
+
+def is_march(origins: dict[str, Point], target: Point) -> bool:
+    center = Point(
+        sum(point.x for point in origins.values()) / len(origins),
+        sum(point.y for point in origins.values()) / len(origins),
+    )
+    return center.distance_to(target) > FORMATION_MOVE_DISTANCE
 
 
 class MovementWorkspace:
@@ -32,6 +62,7 @@ class MovementWorkspace:
         self.integers: dict[str, IntArray] = {}
         self.members = {key: entity.kind for key, entity in entities.items()}
         self.keys = sorted(key for key, entity in entities.items() if entity.is_movable)
+        self.tick: int | None = None
         self.ensure(len(self.keys))
 
     def ensure(self, count: int) -> None:
@@ -66,6 +97,22 @@ class MovementWorkspace:
         self.integers["work"] = np.empty(4, dtype=np.int64)
 
 
+def observed_velocity(simulation: Simulation, entity: Entity) -> tuple[float, float]:
+    """Read this tick's certified displacement without keeping extra motion history."""
+
+    workspace = simulation._movement_workspace
+    if workspace.tick != simulation.tick:
+        return 0.0, 0.0
+    index = bisect_left(workspace.keys, entity.entity_id)
+    if index == len(workspace.keys) or workspace.keys[index] != entity.entity_id:
+        return 0.0, 0.0
+    original = workspace.floats["positions"]
+    return (
+        (entity.position.x - float(original[index, 0])) / simulation.TICK_SECONDS,
+        (entity.position.y - float(original[index, 1])) / simulation.TICK_SECONDS,
+    )
+
+
 def reset_movement_liveness(entity: Entity) -> None:
     entity.progress_target = None
     entity.progress_distance = None
@@ -84,7 +131,7 @@ def start_path(
     entity.path = list(path.waypoints)
     entity.move_target = target if entity.path else None
     entity.path_cost = path.cost
-    entity.state = state if entity.path else simulation._state_for_assignment(entity.entity_id)
+    entity.state = state if entity.path else state_for_assignment(simulation, entity.entity_id)
     simulation._movement_blocked.discard(entity.entity_id)
     simulation.events.record_path(
         simulation.tick,
@@ -527,6 +574,8 @@ def move_entities(simulation: Simulation) -> None:
         if not entity.path:
             _finish_path(simulation, entity)
 
+    workspace.tick = simulation.tick
+
 
 def drive_move_queues(simulation: Simulation) -> None:
     pending = sorted(
@@ -569,7 +618,7 @@ def _finish_path(simulation: Simulation, entity: Entity) -> None:
     entity.move_target = None
     simulation._movement_blocked.discard(entity.entity_id)
     reset_movement_liveness(entity)
-    entity.state = simulation._state_for_assignment(entity.entity_id)
+    entity.state = state_for_assignment(simulation, entity.entity_id)
     if entity.state is UnitState.DEFENDING:
         entity.defend_arrived = True
     simulation.events.record(
@@ -639,6 +688,7 @@ def plan_group_paths(
     destinations: dict[str, Point],
     *,
     shared_goal: Point | None = None,
+    compact_approach: bool = False,
 ) -> dict[str, PathResult]:
     blocked = simulation._building_cells()
     center = Point(
@@ -648,6 +698,14 @@ def plan_group_paths(
     anchor = shared_goal or min(
         destinations.values(), key=lambda p: (p.distance_to(center), p.y, p.x)
     )
+    # March together along the weighted field, splitting only near the compact
+    # arrival area. An early visible exit can otherwise cut across slow terrain
+    # and discard almost the entire shared route.
+    branch_distance = (
+        max(point.distance_to(anchor) for point in destinations.values()) + 2.0
+        if compact_approach
+        else float("inf")
+    )
     result: dict[str, PathResult] = {}
     for key in entity_ids:
         start, target = simulation.entities[key].position, destinations[key]
@@ -656,7 +714,12 @@ def plan_group_paths(
             result[key] = direct
             continue
         shared = simulation._routes.shared_path(start, anchor, blocked)
-        index = simulation._routes.branch_index(shared, target, blocked)
+        if compact_approach and target == anchor:
+            result[key] = shared
+            continue
+        index = simulation._routes.branch_index(
+            shared, target, blocked, maximum_distance=branch_distance
+        )
         if index >= 0:
             point = shared.waypoints[index]
             # A distinct anchor in the start cell has a waypoint but no cell transition.

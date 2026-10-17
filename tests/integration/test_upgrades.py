@@ -27,6 +27,7 @@ from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
 from airts.presentation.ui import selection
 from airts.simulation import Simulation
+from airts.systems import economy
 from airts.world.map import load_map_data
 from airts.world.units import catalog
 from airts.world.units.catalog import EntityKind
@@ -78,86 +79,91 @@ def upgrade_world(*, match: bool = False) -> Simulation:
     )
 
 
-@pytest.mark.parametrize(
-    "entity_id,cost,ticks,amount",
-    [
-        ("extractor", 120, 300, 8),
-        ("synthesizer", 200, 450, 4),
-    ],
-)
-def test_upgrade_charges_once_keeps_old_income_then_changes_at_completion(
-    entity_id: str,
-    cost: int,
-    ticks: int,
-    amount: int,
+@pytest.mark.parametrize("entity_id", ["extractor", "synthesizer"])
+@pytest.mark.parametrize("tier,start_tick", [(1, 7), (2, 0)])
+def test_each_income_upgrade_charges_once_and_preserves_global_settlement(
+    entity_id: str, tier: int, start_tick: int
 ) -> None:
     world = upgrade_world()
+    world.resources["player"] = 10000
+    world.advance(start_tick)
     entity = world.entities[entity_id]
+    for _ in range(tier - 1):
+        assert world.execute(UpgradeEntityCommand(entity_id)).accepted
+        world.advance(entity.upgrade.remaining_ticks)
+    definition = entity.next_upgrade
+    assert definition is not None
     initial = world.resources["player"]
     old_income = entity.profile.income_per_second
+    old_total = sum(
+        unit.profile.income_per_second
+        for unit in world.entities.values()
+        if unit.owner_id == "player" and unit.is_complete
+    )
+    start_tick = world.tick
     assert world.execute(UpgradeEntityCommand(entity_id)).accepted
-    assert world.resources["player"] == initial - cost
-    assert entity.upgrade.remaining_ticks == ticks
+    assert world.resources["player"] == initial - definition.cost
+    assert entity.upgrade.remaining_ticks == definition.duration_ticks
     assert not world.execute(UpgradeEntityCommand(entity_id)).accepted
-    assert world.resources["player"] == initial - cost
-    world.advance(ticks - 1)
-    assert entity.upgrade.tier == 1 and entity.upgrade.remaining_ticks == 1
+    assert world.resources["player"] == initial - definition.cost
+    world.advance(definition.duration_ticks - 1)
+    assert entity.upgrade.tier == tier and entity.upgrade.remaining_ticks == 1
     assert entity.profile.income_per_second == old_income
-    assert world.resources["player"] > initial - cost  # Production continued.
+    settlements = (
+        world.tick // Simulation.TICKS_PER_SECOND - start_tick // Simulation.TICKS_PER_SECOND
+    )
+    assert world.resources["player"] == initial - definition.cost + settlements * old_total
     world.advance()
-    assert entity.upgrade.tier == 2 and entity.upgrade.remaining_ticks == 0
-    assert entity.profile.income_per_second * 2 == amount
-    assert len(world.events.query(event_types=frozenset({EventType.UPGRADE_COMPLETED}))) == 1
-
-
-@pytest.mark.parametrize(
-    "entity_id,cost,ticks,amount",
-    [
-        ("extractor", 360, 600, 16),
-        ("synthesizer", 600, 900, 8),
-    ],
-)
-def test_t3_uses_its_own_price_duration_and_absolute_output(
-    entity_id: str,
-    cost: int,
-    ticks: int,
-    amount: int,
-) -> None:
-    world = upgrade_world()
-    world.resources["player"] = 10_000
-    entity = world.entities[entity_id]
-    assert world.execute(UpgradeEntityCommand(entity_id)).accepted
-    world.advance(entity.upgrade.remaining_ticks)
-    balance = world.resources["player"]
-    assert world.execute(UpgradeEntityCommand(entity_id)).accepted
-    assert world.resources["player"] == balance - cost
-    world.advance(ticks - 1)
-    assert entity.upgrade.tier == 2
+    assert entity.upgrade.tier == tier + 1 and entity.upgrade.remaining_ticks == 0
+    assert entity.profile.income_per_second == definition.profile.income_per_second
+    assert economy.income_per_second(world, "player") == sum(
+        unit.profile.income_per_second
+        for unit in world.entities.values()
+        if unit.owner_id == "player"
+    )
+    completed = world.events.query(
+        event_types=frozenset({EventType.UPGRADE_COMPLETED}), subject_id=entity_id
+    )
+    assert len(completed) == tier
+    new_total = old_total - old_income + definition.profile.income_per_second
+    expected = initial - definition.cost + settlements * old_total
+    if world.tick % Simulation.TICKS_PER_SECOND == 0:
+        expected += new_total
+    assert world.resources["player"] == expected
+    until_settlement = Simulation.TICKS_PER_SECOND - world.tick % Simulation.TICKS_PER_SECOND
+    world.advance(until_settlement - 1)
+    assert world.resources["player"] == expected
     world.advance()
-    assert entity.upgrade.tier == 3 and entity.next_upgrade is None
-    assert entity.profile.income_per_second * 2 == amount
-    balance = world.resources["player"]
-    assert not world.execute(UpgradeEntityCommand(entity_id)).accepted
-    assert not world.execute(CancelUpgradeCommand(entity_id)).accepted
-    assert world.resources["player"] == balance
+    assert world.resources["player"] == expected + new_total
+    if tier == len(entity.kind.upgrades):
+        assert entity.next_upgrade is None
+        balance = world.resources["player"]
+        assert not world.execute(UpgradeEntityCommand(entity_id)).accepted
+        assert not world.execute(CancelUpgradeCommand(entity_id)).accepted
+        assert world.resources["player"] == balance
 
 
-def test_cancellation_refunds_once_and_preserves_the_production_cycle() -> None:
+def test_cancellation_refunds_once_and_preserves_global_settlement() -> None:
     world = upgrade_world()
+    definition = EntityKind.RESOURCE_GENERATOR.upgrades[0]
+    base_income = (
+        EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+        + EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
+    )
     assert world.execute(UpgradeEntityCommand("extractor")).accepted
     world.advance(13)
     entity = world.entities["extractor"]
     balance = world.resources["player"]
     assert world.execute(CancelUpgradeCommand("extractor")).accepted
-    assert world.resources["player"] == balance + 120
-    assert entity.income_ticks == 13 and entity.upgrade.tier == 1
+    assert world.resources["player"] == balance + definition.cost
+    assert world.tick % Simulation.TICKS_PER_SECOND == 3 and entity.upgrade.tier == 1
     assert not world.execute(CancelUpgradeCommand("extractor")).accepted
-    assert world.resources["player"] == balance + 120
+    assert world.resources["player"] == balance + definition.cost
     assert world.execute(UpgradeEntityCommand("extractor")).accepted
-    assert entity.upgrade.remaining_ticks == 300
+    assert entity.upgrade.remaining_ticks == definition.duration_ticks
     world.advance(7)
-    assert entity.income_ticks == 0
-    assert world.resources["player"] == balance + 6
+    assert world.tick % Simulation.TICKS_PER_SECOND == 0
+    assert world.resources["player"] == balance + base_income
 
 
 def test_destruction_does_not_refund_or_finish_an_upgrade() -> None:
@@ -207,7 +213,7 @@ def test_partial_cycle_and_paid_upgrades_save_continue_cancel_and_replay(
     restored = load_simulation(path)
     assert restored.export_state() == world.export_state()
     for sim in (world, restored):
-        assert sim.entities["extractor"].income_ticks == 10
+        assert sim.tick % Simulation.TICKS_PER_SECOND == 0
         assert sim.entities["extractor"].upgrade.remaining_ticks == 157
         assert sim.execute(CancelUpgradeCommand("synthesizer")).accepted
         assert sim.execute(UpgradeEntityCommand("synthesizer")).accepted
@@ -239,8 +245,8 @@ def test_saves_reject_invalid_upgrade_state(field: str, value: object) -> None:
         )
 
 
-@pytest.mark.parametrize("case", ["max_tier", "unfinished", "nonproducer", "cycle", "missing"])
-def test_saves_reject_incoherent_upgrade_and_income_state(case: str) -> None:
+@pytest.mark.parametrize("case", ["max_tier", "unfinished", "missing"])
+def test_saves_reject_incoherent_upgrade_state(case: str) -> None:
     world = upgrade_world()
     entity = world.entities["extractor"]
     if case == "max_tier":
@@ -249,11 +255,6 @@ def test_saves_reject_incoherent_upgrade_and_income_state(case: str) -> None:
     elif case == "unfinished":
         entity.construction_progress = 0.5
         entity.upgrade.remaining_ticks = 1
-    elif case == "nonproducer":
-        entity.kind = EntityKind.FACTORY
-        entity.income_ticks = 1
-    elif case == "cycle":
-        entity.income_ticks = 20
     state = world.export_state()
     if case == "missing":
         del state["entities"]["extractor"]["upgrade"]  # type: ignore[index,attr-defined]
@@ -268,34 +269,6 @@ def test_saves_reject_incoherent_upgrade_and_income_state(case: str) -> None:
 )
 def test_upgrade_command_codec(command: UpgradeEntityCommand | CancelUpgradeCommand) -> None:
     assert command_from_dict(command_to_dict(command)) == command
-
-
-def test_income_waits_for_a_full_cycle_after_construction() -> None:
-    world = upgrade_world()
-    entity = world.entities["extractor"]
-    entity.construction_progress = 0.5
-    world.advance(17)
-    assert entity.income_ticks == 0
-    entity.construction_progress = None
-    balance = world.resources["player"]
-    world.advance(19)
-    assert world.resources["player"] == balance + 2  # Only the synthesizer paid.
-    world.advance()
-    assert world.resources["player"] == balance + 6
-
-
-def test_upgrade_completion_preserves_partial_income_cycle() -> None:
-    world = upgrade_world()
-    world.advance(7)
-    assert world.execute(UpgradeEntityCommand("extractor")).accepted
-    world.advance(300)
-    entity = world.entities["extractor"]
-    assert entity.income_ticks == 7 and entity.upgrade.tier == 2
-    balance = world.resources["player"]
-    world.advance(12)
-    assert world.resources["player"] == balance
-    world.advance()
-    assert world.resources["player"] == balance + 10
 
 
 def test_selection_buttons_start_cancel_disable_and_display_max_tier() -> None:

@@ -15,18 +15,21 @@ from airts.presentation.gpu_feedback import FeedbackView, GPUFeedback
 from airts.presentation.gpu_shapes import SHAPE_FLOATS, FloatColor, append_shape
 from airts.presentation.palette import (
     ENTITY_COLORS,
+    PROGRESS_COLOR,
+    PROGRESS_TRACK,
     PROJECTILE_COLORS,
     TERRAIN_COLORS,
     Color,
     match_color,
 )
+from airts.presentation.progress import building_progress
 from airts.presentation.projectile_effects import (
     SHELL_CORE_RADIUS,
     SHELL_RIM_RADIUS,
     blast_circles,
     shell_visual_position,
 )
-from airts.presentation.rendering import SceneView, order_feedback
+from airts.presentation.rendering import SceneView, interaction_range, order_feedback
 from airts.presentation.ui.theme import BACKGROUND
 from airts.presentation.visuals.assets import atlas_pixels
 from airts.presentation.visuals.catalog import APPEARANCES, ATLAS_COLUMNS, TILE_PIXELS
@@ -457,18 +460,25 @@ class OpenGLFrameBuilder:
                         health_bar=True,
                     )
 
+            if entity.category is EntityCategory.BUILDING:
+                for index, progress in enumerate(building_progress(simulation, entity)):
+                    for fraction, color_rgb in ((1.0, PROGRESS_TRACK), (progress, PROGRESS_COLOR)):
+                        append_shape(
+                            values,
+                            center=center,
+                            half_size=(0.7, APPEARANCES[entity.kind].size[1] / 2),
+                            minimum_half_size=(6.0, 1.5),
+                            pixel_offset=(0.0, 5.5 + index * 6),
+                            size_fraction=(fraction, 1.0),
+                            color=_float_color(color_rgb),
+                            circle=False,
+                            health_bar=True,
+                        )
+
         inspected = simulation.entities.get(app.inspected_entity_id or "")
-        interaction_range = (
-            inspected.kind.profile.build_range
-            if inspected is not None and inspected.kind is EntityKind.BUILDER
-            else inspected.kind.profile.repair_range
-            if inspected is not None and inspected.kind is EntityKind.REPAIR_HUB
-            else inspected.kind.profile.attack_range
-            if inspected is not None
-            else 0.0
-        )
-        if inspected is not None and interaction_range > 0 and len(selected_entities) <= 1:
-            range_radius = interaction_range * tile_size
+        radius, work_range = interaction_range(inspected) if inspected is not None else (0.0, False)
+        if inspected is not None and radius > 0 and len(selected_entities) <= 1:
+            range_radius = radius * tile_size
             previous_position = app.previous_entity_position(inspected.entity_id)
             previous_selection_position = (
                 previous_position
@@ -489,9 +499,7 @@ class OpenGLFrameBuilder:
                 color=(0.0, 0.0, 0.0, 0.0),
                 circle=True,
                 outline_width=1.0,
-                outline_color=_float_color(
-                    (105, 232, 172) if inspected.kind is EntityKind.BUILDER else (255, 218, 100)
-                ),
+                outline_color=_float_color((105, 232, 172) if work_range else (255, 218, 100)),
             )
 
         for automation in simulation.live_automations:
@@ -602,9 +610,7 @@ class OpenGLFrameBuilder:
         retained = {}
         for trace in simulation.projectile_traces:
             if trace.weapon_kind.profile.splash_radius > 0:
-                for point, radius, blast_color, width in blast_circles(
-                    trace, simulation.tick, simulation.TICKS_PER_SECOND
-                ):
+                for point, radius, blast_color, width in blast_circles(trace, simulation.tick):
                     append_shape(
                         shapes,
                         center=(origin_x + point.x * tile_size, origin_y + point.y * tile_size),
@@ -1166,8 +1172,9 @@ void main() {
     }
     if (in_shape_outline.x > 1.5 && in_shape_outline.x < 2.5) {
         center.x += size.x * (in_size_fraction.x - 1.0);
-        // Negative world height carries the sprite's top edge; bar height is pixels.
-        center.y -= max(-in_half_size.y * terrain_tile_size, 7.0);
+        // Signed world height anchors bars above/below sprites; thickness stays in pixels.
+        center.y += sign(in_half_size.y) * max(abs(in_half_size.y) * terrain_tile_size, 7.0);
+        size.y = in_minimum_half_size.y;
     }
     size *= in_size_fraction;
     vec2 offset = in_corner * size;

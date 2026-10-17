@@ -19,6 +19,8 @@ from airts.contracts.spatial import (
 from airts.world.map import GameMap
 from airts.world.units.catalog import EntityKind
 
+PRODUCTION_HISTORY_LIMIT = 128
+
 AUTO_REPAIR_HEALTH_THRESHOLD = 0.5
 
 
@@ -104,6 +106,7 @@ class DefendParameters:
     deployment_slots: tuple[Point, ...] = ()
     assembly_radius: float = 0.0
     auto_repair: bool = False
+    production_defense: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -115,6 +118,7 @@ class DefendParameters:
             "deployment_slots": [[point.x, point.y] for point in self.deployment_slots],
             "assembly_radius": self.assembly_radius,
             "auto_repair": self.auto_repair,
+            "production_defense": self.production_defense,
         }
 
 
@@ -179,6 +183,14 @@ class ProductionParameters:
                 if index >= self.sequence_index and unit_kind is kind
             )
         return self.target_count - self.produced_count if self.unit_kind is kind else 0
+
+    def record_produced_entity(self, entity_id: str) -> None:
+        """Retain bounded recent production evidence; events own the complete history."""
+
+        self.produced_entity_ids.append(entity_id)
+        overflow = len(self.produced_entity_ids) - PRODUCTION_HISTORY_LIMIT
+        if overflow > 0:
+            del self.produced_entity_ids[:overflow]
 
 
 @dataclass(slots=True)

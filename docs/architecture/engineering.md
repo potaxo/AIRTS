@@ -15,7 +15,7 @@ to change, not line count; avoid facade forwarders, generic managers and transit
 | `world/units/` | Immutable profiles, stable tags and explicit production relationships |
 | `navigation/` | Routing fields/budgets, spatial queries and local collision geometry |
 | `navigation/collision/` | Shared disc certificates (`geometry`), bounded queries (`neighbors`), joint release (`release`), anchor recovery (`returning`), tick solver (`solver`) and dependency-aware compilation (`_compile`) |
-| `systems/` | Command application, automation, movement, combat, repair, economy, production, construction and results |
+| `systems/` | Command application and focused runtime services; each mutation has one owning module |
 | `adapters/` | Versioned persistence and replay diagnostics |
 | `presentation/` | Window/input, lobby, UI, software/GPU rendering and frame metrics |
 | `presentation/visuals/` | Explicit appearance bindings, packaged images/atlas, bounded software transforms, terrain patterns, visual facing and GPU sprite records; [appearance contract](appearance.md) |
@@ -27,16 +27,18 @@ Contracts may read world profiles. World does not import navigation; neither imp
 adapters, presentation or the facade. Systems reference `Simulation` only under `TYPE_CHECKING`.
 Imports are acyclic; Pygame/ModernGL remain outside domain code. Package initializers declare
 packages; the root directly re-exports `Simulation` and `load_example_map` with unchanged identity.
-Internal calls import their owner directly. JSON tags carry data, not Python module paths.
+Internal calls import their owner directly. System modules do not import another system's private
+symbols, and retired facade forwarders must not reappear. JSON tags carry data, not Python module paths.
 
 ### Definitions and execution
 
 Each mobile kind has one keyword-based immutable profile; buildings share the same schema.
 The explicit catalog owns tag/profile and producer bindings, never dynamic plugin discovery.
-Armed profiles require positive projectile speed; collision radii and relative mass must be finite
-and positive; weapon intervals are positive integer ticks. Mobile production times are positive
-integer ticks owned by each profile, with nonnegative integer timing for other profiles.
-Each mobile profile declares its mass;
+Profile construction rejects invalid health, footprint, motion, collision, combat, economy,
+production, construction, repair and reclamation values. Armed profiles require positive range and
+projectile speed; mobile kinds require positive cost and production time. Mobile build, repair and
+reclaim eligibility derives from profile capabilities rather than kind-name checks. Each mobile
+profile declares its mass;
 buildings remain hard obstacles regardless of mass. The catalog's `BUILDABLE_KINDS` is shared by
 construction validation and the Builder controls. Artillery and turrets have independent definitions.
 Add a kind through its definition, catalog/producer binding and presentation palette; opponent
@@ -46,7 +48,12 @@ per-kind executors. Images/colors belong to presentation.
 Command validation and precedence belong at the control boundary; spatial targets share codecs.
 Navigation owns contact geometry; movement owns intent/recovery lifecycle and all position/occupancy
 submission. Adapters restore authoritative recovery state; scratch, graphs and leaders are derived.
-Automation schema, control and execution remain separate responsibilities.
+`automation_lifecycle.py` owns creation, transitions and claims; `automation_assignments.py` owns
+membership and cleanup; `automation_runtime.py` owns entity initialization and shared formations.
+`automation_control.py` composes these for player pause/resume/cancel; `automation_execution.py`
+advances tasks. `production.py` owns queues, payment and progress; `production_orders.py` assigns
+new units. Shared leaves own validation (`validation.py`), IDs (`entity_registry.py`), spawn clearance
+(`spawning.py`) and firing approach geometry (`combat_geometry.py`).
 `repair_positions.py` owns service geometry/capacity without importing repair controllers;
 `reclamation.py` owns builder approach and the single removal/refund transaction. Building-line
 draft geometry belongs to `presentation/build_placement.py` and emits ordinary construction commands.
@@ -65,10 +72,8 @@ Art sources and the offline authoring tool are owned by the appearance contract.
 
 Collision geometry and queries are shared leaves. Release and return algorithms import those
 leaves; the solver orchestrates them. Movement packs each profile's mass into its existing reusable
-numeric workspace and remains the only position/occupancy submitter. The extraction replaces
-module ownership and UI state ownership, with no compatibility import shims or extra execution
-controller. Public Simulation and command tags are unchanged. Save and replay consequences of
-mass-weighted response belong to the persistence policy.
+numeric workspace and remains the only position/occupancy submitter. Save and replay consequences
+of mass-weighted response belong to the persistence policy.
 
 Contact kernels fingerprint their source package once at import and extend each Numba cache index
 stamp through the numeric adapter. A helper edit invalidates inlined callers even when the caller

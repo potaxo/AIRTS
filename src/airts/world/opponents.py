@@ -47,6 +47,8 @@ class OpponentState:
     reserve: Squad = field(default_factory=Squad)
     squads: list[Squad] = field(default_factory=list)
     budget_paused_ids: list[str] = field(default_factory=list)
+    growth_credit: float = 0.0
+    budget_tick: int = 0
 
     def remove_entity(self, entity_id: str) -> None:
         for squad in (self.reserve, *self.squads):
@@ -60,4 +62,6 @@ class OpponentState:
             "reserve": self.reserve.to_dict(),
             "squads": [squad.to_dict() for squad in self.squads],
             "budget_paused_ids": list(self.budget_paused_ids),
+            "growth_credit": self.growth_credit,
+            "budget_tick": self.budget_tick,
         }

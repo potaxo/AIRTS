@@ -263,13 +263,22 @@ def test_opening_cover_configures_then_locks_match_until_restart() -> None:
 
 def test_ai_replaces_builder_even_when_factory_has_continuous_army_loop() -> None:
     simulation = match_simulation()
+    assert simulation.execute(
+        CreateProductionCommand(
+            "enemy_factory",
+            EntityKind.LIGHT_TANK,
+            1,
+            continuous=True,
+            owner_id="ai_b",
+        )
+    ).accepted
     simulation.advance(25)
     assert simulation.continuous_production("enemy_factory") is not None
     simulation.remove_entity("enemy_builder")
     simulation.remove_entity("enemy_command_01")
-    # Allow the existing finite scout order, the AI decision interval and the replacement.
+    # Allow the existing paid light tank, the decision interval and the replacement.
     simulation.advance(
-        EntityKind.SCOUT.profile.production_ticks
+        EntityKind.LIGHT_TANK.profile.production_ticks
         + EntityKind.BUILDER.profile.production_ticks
         + Simulation.TICKS_PER_SECOND
     )

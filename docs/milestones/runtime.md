@@ -65,9 +65,13 @@ destroyed extractor frees it for either side. Income is unlimited and equal acro
 The original example and custom maps without sites retain unrestricted sandbox placement.
 [skirmish.py](../../src/airts/world/skirmish.py) owns the new fixed map geometry.
 
-Each owner has one integer resource balance. Completed income buildings produce every two seconds
-even without an automation. Each building retains its own partial cycle; construction must finish
-before that cycle starts. [economy.py](../../src/airts/systems/economy.py) owns income execution;
+Each owner has one integer resource balance. Completed income buildings contribute to a cached
+per-owner income total, settled every ten ticks (one game second), even without an automation.
+Construction completion, upgrade completion and removal update that total; ordinary settlement
+does not scan entities or maintain per-building timers. Newly completed buildings join the next
+global settlement; completion during that tick's automation pass follows that tick's settlement.
+Initialization and loading rebuild totals from complete entities. Profile rates are credited per second.
+[economy.py](../../src/airts/systems/economy.py) owns income execution;
 [units/buildings.py](../../src/airts/world/units/buildings.py) owns profile income and upgrade prices.
 Sandbox and match maps use the same production amounts, without a sandbox income override.
 Matter Synthesizers can be built on ordinary valid terrain without a resource site. Their high
@@ -80,7 +84,7 @@ and supported saves; it does not enable or accelerate income.
 Extractors and Matter Synthesizers start at T1 and upgrade sequentially to T3. Other kinds have
 no upgrades configured. Costs use the existing single resource; no second currency is introduced.
 
-| Kind | T1 output / 2s | T2 output / 2s | T1 -> T2 cost / time | T3 output / 2s | T2 -> T3 cost / time |
+| Kind | T1 output / s | T2 output / s | T1 -> T2 cost / time | T3 output / s | T2 -> T3 cost / time |
 | --- | --- | --- | --- | --- | --- |
 | Extractor | 4 | 8 | 120 / 30s | 16 | 360 / 60s |
 | Matter Synthesizer | 2 | 4 | 200 / 45s | 8 | 600 / 90s |
@@ -88,7 +92,7 @@ no upgrades configured. Costs use the existing single resource; no second curren
 `UpgradeEntityCommand` validates ownership, completion, capability, available resources and idle
 upgrade state before charging once. One upgrade can run per entity. Ordinary production continues
 at the current tier; completion switches the absolute target profile before that tick's income
-settlement without resetting the production cycle. `CancelUpgradeCommand` returns the full paid
+settlement without resetting the global income interval. `CancelUpgradeCommand` returns the full paid
 cost once and discards progress. Destruction/reclamation removes progress without an upgrade refund.
 Stop and ordinary assignments do not cancel upgrades. Paused games advance neither timer.
 
@@ -98,7 +102,7 @@ catalog bindings supply costs, durations and target profiles. The shared
 branches. `Entity.profile` resolves the current tier. Current transitions change only income;
 future stat upgrades must route the affected subsystem through the effective profile. Physical
 footprint/collision changes are outside this implementation.
-Saves retain tier, paid remaining time and partial income cycles; loading neither charges nor pays
+Saves retain tier, paid remaining time and the simulation tick; loading neither charges nor pays
 again. [Persistence](persistence.md) owns format rejection and replay diagnostic support.
 The selection panel shows tier, output, next cost/duration, remaining time and a progress bar.
 Same-type selections group by tier and running/unfinished state; each button applies to its group.
@@ -111,6 +115,11 @@ to off for new simulations. Economy credits an additional 2,000 resources after 
 ticks (one game second), independently of building income. A changed toggle resets the partial
 interval; repeating the same setting preserves it. Pause and completed matches advance no ticks.
 Resource events identify the bonus as `DEVELOPER_MODE_INCOME`.
+`SetAIIncomeMultiplierCommand` switches all non-player building income between 1x and 5x,
+independently of the player bonus; ownership/schema validation rejects other multipliers and
+non-player callers. AI planning uses the effective income. The resource header reports the player's
+total income per game second, including the bonus. The developer subpanel's local speed setting
+scales elapsed time by 0.5x, 1x, 2x or 4x while the headless core retains fixed 10 Hz steps.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
 disables ambient spawning by default; [README](../../README.md#run) owns CLI defaults and controls.
 
@@ -137,14 +146,26 @@ and waits with `SPAWN_BLOCKED`. Ambient spawning searches the remaining seeded c
 defers when capacity is unavailable. The bundled starting map has legal disc clearance; custom map
 cell validation alone is not a physical separation guarantee, so legacy initial mobile overlaps
 use the same bounded recovery contract rather than being frozen or silently scattered.
+Both paths use the shared spawn-clearance service and the shared entity-ID allocator. Production
+controllers retain only the latest 128 produced entity IDs for inspection; events remain the
+complete audit trail. The recent-ID list stays bounded during continuous production.
 `Produce + Defend` retargets each selected factory's existing loop without changing its unit kind
-and attaches only subsequently produced units to a new linked defense. Already produced units keep
-their current orders, including any earlier defense target. Polygons gather; polylines spread along
-the line. Factories remain independent owners of costs, queues, and progress.
+and attaches only subsequently produced units to a shared production defense. Production sources
+with the same owner and exact spatial target join one live controller, with one assembly circle and
+one entry under Units for inspection, pause/resume, auto-repair and cancellation. Polygons gather;
+polylines spread along the line. Ordinary manually created defenses and other owners stay separate.
+Retargeting a factory affects only its future units; already produced units keep their orders.
+Editing the shared controller's target or auto-repair updates every linked source. Joining an
+existing controller inherits its auto-repair setting; an explicit auto-repair edit changes the group.
+Moving a controller onto another existing production defense is rejected; factories can instead
+join that controller through Produce + Defend. Canceling the controller detaches future
+reinforcements while factories keep producing; pausing it also holds subsequently joined units.
+Factories remain independent owners of costs, queues, progress and production pause/cancel.
 
-Builders construct factories, repair hubs, extractors, Matter Synthesizers, and turrets, not command centers. Entity profiles
-own costs, build speeds, and build ranges. Placement validates capability, ownership, bounds,
-terrain and real building footprints. Remote orders are owner-only blueprints: they do not occupy
+Construction-capable units construct the kinds in `BUILDABLE_KINDS`; current profiles grant that
+capability to builders, not command centers. Entity profiles own costs, build speeds, and build ranges.
+Placement validates capability, ownership, bounds, terrain and real building footprints.
+Remote orders are owner-only blueprints: they do not occupy
 space, reserve resource sites, block movement or become combat targets. Blueprints may overlap.
 Builders travel even without funds, then wait in range for money or mobile occupants to leave.
 Placement is revalidated on arrival; a blueprint covered by a real building fails and the queue
@@ -172,7 +193,7 @@ Rejected placement preserves accepted queues. Right-click closes placement witho
 altering accepted work. An unstarted occupied site waits with `SITE_OCCUPIED`; commit occupancy before
 publishing the scaffold. Queue, progress, damage, resource, and assignment state survive supported saves.
 
-Builders can reclaim any owned physical building through `ReclaimBuildingCommand`. They approach
+Reclaim-capable mobile units can reclaim any owned physical building through `ReclaimBuildingCommand`. They approach
 within build range, stop, and subtract their profile's reclaim rate from its health each tick.
 Multiple builders contribute independently. Only the builder taking the final health point removes
 the building through authoritative removal and refunds `construction_cost * 70 // 100` once to its owner.

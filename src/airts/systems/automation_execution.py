@@ -9,36 +9,28 @@ from typing import TYPE_CHECKING
 from airts.contracts.automations import (
     AUTO_REPAIR_HEALTH_THRESHOLD,
     Automation,
-    AutomationKind,
     AutomationStatus,
     DefendParameters,
     PatrolParameters,
     RepairPhase,
-    assign_formation_slots,
-    build_defend_stations,
     reinforcement_parameters,
     repair_parameters,
     target_center,
 )
-from airts.contracts.automations import (
-    defend_parameters as _defend_parameters,
-)
-from airts.contracts.automations import (
-    patrol_parameters as _patrol_parameters,
-)
+from airts.contracts.automations import defend_parameters as _defend_parameters
+from airts.contracts.automations import patrol_parameters as _patrol_parameters
 from airts.contracts.commands import CreateRepairAndReturnCommand
 from airts.contracts.events import EventType
 from airts.contracts.spatial import (
     Point,
     PointTarget,
-    PolylineTarget,
     SpatialTarget,
     distance_to_target,
 )
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import movement
+from airts.systems import automation_assignments, automation_lifecycle, automation_runtime, movement
 from airts.systems.repair_positions import in_service_range, repair_position_clear
 from airts.world.entities import Entity, UnitState
 from airts.world.units.catalog import EntityKind
@@ -149,32 +141,44 @@ def drive_reinforcement(simulation: Simulation, automation: Automation) -> None:
     parameters = reinforcement_parameters(automation)
     target = simulation.automations.get(parameters.target_automation_id)
     if target is None or target.status.terminal:
-        simulation._transition(automation, AutomationStatus.FAILED, "TARGET_AUTOMATION_UNAVAILABLE")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.FAILED, "TARGET_AUTOMATION_UNAVAILABLE"
+        )
         return
     if len(target.entity_ids) >= parameters.minimum_units:
-        simulation._transition(automation, AutomationStatus.COMPLETED, "MINIMUM_FORCE_REACHED")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.COMPLETED, "MINIMUM_FORCE_REACHED"
+        )
         return
     transferred = False
     for entity_id in parameters.candidate_entity_ids:
         if entity_id in target.entity_ids or entity_id not in simulation.entities:
             continue
-        if not simulation._claim_wins(target, entity_id):
+        if not automation_lifecycle.claim_wins(simulation, target, entity_id):
             continue
-        simulation._assign(entity_id, target)
+        automation_assignments.assign(simulation, entity_id, target)
         target.entity_ids.append(entity_id)
-        initialize_runtime_entity(simulation, target, entity_id)
+        automation_runtime.initialize_runtime_entity(simulation, target, entity_id)
         parameters.transferred_entity_ids.append(entity_id)
         transferred = True
         if len(target.entity_ids) >= parameters.minimum_units:
             break
     if len(target.entity_ids) >= parameters.minimum_units:
         if target.status is AutomationStatus.WAITING:
-            simulation._transition(target, AutomationStatus.ACTIVE, "REINFORCED")
-        simulation._transition(automation, AutomationStatus.COMPLETED, "MINIMUM_FORCE_REACHED")
+            automation_lifecycle.transition(
+                simulation, target, AutomationStatus.ACTIVE, "REINFORCED"
+            )
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.COMPLETED, "MINIMUM_FORCE_REACHED"
+        )
     elif not transferred and automation.status is AutomationStatus.ACTIVE:
-        simulation._transition(automation, AutomationStatus.WAITING, "NO_ELIGIBLE_UNITS")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.WAITING, "NO_ELIGIBLE_UNITS"
+        )
     elif transferred and automation.status is AutomationStatus.WAITING:
-        simulation._transition(automation, AutomationStatus.ACTIVE, "UNITS_AVAILABLE")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.ACTIVE, "UNITS_AVAILABLE"
+        )
 
 
 def drive_repair(simulation: Simulation, automation: Automation) -> None:
@@ -188,8 +192,12 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
         if phase is RepairPhase.TRAVELING:
             building = simulation.entities.get(parameters.destinations[entity_id])
             if building is None:
-                simulation._transition(automation, AutomationStatus.FAILED, "REPAIR_SOURCE_REMOVED")
-                simulation._release_automation(automation, clear_suspended=True)
+                automation_lifecycle.transition(
+                    simulation, automation, AutomationStatus.FAILED, "REPAIR_SOURCE_REMOVED"
+                )
+                automation_assignments.release_automation(
+                    simulation, automation, clear_suspended=True
+                )
                 return
             if entity.health >= entity.kind.profile.max_health:
                 entity.path.clear()
@@ -208,8 +216,8 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 parameters.phases[entity_id] = RepairPhase.REPAIRING
                 entity.state = UnitState.REPAIRING
                 if automation.status is AutomationStatus.WAITING:
-                    simulation._transition(
-                        automation, AutomationStatus.ACTIVE, "REPAIR_SPACE_AVAILABLE"
+                    automation_lifecycle.transition(
+                        simulation, automation, AutomationStatus.ACTIVE, "REPAIR_SPACE_AVAILABLE"
                     )
                 continue
             if (
@@ -233,14 +241,14 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 except PathfindingError:
                     entity.state = UnitState.WAITING
                     if automation.status is AutomationStatus.ACTIVE:
-                        simulation._transition(
-                            automation, AutomationStatus.WAITING, "NO_REPAIR_SPACE"
+                        automation_lifecycle.transition(
+                            simulation, automation, AutomationStatus.WAITING, "NO_REPAIR_SPACE"
                         )
                     continue
             parameters.destinations[entity_id] = destination
             if automation.status is AutomationStatus.WAITING:
-                simulation._transition(
-                    automation, AutomationStatus.ACTIVE, "REPAIR_SPACE_AVAILABLE"
+                automation_lifecycle.transition(
+                    simulation, automation, AutomationStatus.ACTIVE, "REPAIR_SPACE_AVAILABLE"
                 )
             movement.start_path(
                 simulation, entity, point, path, automation.automation_id, UnitState.RETURNING
@@ -250,8 +258,12 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 continue
             building = simulation.entities.get(parameters.destinations[entity_id])
             if building is None:
-                simulation._transition(automation, AutomationStatus.FAILED, "REPAIR_SOURCE_REMOVED")
-                simulation._release_automation(automation, clear_suspended=True)
+                automation_lifecycle.transition(
+                    simulation, automation, AutomationStatus.FAILED, "REPAIR_SOURCE_REMOVED"
+                )
+                automation_assignments.release_automation(
+                    simulation, automation, clear_suspended=True
+                )
                 return
             if not in_service_range(simulation, entity, building) or not repair_position_clear(
                 simulation, entity, entity.position
@@ -286,14 +298,18 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 entity_id
             ) or parameters.resume_automation_ids.get(entity_id)
             if resume_id is not None:
-                simulation._resume_suspended_assignment(automation, entity_id)
+                automation_assignments.resume_suspended_assignment(
+                    simulation, automation, entity_id
+                )
                 parameters.phases[entity_id] = RepairPhase.DONE
                 continue
             return_position = parameters.return_positions[entity_id]
             if entity.path or entity.move_target is not None:
                 continue
             if entity.position.distance_to(return_position) <= 0.05:
-                simulation._resume_suspended_assignment(automation, entity_id)
+                automation_assignments.resume_suspended_assignment(
+                    simulation, automation, entity_id
+                )
                 parameters.phases[entity_id] = RepairPhase.DONE
                 continue
             if not allowance.claim():
@@ -305,7 +321,9 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                     simulation._building_cells(),
                 )
             except PathfindingError as error:
-                simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
+                automation_lifecycle.transition(
+                    simulation, automation, AutomationStatus.BLOCKED, str(error)
+                )
                 return
             movement.start_path(
                 simulation,
@@ -316,45 +334,9 @@ def drive_repair(simulation: Simulation, automation: Automation) -> None:
                 UnitState.RETURNING,
             )
     if all(phase is RepairPhase.DONE for phase in parameters.phases.values()):
-        simulation._transition(automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED")
-
-
-def initialize_runtime_entity(
-    simulation: Simulation, automation: Automation, entity_id: str
-) -> None:
-    entity = simulation.entities[entity_id]
-    entity.repair_target_id = None
-    entity.reclaim_target_id = None
-    entity.clear_recovery_request()
-    entity.path.clear()
-    entity.hold_anchor = None
-    entity.defend_arrived = False
-    entity.recovery_path.clear()
-    entity.recovery_blocked_cells = None
-    entity.recovery_retry_tick = entity.contact_wait_ticks = 0
-    entity.move_target = None
-    entity.move_queue.clear()
-    entity.attack_gather_point = None
-    entity.attack_target_id = None
-    entity.pursue_target = False
-    movement.reset_movement_liveness(entity)
-    if automation.kind is AutomationKind.PATROL:
-        patrol_parameters = _patrol_parameters(automation)
-        patrol_parameters.waypoint_indices.setdefault(entity_id, 0)
-        entity.state = UnitState.PATROLLING
-    elif automation.kind is AutomationKind.DEFEND:
-        defend_parameters = _defend_parameters(automation)
-        if entity_id not in defend_parameters.stations:
-            defend_parameters.stations[entity_id] = next(iter(defend_parameters.stations.values()))
-        entity.state = UnitState.DEFENDING
-    elif automation.kind is AutomationKind.PRODUCTION:
-        entity.state = UnitState.PRODUCING
-    elif automation.kind is AutomationKind.CONSTRUCTION:
-        entity.state = UnitState.MOVING
-    elif automation.kind is AutomationKind.REPAIR_AND_RETURN:
-        entity.state = UnitState.RETURNING
-    elif automation.kind is AutomationKind.ECONOMY:
-        entity.state = UnitState.IDLE
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.COMPLETED, "ALL_UNITS_REPAIRED"
+        )
 
 
 def interrupt_patrol(entity: Entity, parameters: PatrolParameters) -> None:
@@ -399,7 +381,11 @@ def drive_patrol(
             strict=True,
         )
     )
-    builders = tuple(key for key in ordered if simulation.entities[key].kind is EntityKind.BUILDER)
+    builders = tuple(
+        key
+        for key in ordered
+        if simulation.entities[key].profile.movable and simulation.entities[key].profile.can_repair
+    )
     if builders:
         damaged, repair_index = queries.patrol_index(
             simulation, automation.owner_id, parameters.target, repair=True
@@ -423,7 +409,7 @@ def drive_patrol(
         if simulation.assignments.get(key) != automation.automation_id:
             continue
         entity = simulation.entities[key]
-        if entity.kind is EntityKind.BUILDER:
+        if entity.profile.movable and entity.profile.can_repair:
             current = simulation.entities.get(entity.repair_target_id or "")
             if current is not None and current.entity_id in damaged:
                 continue
@@ -528,7 +514,9 @@ def drive_patrol(
         try:
             paths = movement.plan_group_paths(simulation, (key,), {key: target}, shared_goal=anchor)
         except PathfindingError as error:
-            simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
+            automation_lifecycle.transition(
+                simulation, automation, AutomationStatus.BLOCKED, str(error)
+            )
             return
         parameters.waypoint_indices[key] = (waypoint_index + 1) % len(parameters.waypoints)
         movement.start_path(
@@ -691,7 +679,9 @@ def drive_defend(
                 simulation, tuple(destinations), destinations, shared_goal=anchor
             )
         except PathfindingError as error:
-            simulation._transition(automation, AutomationStatus.BLOCKED, str(error))
+            automation_lifecycle.transition(
+                simulation, automation, AutomationStatus.BLOCKED, str(error)
+            )
             return
         for key, station in destinations.items():
             movement.start_path(
@@ -702,80 +692,3 @@ def drive_defend(
                 automation.automation_id,
                 UnitState.DEFENDING,
             )
-
-
-def refresh_gathering_formation(simulation: Simulation, automation: Automation) -> None:
-    if isinstance(automation.parameters, DefendParameters):
-        if simulation._removal_batch is not None:
-            simulation._removal_formations[automation.owner_id, automation.parameters.target] = None
-            return
-        coordinate_shared_defend_stations(
-            simulation, automation.parameters.target, automation.owner_id
-        )
-
-
-def coordinate_shared_defend_stations(
-    simulation: Simulation, target: SpatialTarget, owner_id: str
-) -> None:
-    automations = [
-        a
-        for a in simulation._live_automation_candidates
-        if isinstance(a.parameters, DefendParameters)
-        and a.parameters.target == target
-        and a.owner_id == owner_id
-        and a.status in {AutomationStatus.ACTIVE, AutomationStatus.WAITING, AutomationStatus.PAUSED}
-    ]
-    ids = sorted(
-        {
-            key
-            for a in automations
-            for key in a.entity_ids
-            if key in simulation.entities and simulation.assignments.get(key) == a.automation_id
-        }
-    )
-    if not ids:
-        return
-    id_set = frozenset(ids)
-    previous = {
-        key: point
-        for a in automations
-        for key, point in _defend_parameters(a).stations.items()
-        if key in id_set
-    }
-    if not any(
-        _defend_parameters(a).deployment_slots or _defend_parameters(a).gathering_point
-        for a in automations
-    ):
-        stations = build_defend_stations(target, tuple(ids), simulation.game_map)
-        slots: tuple[Point, ...] = ()
-    else:
-        slots = simulation._gathering_slots(
-            target,
-            len(ids),
-            max(collision_radius(simulation.entities[key].kind) for key in ids),
-            spread=not any(_defend_parameters(a).gathering_point for a in automations)
-            and not isinstance(target, PolylineTarget),
-        )
-        stations = assign_formation_slots(
-            {key: simulation.entities[key].position for key in ids},
-            slots,
-            target_center(target),
-            previous,
-        )
-    center = target_center(target)
-    assembly_radius = max((p.distance_to(center) for p in slots), default=0.0)
-    for automation in automations:
-        parameters = _defend_parameters(automation)
-        parameters.stations = {
-            key: stations[key] for key in automation.entity_ids if key in stations
-        }
-        parameters.deployment_slots = slots
-        parameters.assembly_radius = assembly_radius
-        for key, station in parameters.stations.items():
-            if previous.get(key) != station:
-                entity = simulation.entities[key]
-                entity.clear_recovery_request()
-                entity.defend_arrived = False
-                entity.path.clear()
-                entity.move_target = None
-                movement.reset_movement_liveness(entity)

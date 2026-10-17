@@ -6,10 +6,12 @@ import json
 import os
 from copy import deepcopy
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from airts.contracts.automations import (
+    PRODUCTION_HISTORY_LIMIT,
     Automation,
     AutomationKind,
     AutomationStatus,
@@ -31,14 +33,18 @@ from airts.contracts.events import Event, EventLog, EventType
 from airts.contracts.spatial import (
     GroundingSelection,
     Point,
+    PolygonRegion,
+    PolylineTarget,
     SpatialKind,
     SpatialReference,
     SpatialStore,
+    SpatialTarget,
     spatial_kind,
     target_from_dict,
 )
 from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
+from airts.systems import economy
 from airts.systems.movement import CONTACT_WAIT_TICKS
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, UpgradeState
 from airts.world.map import (
@@ -53,8 +59,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v21"
-MATCH_SAVE_SCHEMA = "airts-match-save-v14"
+SAVE_SCHEMA = "airts-save-v25"
+MATCH_SAVE_SCHEMA = "airts-match-save-v19"
 
 
 class PersistenceError(ValueError):
@@ -182,6 +188,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         game_map,
         tick,
     )
+    economy.rebuild_income(simulation)
     simulation._invalidate_navigation_cache()
     simulation.occupancy = _build_occupancy(simulation)
     simulation.projectiles = _load_projectiles(state.get("projectiles", {}), simulation)
@@ -199,9 +206,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
     ):
         raise PersistenceError("direct movement or attack intent conflicts with automation control")
     for entity in simulation.entities.values():
-        if entity.kind is not EntityKind.BUILDER or (
-            entity.repair_target_id is None and entity.reclaim_target_id is None
-        ):
+        if entity.repair_target_id is None and entity.reclaim_target_id is None:
             continue
         assigned = simulation.automations.get(simulation.assignments.get(entity.entity_id, ""))
         if entity.hold_anchor is not None or (
@@ -220,6 +225,11 @@ def load_simulation_data(raw_data: object) -> Simulation:
     _validate_recovery_request_owners(simulation)
     simulation.visibility = _load_visibility(state.get("visibility"), simulation)
     simulation.resources = _load_resources(state.get("resources"), simulation)
+    simulation.ai_income_multiplier = _integer(
+        state.get("ai_income_multiplier"), "state.ai_income_multiplier"
+    )
+    if simulation.ai_income_multiplier not in (1, 5):
+        raise PersistenceError("state.ai_income_multiplier must be 1 or 5")
     simulation.developer_mode = _boolean(state.get("developer_mode"), "state.developer_mode")
     simulation.developer_income_ticks = _integer(
         state.get("developer_income_ticks"), "state.developer_income_ticks", minimum=0
@@ -384,7 +394,11 @@ def _load_opponents(raw_data: object, simulation: Simulation) -> dict[str, Oppon
                 raise PersistenceError(
                     "opponent budget pause must reference its continuous production"
                 )
-        opponents[owner] = OpponentState(reserve, squads, paused)
+        credit = _number(item.get("growth_credit"), f"{field}.growth_credit", minimum=0)
+        if not isfinite(credit):
+            raise PersistenceError("opponent growth credit must be finite")
+        budget_tick = _past_tick(item.get("budget_tick"), f"{field}.budget_tick", simulation.tick)
+        opponents[owner] = OpponentState(reserve, squads, paused, credit, budget_tick)
     return opponents
 
 
@@ -501,14 +515,8 @@ def _load_entities(
         next_upgrade = kind.upgrades[tier - 1] if tier <= len(kind.upgrades) else None
         if remaining and (next_upgrade is None or remaining > next_upgrade.duration_ticks):
             raise PersistenceError("entity.upgrade.remaining_ticks has no valid paid transition")
-        income_ticks = _integer(entity.get("income_ticks"), "entity.income_ticks", minimum=0)
-        profile = kind.profile if tier == 1 else kind.upgrades[tier - 2].profile
-        if income_ticks >= Simulation.INCOME_INTERVAL_TICKS or (
-            income_ticks and not profile.income_per_second
-        ):
-            raise PersistenceError("entity.income_ticks is inconsistent with its income cycle")
-        if construction_progress is not None and (tier != 1 or remaining or income_ticks):
-            raise PersistenceError("unfinished entity cannot have upgrade or income progress")
+        if construction_progress is not None and (tier != 1 or remaining):
+            raise PersistenceError("unfinished entity cannot have upgrade progress")
         if "recovery_request_tick" not in entity or "recovery_released" not in entity:
             raise PersistenceError("entity recovery request fields are required in v11")
         request_raw = entity["recovery_request_tick"]
@@ -597,9 +605,6 @@ def _load_entities(
             entity.get("no_progress_ticks", 0), "entity.no_progress_ticks", minimum=0
         )
         route_ticks = _integer(entity.get("route_ticks", 0), "entity.route_ticks", minimum=0)
-        congestion_stopped = _boolean(
-            entity.get("congestion_stopped", False), "entity.congestion_stopped"
-        )
         collision_pressure = _integer(
             entity.get("collision_pressure", 0), "entity.collision_pressure", minimum=0
         )
@@ -656,12 +661,6 @@ def _load_entities(
             )
         if route_ticks and not path and not hold_return_progress:
             route_ticks = 0
-        if congestion_stopped and not path:
-            # Normalize saves created by the short-lived implementation that
-            # canceled a blocked order instead of preserving it for retry.
-            congestion_stopped = False
-        if congestion_stopped and (move_target is None or progress_target is None):
-            raise PersistenceError(f"entity {entity_id} has inconsistent congestion-stop state")
         attack_target_id = _nullable_string(
             entity.get("attack_target_id"), "entity.attack_target_id"
         )
@@ -686,7 +685,6 @@ def _load_entities(
             path
             or move_target is not None
             or progress_target is not None
-            or congestion_stopped
             or pursue_target
             or (
                 state not in {UnitState.IDLE, UnitState.PRODUCING}
@@ -749,13 +747,12 @@ def _load_entities(
             recovery_released=recovery_released,
             construction_progress=construction_progress,
             upgrade=UpgradeState(tier=tier, remaining_ticks=remaining),
-            income_ticks=income_ticks,
         )
     for loaded_entity in entities.values():
         if loaded_entity.reclaim_target_id is not None:
             target = entities.get(loaded_entity.reclaim_target_id)
             if (
-                loaded_entity.kind is not EntityKind.BUILDER
+                not loaded_entity.profile.can_reclaim
                 or target is None
                 or target.owner_id != loaded_entity.owner_id
                 or target.category is not EntityCategory.BUILDING
@@ -770,15 +767,16 @@ def _load_entities(
                 or target.owner_id != loaded_entity.owner_id
                 or not loaded_entity.is_complete
                 or not target.is_complete
-                or (loaded_entity.kind is EntityKind.REPAIR_HUB and target is loaded_entity)
+                or (not loaded_entity.is_movable and target is loaded_entity)
                 or (
-                    loaded_entity.kind is EntityKind.BUILDER
+                    loaded_entity.profile.movable
+                    and loaded_entity.profile.can_repair
                     and (
                         target.category is not EntityCategory.BUILDING
                         or loaded_entity.pursue_target
                     )
                 )
-                or loaded_entity.kind not in {EntityKind.BUILDER, EntityKind.REPAIR_HUB}
+                or not loaded_entity.profile.can_repair
             ):
                 raise PersistenceError("entity has an invalid repair target")
         if (
@@ -938,7 +936,21 @@ def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Aut
 
 
 def _validate_automation_links(automations: dict[str, Automation], simulation: Simulation) -> None:
+    production_defenses: set[tuple[str, SpatialTarget]] = set()
     for automation in automations.values():
+        if (
+            isinstance(automation.parameters, DefendParameters)
+            and automation.parameters.production_defense
+        ):
+            if not isinstance(automation.parameters.target, PolygonRegion | PolylineTarget):
+                raise PersistenceError("production defense requires a line or area")
+            if not automation.status.terminal:
+                key = automation.owner_id, automation.parameters.target
+                if key in production_defenses:
+                    raise PersistenceError(
+                        "duplicate production defense for the same owner and target"
+                    )
+                production_defenses.add(key)
         if automation.transition_history[-1].reason_code != automation.reason_code:
             raise PersistenceError("automation reason does not match transition history")
         if automation.transition_history[-1].tick > automation.modified_tick:
@@ -963,6 +975,7 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
                     or target.kind is not AutomationKind.DEFEND
                     or target.owner_id != automation.owner_id
                     or not isinstance(target.parameters, DefendParameters)
+                    or not target.parameters.production_defense
                     or target.parameters.target != automation.parameters.defend_target
                 ):
                     raise PersistenceError("production references an invalid defend automation")
@@ -1112,6 +1125,9 @@ def _load_automation_parameters(
             deployment_slots,
             assembly_radius,
             auto_repair=_boolean(data.get("auto_repair"), "defend.auto_repair"),
+            production_defense=_boolean(
+                data.get("production_defense"), "defend.production_defense"
+            ),
         )
     if kind is AutomationKind.PRODUCTION:
         try:
@@ -1188,9 +1204,7 @@ def _load_automation_parameters(
             rally_point=None if rally_data is None else _point(rally_data, "rally_point"),
             produced_count=produced_count,
             progress_ticks=progress_ticks,
-            produced_entity_ids=_string_list(
-                data.get("produced_entity_ids"), "production.produced_entity_ids"
-            ),
+            produced_entity_ids=_bounded_production_history(data.get("produced_entity_ids")),
             cost_paid=_boolean(data.get("cost_paid"), "production.cost_paid"),
             continuous=continuous,
             auto_repair=_boolean(data.get("auto_repair"), "production.auto_repair"),
@@ -1227,8 +1241,7 @@ def _load_automation_parameters(
             builder_ids != entity_ids
             or (not builder_ids and not terminal)
             or any(
-                item not in simulation.entities
-                or simulation.entities[item].kind is not EntityKind.BUILDER
+                item not in simulation.entities or not simulation.entities[item].profile.can_build
                 for item in builder_ids
             )
         ):
@@ -1616,6 +1629,15 @@ def _string_list(value: object, field: str) -> list[str]:
             raise PersistenceError(f"{field} cannot contain duplicates")
         result.append(item)
     return result
+
+
+def _bounded_production_history(value: object) -> list[str]:
+    history = _string_list(value, "production.produced_entity_ids")
+    if len(history) > PRODUCTION_HISTORY_LIMIT:
+        raise PersistenceError(
+            "production.produced_entity_ids exceeds the current bounded history limit"
+        )
+    return history
 
 
 def _string_mapping(value: object, field: str) -> dict[str, str]:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import ceil, floor, hypot, isclose
+from math import ceil, isclose
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
@@ -16,8 +16,8 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, distance_to_target
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import automation_execution, movement
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
+from airts.systems import automation_execution, combat_geometry, movement
+from airts.world.entities import SHELL_BLAST_TICKS, Entity, Projectile, ProjectileTrace, UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -203,6 +203,16 @@ def drive_combat(simulation: Simulation) -> None:
         speed = attacker.kind.profile.projectile_speed
         if speed <= 0:
             continue
+        destination = positions[firing_target.entity_id]
+        if attacker.kind.profile.splash_radius > 0:
+            destination = combat_geometry.predicted_impact_point(
+                attacker_position,
+                destination,
+                movement.observed_velocity(simulation, firing_target),
+                speed,
+                simulation.game_map.width,
+                simulation.game_map.height,
+            )
         projectile_id = f"projectile_{simulation._next_projectile_number:06d}"
         simulation._next_projectile_number += 1
         projectile = Projectile(
@@ -212,7 +222,7 @@ def drive_combat(simulation: Simulation) -> None:
             owner_id=attacker.owner_id,
             weapon_kind=attacker.kind,
             position=attacker_position,
-            destination=positions[firing_target.entity_id],
+            destination=destination,
             damage=attacker.kind.profile.attack_damage,
             speed=speed,
         )
@@ -342,8 +352,10 @@ def drive_projectiles(simulation: Simulation) -> None:
             projectile = simulation.projectiles.get(projectile_id)
             if projectile is None:
                 continue
-            target = simulation.entities.get(projectile.target_entity_id)
             splash_radius = projectile.weapon_kind.profile.splash_radius
+            target = (
+                simulation.entities.get(projectile.target_entity_id) if splash_radius == 0 else None
+            )
             if (
                 splash_radius == 0
                 and target is not None
@@ -460,7 +472,12 @@ def finish_projectile(simulation: Simulation, projectile: Projectile) -> None:
             projectile.projectile_id,
             projectile.weapon_kind,
             tuple(projectile.trajectory),
-            simulation.tick + simulation.TICKS_PER_SECOND,
+            simulation.tick
+            + (
+                SHELL_BLAST_TICKS
+                if projectile.weapon_kind.profile.splash_radius > 0
+                else simulation.TICKS_PER_SECOND
+            ),
         )
     )
 
@@ -513,7 +530,7 @@ def _approach_points(
     key = (target.entity_id, attacker.kind.profile.attack_range)
     goals = cache.get(key) if cache is not None else None
     if goals is None:
-        goals = _firing_approach_points(simulation, attacker, target)
+        goals = combat_geometry.firing_approach_points(simulation, attacker, target)
         if cache is not None:
             cache[key] = goals
     return goals
@@ -531,27 +548,3 @@ def _interaction_cells(
         )
         cache[target.entity_id] = cells
     return cells
-
-
-def _firing_approach_points(
-    simulation: Simulation,
-    attacker: Entity,
-    target: Entity,
-) -> tuple[Point, ...]:
-    """Return a shared passable firing ring instead of four congested adjacent cells."""
-
-    center = target.selection_position
-    attack_range = attacker.kind.profile.attack_range
-    outer_radius = max(0.5, attack_range - 0.25)
-    inner_radius = max(0.0, outer_radius - 1.0)
-    target_cells = target.occupied_cells
-    points = tuple(
-        Point(x + 0.5, y + 0.5)
-        for y in range(floor(center.y - outer_radius), ceil(center.y + outer_radius) + 1)
-        for x in range(floor(center.x - outer_radius), ceil(center.x + outer_radius) + 1)
-        if simulation.game_map.contains_cell((x, y))
-        and simulation.game_map.is_cell_passable((x, y))
-        and (x, y) not in target_cells
-        and inner_radius <= hypot(x + 0.5 - center.x, y + 0.5 - center.y) <= outer_radius
-    )
-    return points or simulation._interaction_points(target)

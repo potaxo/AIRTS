@@ -7,11 +7,17 @@ timing gates and work-counter definitions belong to [performance](performance.md
 ## Orders and routing
 
 One movement controller serves every army size. Direct commands and patrol/defend dispatch share
-group-path planning. Move preserves compatible translated formation positions, fitting them
-inside map edges; terrain, buildings or compressed source geometry instead require reachable,
-separated destination slots. Explicit `gathering` allocates slots around the target. Missing flags
-in supported histories use formation preservation. Mobile units are local colliders, not whole-cell
-static walls; occupied destinations may wait. Groups share an approach route before branching.
+group-path planning. Move chooses intent once at submission: a target more than 12 cells from
+the selection's center is a march, using compact separated arrival slots rather than translated
+source positions. Nearby ordinary moves preserve compatible translated formation positions,
+fitting them inside map edges; terrain, buildings or compressed source geometry instead require
+reachable, separated destination slots. Explicit `gathering` also gathers nearby selections.
+Both ordinary and explicit gathering marches reuse weighted group routing; members split near
+the arrival area, without waiting to restore their original formation. Distances use world cells,
+independently of camera zoom or army size. Queued legs use the preceding queued destination or
+active move goal as their source geometry and validate connectivity without allocating per-slot
+search fields. Mobile units are local colliders, not whole-cell static walls; occupied destinations
+may wait. Groups share an approach route before branching.
 
 Actual travel speed is the mobile profile's base speed divided by terrain movement cost.
 Grass retains base speed; forest uses two thirds, road four thirds and bridge five quarters.
@@ -94,7 +100,13 @@ These are current execution details, subject to the [engineering change policy](
 - Ordinary projectiles track their target, retain their last destination after target removal,
   remain visible until arrival, and cannot damage bystanders. Scout, light/heavy tank and turret
   projectile speeds are doubled from their original profiles; damage and cadence are unchanged.
-- Both light and heavy artillery shells lock the target's center at launch and never track or predict movement. Arrival
+- Both light and heavy artillery estimate a ground impact from the target's actual displacement
+  in the current movement tick. A constant-velocity intercept accounts for shell travel time;
+  no observed movement aims at the current center. The estimate stays inside map bounds and
+  does not inspect future orders or paths, so stopping, turns and obstacles can defeat the prediction.
+  Prediction runs only on an actual shot and reuses movement scratch; it adds no target scan,
+  pathfinding or future world simulation. A faster, non-interceptable target receives a lead
+  estimate based on one nominal flight time. Shells lock that ground point at launch and never track. Arrival
   always explodes there, including after source/target removal or an empty impact. Within a three-cell
   radius, hostile units and buildings take `ceil(40 * (1 - distance / 3))` damage, measured between
   their current selection center and the impact. The boundary and beyond take zero; allies are spared.
@@ -236,8 +248,9 @@ requiring an adjacent cell; replacement/automation assignment
 cancels it, and queued construction waits. Repairs cost no resources.
 
 Armed completed buildings use the shared projectile combat pass but never pursue or move. Unfinished
-turrets cannot fire. Weapon cadence is an immutable profile interval in fixed ticks (existing units
-retain one second); artillery has longer range, slower travel and a 2.5-second firing interval.
+turrets cannot fire. Weapon cadence is an immutable profile interval in fixed ticks. Fixed turrets
+fire every 0.6 seconds; ordinary scout/tank weapons retain one second. Heavy artillery has longer
+range, slower travel and a 2.5-second firing interval.
 Its fixed-impact splash rules are defined above.
 
 ## Verification owners

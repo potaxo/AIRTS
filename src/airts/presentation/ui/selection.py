@@ -11,6 +11,8 @@ import pygame
 from airts.contracts.automations import (
     ProductionParameters,
 )
+from airts.presentation.palette import PROGRESS_COLOR, PROGRESS_TRACK
+from airts.presentation.progress import current_production
 from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
@@ -142,7 +144,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         )
         view.ui.small_text(screen, price, (x, y), theme.MUTED)
         y += 28
-    if profile.movable and detail_kind is not EntityKind.BUILDER:
+    if profile.movable and not profile.can_build:
         view.ui.small_text(
             screen,
             f"Damage {profile.attack_damage} | Range {profile.attack_range} | Speed {profile.movement_speed}",
@@ -150,7 +152,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             theme.MUTED,
         )
         y += 28
-    if detail_kind is EntityKind.BUILDER:
+    if profile.can_build or profile.can_reclaim:
         view.ui.small_text(
             screen,
             f"Build {profile.build_range:g} | Repair {profile.repair_range:g} | Work {profile.build_speed:g}/tick",
@@ -158,7 +160,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             theme.SUCCESS,
         )
         y += 22
-        for kind in BUILDABLE_KINDS:
+        for kind in BUILDABLE_KINDS if profile.can_build else ():
             rectangle = pygame.Rect(x, y, panel.width - 32, 30)
             label = (
                 "Resource Extractor"
@@ -175,11 +177,17 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             )
             view._command_buttons.append((rectangle, f"build:{kind.value}"))
             y += 38
-        rectangle = pygame.Rect(x, y, panel.width - 32, 30)
-        view.ui.button(screen, rectangle, "Reclaim building (70%)", active=view.reclaim_mode)
-        view._command_buttons.append((rectangle, "reclaim"))
+        if profile.can_reclaim:
+            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            view.ui.button(screen, rectangle, "Reclaim building (70%)", active=view.reclaim_mode)
+            view._command_buttons.append((rectangle, "reclaim"))
     elif detail_kind.production_kinds:
         factories = view._selected_producer_ids()
+        current_jobs = tuple(
+            current_job
+            for factory_id in factories
+            if (current_job := current_production(view.simulation, factory_id)) is not None
+        )
         for kind in detail_kind.production_kinds:
             row_width = panel.width - 32
             height = round(30 * view.ui_scale)
@@ -220,6 +228,19 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
                     (loop, f"loop:{kind.value}"),
                 )
             )
+            progress = [
+                min(1.0, parameters.progress_ticks / parameters.build_ticks)
+                for parameters in current_jobs
+                if parameters.current_unit_kind is kind
+            ]
+            if progress:
+                bar = pygame.Rect(x, y + height, row_width, max(3, round(3 * view.ui_scale)))
+                pygame.draw.rect(screen, PROGRESS_TRACK, bar)
+                pygame.draw.rect(
+                    screen,
+                    PROGRESS_COLOR,
+                    (bar.x, bar.y, round(bar.width * min(progress)), bar.height),
+                )
             y += height + round(8 * view.ui_scale)
         if view.production_detail_kind in detail_kind.production_kinds:
             y = draw_unit_details(view, screen, view.production_detail_kind, x, y + 12)
@@ -267,7 +288,7 @@ def draw_upgrade_controls(
             screen,
             f"T{tier}{suffix}"
             + (
-                f" | {entity.profile.income_per_second * 2} each / 2s"
+                f" | {entity.profile.income_per_second} each / s"
                 if entity.profile.income_per_second
                 else ""
             )
@@ -297,9 +318,9 @@ def draw_upgrade_controls(
             enabled = True
             progress = 1 - remaining / definition.duration_ticks
             bar = pygame.Rect(x, y, view.right_panel_rect.width - 32, 6)
-            pygame.draw.rect(screen, theme.MUTED, bar)
+            pygame.draw.rect(screen, PROGRESS_TRACK, bar)
             pygame.draw.rect(
-                screen, theme.SUCCESS, (bar.x, bar.y, round(bar.width * progress), bar.height)
+                screen, PROGRESS_COLOR, (bar.x, bar.y, round(bar.width * progress), bar.height)
             )
             y += 12
         else:
@@ -340,7 +361,7 @@ def draw_unit_details(
         )
     if profile.splash_radius:
         lines.append(f"Splash radius {profile.splash_radius:g}")
-    if kind is EntityKind.BUILDER:
+    if profile.can_build or profile.can_repair:
         lines.append(
             f"Build {profile.build_range:g} | Repair {profile.repair_range:g} | Work {profile.build_speed:g}/tick"
         )

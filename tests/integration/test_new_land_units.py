@@ -159,13 +159,13 @@ def test_factory_ui_exposes_new_units_and_click_produces_them(kind: EntityKind) 
 def test_ai_orders_new_support_units_for_its_composition(
     kind: EntityKind, enemies: tuple[tuple[EntityKind, float, float], ...]
 ) -> None:
-    army = opening_army() + (
+    army = opening_army(8) + (
         (EntityKind.SCOUT, 52.5, 55.5),
         (EntityKind.HEAVY_TANK, 54.5, 55.5),
         (EntityKind.HEAVY_TANK, 56.5, 55.5),
     )
     simulation = opponent_scenario(army, enemies)
-    simulation.advance(180)
+    simulation.advance(300)
     assert any(
         isinstance(job.parameters, ProductionParameters) and job.parameters.unit_kind is kind
         for job in simulation.automations.values()

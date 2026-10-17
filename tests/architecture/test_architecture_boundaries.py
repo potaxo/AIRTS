@@ -113,6 +113,62 @@ def test_runtime_module_imports_have_no_cycles() -> None:
         visit(module)
 
 
+def test_system_modules_do_not_import_another_systems_private_symbols() -> None:
+    violations: list[str] = []
+    systems = SOURCE / "systems"
+    for path in systems.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module = node.module or ""
+            if node.level:
+                module = resolve_name("." * node.level + module, _package_name(path))
+            if not module.startswith("airts.systems."):
+                continue
+            for alias in node.names:
+                if alias.name.startswith("_"):
+                    violations.append(
+                        f"{path.relative_to(SOURCE)}:{node.lineno} imports {alias.name}"
+                    )
+    assert not violations, "\n".join(violations)
+
+
+def test_systems_call_automation_owner_without_simulation_forwarders() -> None:
+    retired = {
+        "_activate",
+        "_assign",
+        "_cancel",
+        "_claim_wins",
+        "_new_automation",
+        "_release_automation",
+        "_resume_suspended_assignment",
+        "_state_for_assignment",
+        "_transition",
+        "_validate_claims",
+        "_validate_entities",
+    }
+    violations: list[str] = []
+    for path in (SOURCE / "systems").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in retired:
+                violations.append(f"{path.relative_to(SOURCE)}:{node.lineno} uses {node.attr}")
+    simulation_path = SOURCE / "simulation.py"
+    tree = ast.parse(simulation_path.read_text(encoding="utf-8"), filename=str(simulation_path))
+    simulation_class = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Simulation"
+    )
+    methods = {
+        node.name
+        for node in simulation_class.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    for name in sorted(methods.intersection(retired)):
+        violations.append(f"simulation.py retains retired forwarder {name}")
+    assert not violations, "\n".join(violations)
+
+
 def _matches_any(module_name: str, forbidden_imports: set[str]) -> bool:
     return any(
         module_name == forbidden or module_name.startswith(f"{forbidden}.")

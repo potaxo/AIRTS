@@ -39,6 +39,7 @@ from airts.systems.opponent_ai import engagement_margin, force_strength
 from airts.systems.repair_positions import service_points
 from airts.world.entities import Entity, Projectile, UnitState
 from airts.world.map import footprint_cells, load_map_data
+from airts.world.units import catalog
 from airts.world.units.catalog import EntityKind
 
 
@@ -73,6 +74,46 @@ def restored(simulation: Simulation) -> Simulation:
             "state": save.state | {"events": [e.to_dict() for e in save.events]},
         }
     )
+
+
+def test_non_builder_kind_can_build_repair_and_reclaim_from_its_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(catalog._ENTITY_PROFILES, EntityKind.SCOUT, EntityKind.BUILDER.profile)
+    simulation = world()
+    simulation.entities["builder"].kind = EntityKind.SCOUT
+    created = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.RESOURCE_GENERATOR, Point(4, 5))
+    )
+    assert created.accepted
+    simulation.advance()
+    simulation = restored(simulation)
+    simulation.advance(Simulation.CONSTRUCTION_BUILD_TICKS)
+    job = simulation.automations[created.automation_id or ""]
+    assert job.status is AutomationStatus.COMPLETED
+    assert isinstance(job.parameters, ConstructionParameters)
+    building_id = job.parameters.constructed_entity_id
+    assert building_id is not None
+
+    building = simulation.entities[building_id]
+    building.health -= 10
+    assert simulation.execute(RepairBuildingCommand(("builder",), building_id)).accepted
+    simulation = restored(simulation)
+    simulation.advance(2)
+    assert simulation.entities[building_id].health == building.profile.max_health
+
+    assert simulation.execute(ReclaimBuildingCommand(("builder",), building_id)).accepted
+    simulation = restored(simulation)
+    simulation.advance(60)
+    assert building_id not in simulation.entities
+    refunds = [
+        event
+        for event in simulation.events.events
+        if event.event_type is EventType.RESOURCE_CHANGED
+        and event.details.get("reason") == "BUILDING_RECLAIMED"
+    ]
+    assert len(refunds) == 1
+    assert refunds[0].details["amount"] == building.profile.construction_cost * 70 // 100
 
 
 @pytest.mark.parametrize("order", ["move", "patrol", "stop"])
@@ -388,10 +429,13 @@ def test_factory_produces_artillery_and_turret_is_stationary_armed_only_when_com
         if e.subject_id == "artillery" and e.event_type.value == "projectile_launched"
     ]
     assert len(shots) >= 3 and all(b - a == 25 for a, b in zip(shots, shots[1:], strict=False))
-    assert any(
-        e.subject_id == "gun" and e.event_type.value == "projectile_launched"
+    turret_shots = [
+        e.tick
         for e in simulation.events.events
-    )
+        if e.subject_id == "gun" and e.event_type.value == "projectile_launched"
+    ]
+    assert len(turret_shots) >= 8
+    assert all(b - a == 6 for a, b in zip(turret_shots, turret_shots[1:], strict=False))
     assert simulation.entities["enemy"].health < EntityKind.COMMAND_CENTER.profile.max_health
     assert restored(simulation).snapshot() == simulation.snapshot()
 

@@ -7,15 +7,18 @@ from collections.abc import Callable
 import pytest
 
 from airts.contracts.automations import (
+    PRODUCTION_HISTORY_LIMIT,
     Automation,
     AutomationKind,
     AutomationStatus,
     AutomationTransitionError,
     PatrolParameters,
+    ProductionParameters,
     build_patrol_waypoints,
 )
 from airts.contracts.spatial import Point, PointTarget, PolygonRegion
 from airts.world.map import GameMap
+from airts.world.units.catalog import EntityKind
 
 
 def _automation() -> Automation:
@@ -32,6 +35,22 @@ def _automation() -> Automation:
         entity_ids=["unit"],
         parameters=PatrolParameters(target, (Point(3, 3),)),
     )
+
+
+def test_production_history_retains_only_recent_evidence() -> None:
+    parameters = ProductionParameters(
+        "factory",
+        EntityKind.SCOUT,
+        1,
+        EntityKind.SCOUT.profile.production_ticks,
+        None,
+    )
+
+    for index in range(PRODUCTION_HISTORY_LIMIT + 3):
+        parameters.record_produced_entity(f"scout_{index:03d}")
+
+    assert len(parameters.produced_entity_ids) == PRODUCTION_HISTORY_LIMIT
+    assert parameters.produced_entity_ids[0] == "scout_003"
 
 
 def test_lifecycle_records_legal_transitions_and_reasons() -> None:

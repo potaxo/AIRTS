@@ -29,6 +29,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
@@ -42,6 +43,8 @@ from airts.world.units.catalog import EntityKind
 @pytest.mark.parametrize(
     "command",
     [
+        SetAIIncomeMultiplierCommand(1),
+        SetAIIncomeMultiplierCommand(5),
         SetDeveloperModeCommand(True),
         SetDeveloperModeCommand(False),
         MoveCommand(("unit",), Point(3, 4)),
@@ -97,6 +100,11 @@ def test_command_schemas_round_trip(command: Command) -> None:
 @pytest.mark.parametrize(
     ("data", "message"),
     [
+        pytest.param(
+            {"type": "set_ai_income_multiplier", "multiplier": True},
+            "multiplier must be an integer",
+            id="ai-income-boolean",
+        ),
         pytest.param(
             {"type": "set_developer_mode", "enabled": 1},
             "enabled must be a boolean",

@@ -40,6 +40,11 @@ height, text and projectile cores stay fixed in pixels. Construction percentages
 a cached text atlas. Panels/font textures upload dirty regions; camera changes never dirty the
 whole canvas. Status refreshes in three-tick buckets; explicit interaction remains immediate.
 
+Artillery prediction reads original positions by binary search of the existing sorted movement
+workspace rows, allocating no per-army velocity/index table. It solves one scalar intercept per actual
+shot; ordinary weapons and in-flight shells do no prediction work. It performs no extra spatial query,
+pathfinding or simulated future ticks. Shared blast expiry limits both backends' active effect geometry.
+
 GPU interpolation mixes previous/current centers and visual headings without per-frame rebuilds
 or simulation feedback and resets on load/reset. New world-batch packing can stage for one
 presentation call after a tick: that call displays the previous current endpoint, and the next

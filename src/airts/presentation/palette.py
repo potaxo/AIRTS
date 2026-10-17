@@ -8,6 +8,8 @@ type Color = tuple[int, int, int]
 REPAIR_COLOR: Color = (105, 232, 172)
 RECLAIM_COLOR: Color = (240, 82, 82)
 WORK_BEAM_WIDTH = 3
+PROGRESS_COLOR: Color = (76, 156, 240)
+PROGRESS_TRACK: Color = (28, 43, 65)
 
 TEAM_COLORS: dict[int, Color] = {
     1: (92, 220, 145),

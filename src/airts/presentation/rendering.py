@@ -18,6 +18,8 @@ from airts.contracts.automations import (
 from airts.contracts.spatial import Point
 from airts.presentation.palette import (
     ENTITY_COLORS,
+    PROGRESS_COLOR,
+    PROGRESS_TRACK,
     PROJECTILE_COLORS,
     RECLAIM_COLOR,
     REPAIR_COLOR,
@@ -26,6 +28,7 @@ from airts.presentation.palette import (
     Color,
     match_color,
 )
+from airts.presentation.progress import building_progress
 from airts.presentation.projectile_effects import (
     SHELL_CORE_RADIUS,
     SHELL_RIM_RADIUS,
@@ -96,13 +99,22 @@ def order_feedback(view: SceneView, entity: Entity) -> tuple[tuple[Point, ...], 
     return view.simplified_path(entity), (225, 225, 225)
 
 
+def interaction_range(entity: Entity) -> tuple[float, bool]:
+    """Return the inspected entity's primary range and whether it is a work range."""
+
+    profile = entity.profile
+    if profile.can_build or profile.can_reclaim:
+        return max(profile.build_range, profile.repair_range), True
+    if profile.can_repair:
+        return profile.repair_range, True
+    return profile.attack_range, False
+
+
 def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
     """Read active construction/repair endpoints without changing domain state."""
     source: Entity | None
     for worker in simulation.entities.values():
-        if (
-            worker.kind is not EntityKind.REPAIR_HUB and worker.kind is not EntityKind.BUILDER
-        ) or not worker.is_complete:
+        if not worker.profile.can_repair or not worker.is_complete:
             continue
         target = simulation.entities.get(worker.repair_target_id or "")
         if (
@@ -110,17 +122,17 @@ def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
             and target.owner_id == worker.owner_id
             and target.health < target.kind.profile.max_health
             and (
-                worker.kind is EntityKind.REPAIR_HUB
+                not worker.is_movable
                 and target is not worker
                 and target.is_complete
                 and worker.selection_position.distance_to(target.selection_position)
-                <= worker.kind.profile.repair_range
-                or worker.kind is EntityKind.BUILDER
+                <= worker.profile.repair_range
+                or worker.is_movable
                 and target.category is EntityCategory.BUILDING
                 and target.is_complete
                 and worker.state is UnitState.REPAIRING
                 and not worker.path
-                and building_distance(worker.position, target) <= worker.kind.profile.repair_range
+                and building_distance(worker.position, target) <= worker.profile.repair_range
             )
         ):
             yield worker.selection_position, target.selection_position
@@ -140,7 +152,7 @@ def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
                     and simulation.assignments.get(key) == automation.automation_id
                     and source.state is UnitState.BUILDING
                     and construction_distance(source.position, parameters)
-                    <= source.kind.profile.build_range
+                    <= source.profile.build_range
                 ):
                     yield source.selection_position, target.selection_position
         elif isinstance(parameters, RepairParameters):
@@ -152,7 +164,7 @@ def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
                     and simulation.assignments.get(key) == automation.automation_id
                     and source is not None
                     and target is not None
-                    and source.kind is not EntityKind.REPAIR_HUB
+                    and not source.profile.can_repair
                     and source.is_complete
                     and source.owner_id == target.owner_id
                     and target.state is UnitState.REPAIRING
@@ -171,12 +183,12 @@ def reclaim_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
         target = simulation.entities.get(builder.reclaim_target_id)
         if (
             target is not None
-            and builder.kind is EntityKind.BUILDER
+            and builder.profile.can_reclaim
             and builder.state is UnitState.RECLAIMING
             and not builder.path
             and target.owner_id == builder.owner_id
             and target.category is EntityCategory.BUILDING
-            and building_distance(builder.position, target) <= builder.kind.profile.build_range
+            and building_distance(builder.position, target) <= builder.profile.build_range
         ):
             yield builder.selection_position, target.selection_position
 
@@ -195,6 +207,7 @@ class SoftwareRenderer:
         self._building_selection_rects: tuple[pygame.Rect, ...] = ()
         self._selected_bounds: pygame.Rect | None = None
         self._health_bars: tuple[tuple[pygame.Rect, int], ...] = ()
+        self._progress_bars: tuple[tuple[pygame.Rect, int], ...] = ()
         self._inspected_ring: tuple[tuple[int, int], int] | None = None
         self._path_render_key: tuple[object, ...] | None = None
         self._path_render_points: tuple[tuple[Color, tuple[tuple[int, int], ...]], ...] = ()
@@ -269,21 +282,13 @@ class SoftwareRenderer:
         view.facing.sync(view.simulation)
         self._draw_cached_entities(view, screen, colors, tile_size, (origin_x, origin_y))
         inspected = view.simulation.entities.get(view.inspected_entity_id or "")
-        interaction_range = (
-            inspected.kind.profile.build_range
-            if inspected is not None and inspected.kind is EntityKind.BUILDER
-            else inspected.kind.profile.repair_range
-            if inspected is not None and inspected.kind is EntityKind.REPAIR_HUB
-            else inspected.kind.profile.attack_range
-            if inspected is not None
-            else 0.0
-        )
-        if inspected is not None and interaction_range > 0 and len(view.selected_entities) <= 1:
+        radius, work_range = interaction_range(inspected) if inspected is not None else (0.0, False)
+        if inspected is not None and radius > 0 and len(view.selected_entities) <= 1:
             pygame.draw.circle(
                 screen,
-                (105, 232, 172) if inspected.kind is EntityKind.BUILDER else (255, 218, 100),
+                (105, 232, 172) if work_range else (255, 218, 100),
                 view.screen_point(inspected.selection_position),
-                round(interaction_range * view.tile_size),
+                round(radius * view.tile_size),
                 1,
             )
 
@@ -318,6 +323,7 @@ class SoftwareRenderer:
             blits: list[tuple[pygame.Surface, tuple[int, int]]] = []
             building_draws: list[pygame.Rect] = []
             health_bars: list[tuple[pygame.Rect, int]] = []
+            progress_bars: list[tuple[pygame.Rect, int]] = []
             selected_min_x: int | None = None
             selected_min_y = 0
             selected_max_x = 0
@@ -406,9 +412,22 @@ class SoftwareRenderer:
                     )
                     health_width = round(bar_width * entity.health / entity.kind.profile.max_health)
                     health_bars.append((bar, health_width))
+                if entity.category is EntityCategory.BUILDING:
+                    for index, progress in enumerate(building_progress(view.simulation, entity)):
+                        bar = pygame.Rect(
+                            center[0] - bar_width // 2,
+                            center[1]
+                            + max(7, round(appearance.size[1] * tile_size / 2))
+                            + 4
+                            + index * 6,
+                            bar_width,
+                            3,
+                        )
+                        progress_bars.append((bar, round(bar_width * progress)))
             self._entity_blits = tuple(blits)
             self._building_selection_rects = tuple(building_draws)
             self._health_bars = tuple(health_bars)
+            self._progress_bars = tuple(progress_bars)
             self._inspected_ring = inspected_ring
             self._selected_bounds = (
                 None
@@ -432,6 +451,11 @@ class SoftwareRenderer:
                 screen,
                 (74, 218, 111),
                 pygame.Rect(bar.x, bar.y, health_width, 3),
+            )
+        for bar, progress_width in self._progress_bars:
+            pygame.draw.rect(screen, PROGRESS_TRACK, bar)
+            pygame.draw.rect(
+                screen, PROGRESS_COLOR, pygame.Rect(bar.x, bar.y, progress_width, bar.height)
             )
         if len(selected_entities) <= 128:
             for entity_id in selected_entities:
@@ -496,9 +520,7 @@ class SoftwareRenderer:
         colors = PROJECTILE_COLORS
         for trace in view.simulation.projectile_traces:
             if trace.weapon_kind.profile.splash_radius > 0:
-                for point, radius, color, width in blast_circles(
-                    trace, view.simulation.tick, view.simulation.TICKS_PER_SECOND
-                ):
+                for point, radius, color, width in blast_circles(trace, view.simulation.tick):
                     pygame.draw.circle(
                         screen,
                         color,

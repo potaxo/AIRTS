@@ -28,65 +28,93 @@ and offers return to opening configuration.
 
 ## Squad and economy behavior
 
-AI keeps a home reserve and persistent gathering/advancing/attacking/retreating/defending squads.
-Squads assemble most members at safe forward holdings or planned extractor expansions, select
-reachable targets using value, distance, local resistance and other squads' commitments, maintain
-pursuit, retreat from unfavorable fights and regroup. Candidate selection mixes valuable and nearby
-targets. Small forces can raid exposed assets; destroying a target triggers selection from the
-current position instead of a return home. When no favorable target exists, squads stage toward
-the enemy outside its local threat area. Small raids use the reserve; larger raids
-recall the nearest capable squad. New units reinforce non-full advancing squads instead of creating
-single-unit attack waves. Local estimates include up to 96 nearby squad members, excluding retreating
-and defending partners; distant reinforcements are not counted as present. When no favorable attack
-exists, weaker groups can join a stronger nearby group before advancing. Severely wounded units use
-repair-and-return through shared commands.
+A single army objective replaces independent opportunistic squad raids. Persistent cohorts retain
+at most 32 members for bounded command/routing work; the first active cohort leads the army.
+The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
+at least 12 can launch; there is no timeout that releases isolated units. Nearby waiting cohorts
+merge. Fresh units rally near their producer and wait for a six-unit reinforcement batch before
+following the army, rather than being appended to a distant marching cohort. Marching cohorts
+share the target and regroup when stretched out. A depleted offensive force of fewer than twelve
+regroups; forces unable to rebuild, or clearing enemies unable to develop, can finish with survivors.
 
-Staging points sit away from production buildings and behind the anchor when enemies are close.
-New AI production uses an off-building rally point. Construction preserves producer exit rings and
-resource footprints. `SPAWN_BLOCKED` and `SITE_OCCUPIED` trigger bounded orders to clear idle,
-unassigned combat units; repairing/automated units and ongoing pursuit retain their control.
+Army contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
+engage together or regroup near a friendly production anchor. Estimates include only physically
+nearby support, capped at 96 units, not distant queued reinforcements. Small home garrisons handle
+weak raids independently. Otherwise threats to owned infrastructure recall the nearest required
+cohorts; a negative individual combat forecast never vetoes base rescue. Recent attacks on
+production and income buildings take priority over proximity alone.
+Defenders first assemble around the threatened asset and nearby turret cover; they engage when
+the enemy reaches that coverage, threatens firing range, or owned units/assets are already hit.
+They do not chase a merely approaching force away from their own supporting defenses. Turret
+placement faces the nearest visible enemy rather than selecting the rear of a producer.
+Outside base defense, severely
+unfavorable contact triggers regrouping. Severely wounded units repair-and-return when infrastructure
+does not require immediate rescue. Targets mix nearby and valuable reachable assets, and surviving
+armies continue clearing remnants rather than stopping after destroying production.
 
 Combat estimates use health, profile firing cadence, damage and range; close decisions add twelve
 aggregate exchanges with approach delays. Fixed turrets wait for mobile enemies to approach;
-unfinished turrets contribute no armed threat. Forecasts are heuristic and omit collision, individual focus fire, terrain
-routing and reinforcement prediction. Knowledge uses the current fully visible world.
+unfinished turrets contribute no armed threat. Forecasts omit collision, focus fire, splash effects,
+terrain routing and future reinforcement timing. Knowledge uses the fully visible world. Tactical
+control is a bounded rule-based state machine, not a learned policy or a full combat simulator.
 
-Economy avoids enemy-controlled or unreachable sites, replaces lost builders/factories (using
-command centers for builders when necessary), restores income before an unaffordable factory,
-expands extraction and protects remote extractors with turrets. Factory capacity scales with income;
-additional factories and repair facilities use forward holdings. Capacity and a twenty-second cash
-forecast read current per-kind production times and prices. Income shortage prioritizes extraction;
-when safe extractor locations are exhausted, supplementary Matter Synthesizer plans commit before
-the full price is affordable, so military spending cannot prevent the savings goal from starting.
-The desired synthesizer count scales with factory count and army investment. Construction remains
-limited to two concurrent jobs. No free resources or discounts are granted.
+Economy and production use separate spending envelopes. Saved growth credit earmarks roughly 40%
+of available opening/reclaimed cash and ongoing building income; the remainder funds military
+production and additional builders. Credit is spending intent, not extra money: each budget update
+clamps it against real cash after finite production and unpaid construction commitments. Unexpected
+or emergency spending can temporarily exceed the earmark, which is reconciled on the next update.
+Fully funded construction deducts its earmark on acceptance, and its ordinary unpaid job protects
+the cash until builders arrive. Expensive growth goals save only within that envelope; they do not
+freeze all army production or enqueue unaffordable buildings. Recovering lost production/income
+and emergency defense can use the shared balance. Manual production pauses remain untouched;
+AI budget pauses on existing continuous loops remain tracked until actual resume.
 
-Income forecasts read each building's effective tier profile. Resource upgrades compete with
-new income buildings using completion time plus cost per additional income; expansion estimates
-include straight-line builder travel and construction time, not a routed arrival prediction.
-The AI considers the next configured income-increasing upgrade, without hard-coded tiers or prices,
-on completed, healthy, unthreatened sources not targeted for reclamation. One income upgrade runs
-at a time; unaffordable chosen upgrades reserve funds through the existing production budget pauses.
-Existing unpaid construction and finite production commitments take precedence, and missing builders
-or factories are restored before upgrades. Busy builders do not prevent upgrades. Local military
-inferiority suspends new upgrade investment; already paid upgrades continue. Additional synthesizer
-plans wait while an income upgrade is running. Non-income upgrade benefits are not evaluated.
+Builders scale from three toward eight with resource holdings and factories; command centers
+supply them preferentially. Up to six separate builders can construct concurrently. Close,
+connected resource sites rank ahead of distant speculative holdings, while enemy-controlled and
+unreachable sites are rejected. Production buildings first support remote income sites without
+a nearby factory, then extend the frontier in bounded steps toward unclaimed resources or enemies.
+Factory targets account for income, production time, territory and army size rather than requiring
+every factory to run continuously. After establishing a second factory, exposed production/income
+holdings receive turrets before further factory expansion. Repair hubs support damaged armies.
+Visible enemy army buildup that substantially outmatches the current force prioritizes a home
+turret before further expansion, so early economic growth does not leave the core undefended.
+Placement preserves resource footprints and producer exit rings. Obstructed production and
+construction trigger bounded clearance orders.
 
-Production scores heavy tanks, light artillery support, tank destroyers against enemy heavy tanks
-and tank destroyers, and heavy artillery against completed turrets. Light tanks remain the main force.
-Emergency defense can spend growth reserves and favors faster light tanks over expensive additions.
-Queued unpaid items and newly committed orders reduce the budget available to other factories.
-Unpaid construction and needed units reserve funds by pausing continuous production; AI pause
-ownership survives intervening finite queues until an actual resume. Manual pauses persist.
+Income upgrades compete with expansion using completion time plus cost per additional income;
+expansion adds straight-line builder travel and construction time, not a routed arrival forecast.
+Only healthy, completed, unthreatened, unreclaimed sources qualify. Next configured income-increasing
+upgrades supply their own prices, durations and target profiles; one runs at a time. Non-income
+benefits are not evaluated. Existing paid work continues during threats. Synthesizers remain
+supplementary income when safe extraction and cheaper upgrades are unavailable.
 
-Owners decide every ten ticks with staggered slots; economy runs every twenty. A decision updates
-at most two combat squads of up to 32 units, checks four attack candidates per squad and attempts
-three commands. Economy receives command capacity before offensive squads on economy turns;
-production sources rotate to avoid starvation. Each building-kind placement search examines at
-most 64 candidates. Shared movement/combat budgets apply.
-Decisions derive from ticks and authoritative state; ambient enemy generation is disabled in matches.
-Saved squad membership, phases, targets, destinations, command/retry ticks and budget pauses are
-validated by the persistence adapter. Current save continuation/replay uses the same decision logic.
+Factories produce fully funded short batches. Eight light/heavy frontliners establish the opening
+backbone; subsequent production balances resource investment across light tanks, heavy tanks,
+light artillery, tank destroyers and heavy artillery, plus a small scout quota. Desired shares shift
+from cheap units toward heavy armor and artillery as army investment, actual military cash or
+effective income grows. Enemy heavy units increase destroyer demand; fixed defenses increase siege
+demand. These are composition preferences, not nonexistent armor-damage bonuses. Finite queued
+units and the prepaid current item of continuous production count toward composition, preventing
+separate factories from all filling the same gap.
+
+A missing expensive role can save up to its next unit's cost within military funds instead of
+repeatedly buying another light tank; existing continuous loops respect that reserve. This can idle
+production while income accumulates, but neither queues unaffordable units nor spends the separate
+growth envelope. Threatened bases or owners without income use an affordable light-tank fallback
+rather than waiting for a specialist. An income-less owner also releases the economic earmark for
+production after protecting actual outstanding construction and finite production commitments.
+Threats prioritize military output over additional nonessential builders and economic earmarks,
+without forcing every funded purchase back to light tanks. No prices, production times or income
+multipliers are secretly changed, and no free resources or discounts are granted.
+
+Owners decide every ten ticks with staggered slots; budgets, construction and production run every
+twenty. A decision attempts at most three commands and updates at most two combat cohorts, with one
+normally reserved on economy turns. Target selection checks at most four candidates and placement
+at most 64 candidates per building kind. Production queues rotate factories and retain ordinary
+shared validation, routing and collision budgets. Saved cohort phases, objectives, command/retry
+ticks, budget pauses, growth credit and its update tick resume through current-format persistence;
+AI commands are regenerated internally during replay.
 
 ## Research basis
 

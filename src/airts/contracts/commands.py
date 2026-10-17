@@ -311,6 +311,12 @@ class DeleteSpatialReferenceCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class SetAIIncomeMultiplierCommand:
+    multiplier: int
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class SetDeveloperModeCommand:
     enabled: bool
     owner_id: str = "player"
@@ -366,6 +372,7 @@ Command = (
     | DeleteSpatialReferenceCommand
     | SetSelectionCommand
     | SetDeveloperModeCommand
+    | SetAIIncomeMultiplierCommand
     | ModifyAutomationCommand
 )
 
@@ -379,6 +386,12 @@ class CommandResult:
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, SetAIIncomeMultiplierCommand):
+        return {
+            "type": "set_ai_income_multiplier",
+            "multiplier": command.multiplier,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, UpgradeEntityCommand | CancelUpgradeCommand):
         return {
             "type": "upgrade_entity"
@@ -600,6 +613,10 @@ def command_from_dict(raw_data: object) -> Command:
     data = _mapping(raw_data, "command")
     command_type = data.get("type")
     owner_id = _string(data.get("owner_id", "player"), "owner_id")
+    if command_type == "set_ai_income_multiplier":
+        return SetAIIncomeMultiplierCommand(
+            _integer(data.get("multiplier"), "multiplier"), owner_id
+        )
     if command_type == "set_developer_mode":
         return SetDeveloperModeCommand(_boolean(data.get("enabled"), "enabled"), owner_id)
     if command_type == "create_spatial_reference":

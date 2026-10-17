@@ -1,27 +1,17 @@
-"""Factory production queues, spawning, and produced-unit assignment."""
+"""Factory production queue validation, payment, progress, and spawning."""
 
 from __future__ import annotations
 
-from math import floor
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
     Automation,
     AutomationKind,
     AutomationStatus,
-    DefendParameters,
-    PatrolParameters,
     ProductionParameters,
     build_defend_stations,
     build_patrol_waypoints,
     production_parameters,
-    target_center,
-)
-from airts.contracts.automations import (
-    defend_parameters as _defend_parameters,
-)
-from airts.contracts.automations import (
-    patrol_parameters as _patrol_parameters,
 )
 from airts.contracts.commands import (
     CommandResult,
@@ -39,11 +29,16 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
-from airts.systems import automation_execution, movement, spatial_commands
-from airts.systems.automation_execution import coordinate_shared_defend_stations
+from airts.systems import (
+    automation_assignments,
+    automation_lifecycle,
+    movement,
+    production_orders,
+)
+from airts.systems.entity_registry import allocate_entity_id
+from airts.systems.spawning import find_spawn_point
+from airts.systems.validation import validate_entities, validate_geometry
 from airts.world.entities import Entity, UnitState
-from airts.world.map import Cell
-from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
 if TYPE_CHECKING:
@@ -60,7 +55,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
         failure = priority_failure if priority_failure is not None else count_failure
         assert failure is not None
         return simulation._reject_validation("create_production", failure)
-    failure = simulation._validate_entities((command.factory_id,), command.owner_id)
+    failure = validate_entities(simulation, (command.factory_id,), command.owner_id)
     if failure is not None:
         return simulation._reject_validation("create_production", failure)
     factory = simulation.entities[command.factory_id]
@@ -118,7 +113,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                     "defend_target",
                 ),
             )
-        geometry_failure = spatial_commands.validate_geometry(simulation, command.defend_target)
+        geometry_failure = validate_geometry(simulation, command.defend_target)
         if geometry_failure is not None:
             return simulation._reject_validation("create_production", geometry_failure)
         try:
@@ -140,7 +135,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 ),
             )
     if command.patrol_target is not None:
-        geometry_failure = spatial_commands.validate_geometry(simulation, command.patrol_target)
+        geometry_failure = validate_geometry(simulation, command.patrol_target)
         if geometry_failure is not None:
             return simulation._reject_validation("create_production", geometry_failure)
         try:
@@ -159,7 +154,8 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
     else:
         preempt_continuous_production(simulation, command.factory_id)
     build_ticks = command.unit_kind.profile.production_ticks
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.PRODUCTION,
         command.title,
         command.owner_id,
@@ -179,13 +175,23 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
         ),
     )
     if simulation.assignments.get(command.factory_id) is not None:
-        simulation._activate(automation, ())
-        simulation._transition(automation, AutomationStatus.WAITING, "FACTORY_QUEUED")
+        automation_assignments.activate(simulation, automation, ())
+        if command.defend_target is not None:
+            assert isinstance(command.defend_target, PolygonRegion | PolylineTarget)
+            production_orders.attach_production_defense(
+                simulation, automation, command.defend_target
+            )
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.WAITING, "FACTORY_QUEUED"
+        )
         return simulation._accept("create_production", automation.automation_id)
-    failure = simulation._validate_claims(automation, (command.factory_id,))
+    failure = automation_lifecycle.validate_claims(simulation, automation, (command.factory_id,))
     if failure is not None:
         return simulation._reject_validation("create_production", failure)
-    simulation._activate(automation, (command.factory_id,))
+    automation_assignments.activate(simulation, automation, (command.factory_id,))
+    if command.defend_target is not None:
+        assert isinstance(command.defend_target, PolygonRegion | PolylineTarget)
+        production_orders.attach_production_defense(simulation, automation, command.defend_target)
     factory.state = UnitState.PRODUCING
     record_production_started(simulation, automation)
     return simulation._accept("create_production", automation.automation_id)
@@ -202,11 +208,17 @@ def preempt_continuous_production(simulation: Simulation, factory_id: str) -> No
     ):
         return
     if incumbent.status is AutomationStatus.WAITING:
-        simulation._transition(incumbent, AutomationStatus.PAUSED, "USER_QUEUE_PREEMPTING")
-        simulation._transition(incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED")
+        automation_lifecycle.transition(
+            simulation, incumbent, AutomationStatus.PAUSED, "USER_QUEUE_PREEMPTING"
+        )
+        automation_lifecycle.transition(
+            simulation, incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED"
+        )
     else:
-        simulation._transition(incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED")
-    simulation._release_automation(incumbent)
+        automation_lifecycle.transition(
+            simulation, incumbent, AutomationStatus.WAITING, "FACTORY_QUEUED"
+        )
+    automation_assignments.release_automation(simulation, incumbent)
 
 
 def create_production_batch(
@@ -217,7 +229,7 @@ def create_production_batch(
             "create_production_batch",
             ValidationFailure(ValidationPhase.SCHEMA, "EMPTY_PRODUCTION_SEQUENCE", "sequence"),
         )
-    failure = simulation._validate_entities((command.factory_id,), command.owner_id)
+    failure = validate_entities(simulation, (command.factory_id,), command.owner_id)
     if failure is not None:
         return simulation._reject_validation("create_production_batch", failure)
     source = simulation.entities[command.factory_id]
@@ -256,7 +268,7 @@ def create_production_batch(
 
 
 def reduce_production(simulation: Simulation, command: ReduceProductionCommand) -> CommandResult:
-    failure = simulation._validate_entities((command.factory_id,), command.owner_id)
+    failure = validate_entities(simulation, (command.factory_id,), command.owner_id)
     if failure is not None:
         return simulation._reject_validation("reduce_production", failure)
     source = simulation.entities[command.factory_id]
@@ -283,8 +295,10 @@ def reduce_production(simulation: Simulation, command: ReduceProductionCommand) 
         )
     parameters = production_parameters(job)
     if parameters.target_count - parameters.produced_count == 1:
-        simulation._transition(job, AutomationStatus.CANCELED, "PLAYER_REDUCED_PRODUCTION")
-        simulation._release_automation(job)
+        automation_lifecycle.transition(
+            simulation, job, AutomationStatus.CANCELED, "PLAYER_REDUCED_PRODUCTION"
+        )
+        automation_assignments.release_automation(simulation, job)
         start_next_production(simulation, command.factory_id)
     else:
         parameters.target_count -= 1
@@ -332,12 +346,13 @@ def supersede_continuous_production(simulation: Simulation, factory_id: str) -> 
         if production_parameters(automation).continuous
     )
     for automation in superseded:
-        simulation._transition(
+        automation_lifecycle.transition(
+            simulation,
             automation,
             AutomationStatus.CANCELED,
             "SUPERSEDED_BY_LATEST_CONTINUOUS_PRODUCTION",
         )
-        simulation._release_automation(automation)
+        automation_assignments.release_automation(simulation, automation)
     if superseded:
         start_next_production(simulation, factory_id)
 
@@ -356,7 +371,9 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         ):
             return
         if automation.status is not AutomationStatus.PAUSED:
-            simulation._transition(automation, AutomationStatus.PAUSED, "FACTORY_UNAVAILABLE")
+            automation_lifecycle.transition(
+                simulation, automation, AutomationStatus.PAUSED, "FACTORY_UNAVAILABLE"
+            )
         return
     unit_kind = parameters.current_unit_kind
     cost = unit_kind.profile.production_cost
@@ -364,14 +381,16 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         balance = simulation.resources.get(automation.owner_id, 0)
         if balance < cost:
             if automation.status is AutomationStatus.ACTIVE:
-                simulation._transition(
-                    automation, AutomationStatus.WAITING, "INSUFFICIENT_RESOURCES"
+                automation_lifecycle.transition(
+                    simulation, automation, AutomationStatus.WAITING, "INSUFFICIENT_RESOURCES"
                 )
             return
         simulation.resources[automation.owner_id] = balance - cost
         parameters.cost_paid = True
         if automation.status is AutomationStatus.WAITING:
-            simulation._transition(automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE")
+            automation_lifecycle.transition(
+                simulation, automation, AutomationStatus.ACTIVE, "RESOURCES_AVAILABLE"
+            )
         simulation.events.record(
             simulation.tick,
             EventType.RESOURCE_CHANGED,
@@ -388,15 +407,19 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
     spawn = find_spawn_point(simulation, simulation.entities[parameters.factory_id], unit_kind)
     if spawn is None:
         if automation.status is AutomationStatus.ACTIVE:
-            simulation._transition(automation, AutomationStatus.WAITING, "SPAWN_BLOCKED")
+            automation_lifecycle.transition(
+                simulation, automation, AutomationStatus.WAITING, "SPAWN_BLOCKED"
+            )
         return
     if automation.status is AutomationStatus.WAITING:
-        simulation._transition(automation, AutomationStatus.ACTIVE, "SPAWN_AVAILABLE")
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.ACTIVE, "SPAWN_AVAILABLE"
+        )
     parameters.progress_ticks = 0
     parameters.cost_paid = False
     entity_id = spawn_unit(simulation, automation, parameters, spawn)
     parameters.produced_count += 1
-    parameters.produced_entity_ids.append(entity_id)
+    parameters.record_produced_entity(entity_id)
     if parameters.sequence:
         parameters.sequence_produced += 1
         if parameters.sequence_produced >= parameters.sequence[parameters.sequence_index][1]:
@@ -405,9 +428,9 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         if parameters.produced_count < parameters.target_count:
             parameters.build_ticks = parameters.current_unit_kind.profile.production_ticks
     if parameters.defend_target is not None:
-        assign_produced_defender(simulation, automation, parameters, entity_id)
+        production_orders.assign_produced_defender(simulation, automation, parameters, entity_id)
     elif parameters.patrol_target is not None:
-        assign_produced_patroller(simulation, automation, parameters, entity_id)
+        production_orders.assign_produced_patroller(simulation, automation, parameters, entity_id)
     simulation.events.record(
         simulation.tick,
         EventType.PRODUCTION_COMPLETED,
@@ -417,8 +440,10 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         produced_count=parameters.produced_count,
     )
     if not parameters.continuous and parameters.produced_count >= parameters.target_count:
-        simulation._transition(automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED")
-        simulation._release_automation(automation)
+        automation_lifecycle.transition(
+            simulation, automation, AutomationStatus.COMPLETED, "TARGET_COUNT_REACHED"
+        )
+        automation_assignments.release_automation(simulation, automation)
         start_next_production(simulation, parameters.factory_id)
 
 
@@ -458,8 +483,10 @@ def start_next_production(simulation: Simulation, factory_id: str) -> None:
     )
     if queued is None or factory_id not in simulation.entities:
         return
-    simulation._assign(factory_id, queued)
-    simulation._transition(queued, AutomationStatus.ACTIVE, "FACTORY_QUEUE_STARTED")
+    automation_assignments.assign(simulation, factory_id, queued)
+    automation_lifecycle.transition(
+        simulation, queued, AutomationStatus.ACTIVE, "FACTORY_QUEUE_STARTED"
+    )
     simulation.entities[factory_id].state = UnitState.PRODUCING
     record_production_started(simulation, queued)
 
@@ -482,12 +509,8 @@ def spawn_unit(
     parameters: ProductionParameters,
     position: Point,
 ) -> str:
-    while True:
-        unit_kind = parameters.current_unit_kind
-        entity_id = f"{unit_kind.value}_{simulation._next_entity_number:03d}"
-        simulation._next_entity_number += 1
-        if entity_id not in simulation.entities:
-            break
+    unit_kind = parameters.current_unit_kind
+    entity_id = allocate_entity_id(simulation, unit_kind.value)
     entity = Entity(
         entity_id=entity_id,
         kind=unit_kind,
@@ -530,178 +553,3 @@ def spawn_unit(
                 UnitState.MOVING,
             )
     return entity_id
-
-
-def assign_produced_defender(
-    simulation: Simulation,
-    production: Automation,
-    parameters: ProductionParameters,
-    entity_id: str,
-) -> None:
-    target = parameters.defend_target
-    assert target is not None
-    defend = simulation.automations.get(parameters.defend_automation_id or "")
-    if defend is None or defend.status.terminal:
-        gathering_point = isinstance(target, PolygonRegion)
-        if gathering_point:
-            slots = simulation._gathering_slots(
-                target, 1, collision_radius(simulation.entities[entity_id].kind)
-            )
-            stations = {entity_id: slots[0]}
-        else:
-            stations = build_defend_stations(target, (entity_id,), simulation.game_map)
-            slots = ()
-        defend = simulation._new_automation(
-            AutomationKind.DEFEND,
-            f"Defend {production.title}",
-            production.owner_id,
-            production.priority,
-            production.original_instruction,
-            [entity_id],
-            DefendParameters(
-                target,
-                stations,
-                auto_repair=parameters.auto_repair,
-                gathering_point=gathering_point,
-                deployment_slots=slots,
-                assembly_radius=(slots[0].distance_to(target_center(target)) if slots else 0.0),
-            ),
-        )
-        simulation._activate(defend, (entity_id,))
-        parameters.defend_automation_id = defend.automation_id
-        coordinate_shared_defend_stations(simulation, target, production.owner_id)
-        return
-    if entity_id not in defend.entity_ids:
-        defend.entity_ids.append(entity_id)
-    defend_parameters = _defend_parameters(defend)
-    previous_station = defend_parameters.stations.get(entity_id)
-    if defend_parameters.gathering_point:
-        slot_index = defend.entity_ids.index(entity_id)
-        slots = simulation._gathering_slots(
-            target,
-            slot_index + 1,
-            max(collision_radius(simulation.entities[item].kind) for item in defend.entity_ids),
-        )
-        defend_parameters.deployment_slots = slots
-        station = slots[slot_index]
-        defend_parameters.stations[entity_id] = station
-        defend_parameters.assembly_radius = max(
-            defend_parameters.assembly_radius,
-            station.distance_to(target_center(target)),
-        )
-    else:
-        previous_stations = defend_parameters.stations
-        defend_parameters.stations = build_defend_stations(
-            target,
-            tuple(defend.entity_ids),
-            simulation.game_map,
-        )
-        for defender_id in defend.entity_ids:
-            changed_owner = simulation.assignments.get(defender_id) != defend.automation_id
-            simulation._assign(defender_id, defend)
-            if changed_owner or previous_stations.get(
-                defender_id
-            ) != defend_parameters.stations.get(defender_id):
-                automation_execution.initialize_runtime_entity(simulation, defend, defender_id)
-        coordinate_shared_defend_stations(simulation, target, production.owner_id)
-        return
-    changed_owner = simulation.assignments.get(entity_id) != defend.automation_id
-    simulation._assign(entity_id, defend)
-    if changed_owner or previous_station != defend_parameters.stations.get(entity_id):
-        automation_execution.initialize_runtime_entity(simulation, defend, entity_id)
-    coordinate_shared_defend_stations(simulation, target, production.owner_id)
-
-
-def attach_production_defense(
-    simulation: Simulation,
-    production: Automation,
-    target: PolygonRegion | PolylineTarget,
-) -> None:
-    parameters = production_parameters(production)
-    parameters.rally_point = None
-    parameters.patrol_target = None
-    parameters.patrol_automation_id = None
-    parameters.defend_target = target
-    # Existing defenders keep their orders; the next spawn starts a new linked defense.
-    parameters.defend_automation_id = None
-
-
-def assign_produced_patroller(
-    simulation: Simulation,
-    production: Automation,
-    parameters: ProductionParameters,
-    entity_id: str,
-) -> None:
-    target = parameters.patrol_target
-    assert target is not None
-    patrol = simulation.automations.get(parameters.patrol_automation_id or "")
-    if patrol is None or patrol.status.terminal:
-        waypoints = build_patrol_waypoints(target, simulation.game_map)
-        patrol = simulation._new_automation(
-            AutomationKind.PATROL,
-            f"Patrol {production.title}",
-            production.owner_id,
-            production.priority,
-            production.original_instruction,
-            [entity_id],
-            PatrolParameters(target, waypoints, auto_repair=parameters.auto_repair),
-        )
-        simulation._activate(patrol, (entity_id,))
-        parameters.patrol_automation_id = patrol.automation_id
-        return
-    if entity_id not in patrol.entity_ids:
-        patrol.entity_ids.append(entity_id)
-    patrol_parameters = _patrol_parameters(patrol)
-    patrol_parameters.waypoint_indices[entity_id] = (
-        0
-        if isinstance(target, PolylineTarget)
-        else (len(patrol.entity_ids) - 1) % len(patrol_parameters.waypoints)
-    )
-    simulation._assign(entity_id, patrol)
-    automation_execution.initialize_runtime_entity(simulation, patrol, entity_id)
-
-
-def spawn_cell_available(simulation: Simulation, cell: Cell, kind: EntityKind) -> bool:
-    """Certify a cell-centered spawn against authoritative nearby mobile discs.
-
-    Every declared mobile radius is smaller than half a cell, so a passable cell
-    without a building also certifies terrain, building and boundary clearance.
-    Occupancy is only the broadphase: an adjacent cell can contain an overlapping
-    disc, while an occupied cell can still have physically usable capacity.
-    """
-    if not simulation.game_map.is_cell_passable(cell):
-        return False
-    occupants = simulation.occupancy.occupants(cell)
-    if any(not simulation.entities[key].is_movable for key in occupants):
-        return False
-    point = Point(cell[0] + 0.5, cell[1] + 0.5)
-    radius = collision_radius(kind)
-    maximum_radius = max(collision_radius(item) for item in EntityKind if item.profile.movable)
-    reach = radius + maximum_radius
-    nearby_ids: set[str] = set()
-    for y in range(floor(point.y - reach), floor(point.y + reach) + 1):
-        for x in range(floor(point.x - reach), floor(point.x + reach) + 1):
-            if simulation.game_map.contains_cell((x, y)):
-                nearby_ids.update(simulation.occupancy.occupants((x, y)))
-    for entity_id in sorted(nearby_ids):
-        entity = simulation.entities[entity_id]
-        if not entity.is_movable:
-            continue
-        simulation._collision_pair_check_count += 1
-        contact = radius + collision_radius(entity.kind)
-        dx = point.x - entity.position.x
-        dy = point.y - entity.position.y
-        if dx * dx + dy * dy < contact * contact - 1e-12:
-            return False
-    return True
-
-
-def find_spawn_point(simulation: Simulation, factory: Entity, kind: EntityKind) -> Point | None:
-    occupied = factory.occupied_cells
-    candidates: set[Cell] = set()
-    for x, y in occupied:
-        candidates.update({(x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)})
-    for cell in sorted(candidates, key=lambda item: (item[1], item[0])):
-        if cell not in occupied and spawn_cell_available(simulation, cell, kind):
-            return Point(cell[0] + 0.5, cell[1] + 0.5)
-    return None

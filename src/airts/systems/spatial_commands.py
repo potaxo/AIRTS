@@ -17,17 +17,12 @@ from airts.contracts.commands import (
     ValidationPhase,
 )
 from airts.contracts.events import EventType
-from airts.contracts.spatial import GroundingSelection, PointTarget, SpatialKind, SpatialTarget
+from airts.contracts.spatial import GroundingSelection, SpatialKind
+from airts.systems import automation_control
+from airts.systems.validation import validate_geometry
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
-
-
-def validate_geometry(simulation: Simulation, target: SpatialTarget) -> ValidationFailure | None:
-    points = (target.point,) if isinstance(target, PointTarget) else target.points
-    if any(not simulation.game_map.contains(point) for point in points):
-        return ValidationFailure(ValidationPhase.SPATIAL, "TARGET_OUTSIDE_MAP", "target")
-    return None
 
 
 def create_spatial_reference(
@@ -130,7 +125,7 @@ def delete_spatial_reference(
         )
     ]
     for automation in affected:
-        simulation._cancel(automation.automation_id, command.owner_id)
+        automation_control.cancel(simulation, automation.automation_id, command.owner_id)
     simulation.spatial.delete(command.reference_id)
     simulation.selection = GroundingSelection(
         simulation.selection.entity_ids,

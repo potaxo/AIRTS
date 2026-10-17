@@ -71,8 +71,8 @@ Art locations, regeneration and replacement are documented in the
 | `Shift` + right-click with selected units | Append a movement waypoint; units follow clicks in order, including clicks on enemies |
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
-| Right-click ground or a friendly entity | Move selected units while preserving their formation |
-| Double right-click at the same destination, including an enemy | Gather selected units around the destination |
+| Right-click ground or a friendly entity | Nearby: preserve formation; beyond 12 cells from the group center: gather and march along shared routes |
+| Double right-click at the same destination, including an enemy | Gather selected units around the destination; distant moves use the same march behavior |
 | Right-click an enemy | Order selected armed units to pursue and attack it; surviving attackers gather at its last location after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
@@ -250,10 +250,17 @@ timeline, and exact reproduction across versions or hardware is not guaranteed. 
 [replay policy](docs/milestones/persistence.md#save-reliability-and-replay-policy).
 
 **Settings** offers resolution presets and p95 frame/render/present-wait/simulation timings.
-Its **Developer mode** toggle starts OFF. When ON, it adds 2,000 resources to the player for
-each full second of game time, in addition to building income. Pausing suspends this income;
-turning it OFF stops the bonus and clears the partial second. Saves retain the toggle and timer;
-a new game starts with it OFF.
+Open **Settings > Developer settings** for the player resource bonus, game speed and AI income.
+The player bonus starts OFF; ON adds 2,000 resources per game second in addition to building income.
+OFF stops it and clears its partial second. **AI income 5x** multiplies every AI's building income
+by five; OFF restores normal income. Both income settings are saved and default to OFF/1x in a new
+simulation. Speed offers **0.5x / 1x / 2x / 4x**, defaults to 1x, and stays a local app preference
+across new games and loads. Pause suspends all game-time income and progression at every speed.
+Building income settles once per game second. The resource header's **(+N)** shows total player
+income per game second, including the developer bonus.
+Enable **Developer settings > Show AI income** to list each AI's balance and **(+N)** income
+below the player's resources in the upper-left panel. The displayed rate includes the AI income
+multiplier. This local display option starts OFF; turning it OFF hides the AI rows again.
 **Real FPS** uses rolling p99 completed-frame time; **Submit FPS** is an average diagnostic.
 Neither measures physical monitor scan-out. Performance requirements and acceptance workloads
 are defined in the [performance contract](docs/milestones/performance.md).

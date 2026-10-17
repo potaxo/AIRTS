@@ -12,7 +12,6 @@ from math import ceil, floor, sqrt
 from airts.contracts.automations import (
     Automation,
     AutomationKind,
-    AutomationParameters,
     AutomationStatus,
     ConstructionParameters,
     area_coverage_order,
@@ -28,7 +27,6 @@ from airts.contracts.commands import (
     CancelUpgradeCommand,
     Command,
     CommandResult,
-    ControlAuthority,
     CreateConstructionCommand,
     CreateDefendCommand,
     CreateEconomyCommand,
@@ -51,6 +49,7 @@ from airts.contracts.commands import (
     RenameRegionCommand,
     RepairBuildingCommand,
     ResumeAutomationCommand,
+    SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
@@ -72,8 +71,11 @@ from airts.navigation.collision.solver import warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
 from airts.navigation.spatial_index import SpatialIndex, warm_spatial_index
 from airts.systems import (
+    automation_assignments,
     automation_control,
     automation_execution,
+    automation_lifecycle,
+    automation_runtime,
     command_handlers,
     opponent_ai,
     spatial_commands,
@@ -87,6 +89,7 @@ from airts.systems import reclamation as reclamation_system
 from airts.systems import repair as repair_system
 from airts.systems import skirmish as skirmish_system
 from airts.systems import upgrades as upgrade_system
+from airts.systems.assignment_state import state_for_assignment
 from airts.systems.repair_positions import service_route
 from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
@@ -107,7 +110,6 @@ class Simulation:
     LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
     LARGE_SCENE_GC_CELL_THRESHOLD = 256 * 256
     TICKS_PER_SECOND = 10
-    INCOME_INTERVAL_TICKS = 2 * TICKS_PER_SECOND
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
     NO_PROGRESS_YIELD_TICKS = 30
     DESTINATION_REPATH_TICKS = 50
@@ -170,6 +172,7 @@ class Simulation:
         self.tick = 0
         self.developer_mode = False
         self.developer_income_ticks = 0
+        self.ai_income_multiplier = 1
         self.entities = {
             spec.entity_id: Entity(
                 entity_id=spec.entity_id,
@@ -193,6 +196,8 @@ class Simulation:
             owner_id: (1000 if game_map.match_slots else 500)
             for owner_id in {entity.owner_id for entity in self.entities.values()}
         }
+        self._income_per_second: dict[str, int] = {}
+        economy_system.rebuild_income(self)
         self.spatial = SpatialStore()
         self.selection = GroundingSelection()
         self._next_automation_number = 1
@@ -361,6 +366,8 @@ class Simulation:
             return upgrade_system.cancel_upgrade(self, command)
         if isinstance(command, SetDeveloperModeCommand):
             return command_handlers.set_developer_mode(self, command)
+        if isinstance(command, SetAIIncomeMultiplierCommand):
+            return command_handlers.set_ai_income_multiplier(self, command)
         if isinstance(command, CreateSpatialReferenceCommand):
             return spatial_commands.create_spatial_reference(self, command)
         if isinstance(command, EditSpatialReferenceCommand):
@@ -409,7 +416,7 @@ class Simulation:
             return automation_control.pause(self, command.automation_id, command.owner_id)
         if isinstance(command, ResumeAutomationCommand):
             return automation_control.resume(self, command.automation_id, command.owner_id)
-        return self._cancel(command.automation_id, command.owner_id)
+        return automation_control.cancel(self, command.automation_id, command.owner_id)
 
     def advance(self, ticks: int = 1) -> None:
         if ticks < 0:
@@ -508,16 +515,18 @@ class Simulation:
         if current_id is not None:
             current = self.automations[current_id]
             current.remove_entity(entity_id)
-            automation_execution.refresh_gathering_formation(self, current)
+            automation_runtime.refresh_gathering_formation(self, current)
             if current.kind is AutomationKind.PRODUCTION and not current.status.terminal:
-                self._transition(current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
+                automation_lifecycle.transition(
+                    self, current, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED"
+                )
             else:
-                automation_control.handle_automation_without_entities(self, current)
+                automation_assignments.handle_automation_without_entities(self, current)
         if suspended_id is not None:
             suspended = self.automations[suspended_id]
             suspended.remove_entity(entity_id)
-            automation_execution.refresh_gathering_formation(self, suspended)
-            automation_control.handle_automation_without_entities(self, suspended)
+            automation_runtime.refresh_gathering_formation(self, suspended)
+            automation_assignments.handle_automation_without_entities(self, suspended)
         for automation in self._live_automation_candidates:
             if (
                 automation.kind is AutomationKind.CONSTRUCTION
@@ -525,14 +534,18 @@ class Simulation:
                 and isinstance(automation.parameters, ConstructionParameters)
                 and automation.parameters.site_entity_id == entity_id
             ):
-                self._transition(automation, AutomationStatus.FAILED, "CONSTRUCTION_DESTROYED")
-                self._release_automation(automation)
+                automation_lifecycle.transition(
+                    self, automation, AutomationStatus.FAILED, "CONSTRUCTION_DESTROYED"
+                )
+                automation_assignments.release_automation(self, automation)
             elif (
                 automation.kind is AutomationKind.PRODUCTION
                 and not automation.status.terminal
                 and _production_parameters(automation).factory_id == entity_id
             ):
-                self._transition(automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED")
+                automation_lifecycle.transition(
+                    self, automation, AutomationStatus.FAILED, "SOURCE_ENTITY_REMOVED"
+                )
             elif (
                 automation.kind is AutomationKind.CONSTRUCTION
                 and not automation.status.terminal
@@ -540,8 +553,14 @@ class Simulation:
             ):
                 automation.remove_entity(entity_id)
                 if not automation.entity_ids:
-                    self._transition(automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE")
+                    automation_lifecycle.transition(
+                        self, automation, AutomationStatus.FAILED, "BUILDER_UNAVAILABLE"
+                    )
         self.occupancy.remove(entity_id)
+        if removed_entity.is_complete:
+            economy_system.change_income(
+                self, removed_entity.owner_id, -removed_entity.profile.income_per_second
+            )
         del self.entities[entity_id]
         for opponent in self.opponents.values():
             opponent.remove_entity(entity_id)
@@ -567,7 +586,7 @@ class Simulation:
             automation_id=None,
             reason=command.reason,
         )
-        if removed_entity.kind is EntityKind.BUILDER or not removed_entity.is_complete:
+        if removed_entity.profile.can_build or not removed_entity.is_complete:
             if self._removal_batch is None:
                 construction_system.start_next_construction(self)
             else:
@@ -591,7 +610,7 @@ class Simulation:
             if removed_ids:
                 self._clear_removed_references(removed_ids)
             for owner, target in formations:
-                automation_execution.coordinate_shared_defend_stations(self, target, owner)
+                automation_runtime.coordinate_shared_defend_stations(self, target, owner)
             if restart:
                 construction_system.start_next_construction(self)
 
@@ -608,13 +627,13 @@ class Simulation:
                 if entity.pursue_target:
                     entity.path.clear()
                     entity.move_target = None
-                    entity.state = self._state_for_assignment(entity.entity_id)
+                    entity.state = state_for_assignment(self, entity.entity_id)
                     movement_system.reset_movement_liveness(entity)
                 entity.attack_target_id = None
                 entity.pursue_target = False
             if entity.repair_target_id in removed_ids:
                 entity.repair_target_id = None
-                if entity.kind is EntityKind.BUILDER:
+                if entity.profile.movable and entity.profile.can_repair:
                     entity.path.clear()
                     entity.move_target = None
                     entity.state = UnitState.IDLE
@@ -684,6 +703,7 @@ class Simulation:
             "resources": dict(sorted(self.resources.items())),
             "developer_mode": self.developer_mode,
             "developer_income_ticks": self.developer_income_ticks,
+            "ai_income_multiplier": self.ai_income_multiplier,
             "spatial": self.spatial.to_dict(),
             "selection": self.selection.to_dict(),
             "projectiles": {
@@ -716,39 +736,47 @@ class Simulation:
         self._gathering_reachable_cache.clear()
 
     def _allocate_destinations(
-        self, entity_ids: tuple[str, ...], target: Point, *, gathering: bool = False
+        self,
+        entity_ids: tuple[str, ...],
+        target: Point,
+        *,
+        gathering: bool = False,
+        origins: dict[str, Point] | None = None,
     ) -> dict[str, Point]:
         blocked = self._building_cells()
         static_obstacles = self._terrain_obstacles | blocked
         members = [self.entities[key] for key in entity_ids]
+        positions = origins if origins is not None else {e.entity_id: e.position for e in members}
         maximum_radius = max(collision_radius(entity.kind) for entity in members)
         if not gathering:
             center = Point(
-                sum(self.entities[key].position.x for key in entity_ids) / len(entity_ids),
-                sum(self.entities[key].position.y for key in entity_ids) / len(entity_ids),
+                sum(point.x for point in positions.values()) / len(entity_ids),
+                sum(point.y for point in positions.values()) / len(entity_ids),
             )
             # Fit the existing shape at a map edge instead of reshuffling every unit.
             dx = max(
-                max(collision_radius(e.kind) - e.position.x for e in members),
+                max(collision_radius(e.kind) - positions[e.entity_id].x for e in members),
                 min(
                     target.x - center.x,
                     min(
-                        self.game_map.width - collision_radius(e.kind) - e.position.x
+                        self.game_map.width - collision_radius(e.kind) - positions[e.entity_id].x
                         for e in members
                     ),
                 ),
             )
             dy = max(
-                max(collision_radius(e.kind) - e.position.y for e in members),
+                max(collision_radius(e.kind) - positions[e.entity_id].y for e in members),
                 min(
                     target.y - center.y,
                     min(
-                        self.game_map.height - collision_radius(e.kind) - e.position.y
+                        self.game_map.height - collision_radius(e.kind) - positions[e.entity_id].y
                         for e in members
                     ),
                 ),
             )
-            translated = {e.entity_id: Point(e.position.x + dx, e.position.y + dy) for e in members}
+            translated = {
+                key: Point(point.x + dx, point.y + dy) for key, point in positions.items()
+            }
             index = SpatialIndex(translated)
             separated = True
             for entity in members:
@@ -793,9 +821,7 @@ class Simulation:
             target, maximum_radius, self.game_map.width, self.game_map.height, static_obstacles
         ):
             available = (target,)
-        return assign_formation_slots(
-            {key: self.entities[key].position for key in entity_ids}, available, target
-        )
+        return assign_formation_slots(positions, available, target)
 
     def _gathering_slots(
         self,
@@ -914,60 +940,6 @@ class Simulation:
         self._gathering_reachable_cache.move_to_end(target)
         return reachable
 
-    def _cancel(self, automation_id: str, owner_id: str) -> CommandResult:
-        return automation_control.cancel(self, automation_id, owner_id)
-
-    def _activate(
-        self,
-        automation: Automation,
-        entity_ids: tuple[str, ...],
-        *,
-        authority: ControlAuthority = ControlAuthority.AUTOMATION,
-        suspend: bool = False,
-        assign_entities: bool = True,
-    ) -> None:
-        automation_control.activate(
-            self,
-            automation,
-            entity_ids,
-            authority=authority,
-            suspend=suspend,
-            assign_entities=assign_entities,
-        )
-
-    def _new_automation(
-        self,
-        kind: AutomationKind,
-        title: str,
-        owner_id: str,
-        priority: int,
-        original_instruction: str,
-        entity_ids: list[str],
-        parameters: AutomationParameters,
-    ) -> Automation:
-        return automation_control.new_automation(
-            self, kind, title, owner_id, priority, original_instruction, entity_ids, parameters
-        )
-
-    def _transition(self, automation: Automation, status: AutomationStatus, reason: str) -> None:
-        automation_control.transition(self, automation, status, reason)
-
-    def _assign(
-        self,
-        entity_id: str,
-        automation: Automation,
-        *,
-        authority: ControlAuthority = ControlAuthority.AUTOMATION,
-        suspend: bool = False,
-    ) -> None:
-        automation_control.assign(self, entity_id, automation, authority=authority, suspend=suspend)
-
-    def _release_automation(self, automation: Automation, *, clear_suspended: bool = False) -> None:
-        automation_control.release_automation(self, automation, clear_suspended=clear_suspended)
-
-    def _resume_suspended_assignment(self, repair_automation: Automation, entity_id: str) -> None:
-        automation_control.resume_suspended_assignment(self, repair_automation, entity_id)
-
     def _nearest_repair_destination(
         self, entity: Entity, required_id: str | None = None
     ) -> tuple[str, Point, PathResult]:
@@ -1007,40 +979,6 @@ class Simulation:
             for x, y in sorted(cells.difference(occupied), key=lambda item: (item[1], item[0]))
             if self.game_map.is_cell_passable((x, y))
         )
-
-    def _validate_entities(
-        self,
-        entity_ids: tuple[str, ...],
-        owner_id: str,
-        *,
-        require_movable: bool = False,
-    ) -> ValidationFailure | None:
-        return command_handlers.validate_entities(
-            self, entity_ids, owner_id, require_movable=require_movable
-        )
-
-    def _validate_claims(
-        self,
-        automation: Automation,
-        entity_ids: tuple[str, ...],
-        *,
-        authority: ControlAuthority = ControlAuthority.AUTOMATION,
-        replace_existing: bool = False,
-    ) -> ValidationFailure | None:
-        return automation_control.validate_claims(
-            self, automation, entity_ids, authority=authority, replace_existing=replace_existing
-        )
-
-    def _claim_wins(
-        self,
-        automation: Automation,
-        entity_id: str,
-        authority: ControlAuthority = ControlAuthority.AUTOMATION,
-    ) -> bool:
-        return automation_control.claim_wins(self, automation, entity_id, authority)
-
-    def _state_for_assignment(self, entity_id: str) -> UnitState:
-        return automation_control.state_for_assignment(self, entity_id)
 
     def _building_cells(self) -> frozenset[Cell]:
         if self._building_cells_cache is None:

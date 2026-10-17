@@ -34,6 +34,7 @@ from airts.adapters.replay import (
     save_replay,
 )
 from airts.contracts.automations import (
+    PRODUCTION_HISTORY_LIMIT,
     AutomationStatus,
     ConstructionParameters,
     DefendParameters,
@@ -54,6 +55,7 @@ from airts.contracts.commands import (
     MoveCommand,
     PauseAutomationCommand,
     RemoveEntityCommand,
+    SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
     SetSelectionCommand,
 )
@@ -102,12 +104,14 @@ def test_developer_mode_save_retains_partial_second_and_replays(
     )
     simulation.advance(3)
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    assert simulation.execute(SetAIIncomeMultiplierCommand(5)).accepted
     simulation.advance(7)
     balance = simulation.resources["player"]
     path = tmp_path / "developer-mode.json"
     save_simulation(simulation, path)
     restored = load_simulation(path)
     assert restored.developer_mode
+    assert restored.ai_income_multiplier == 5
     assert restored.developer_income_ticks == 7
     assert restored.export_state() == simulation.export_state()
     for instance in (simulation, restored):
@@ -617,6 +621,19 @@ def test_load_rejects_inconsistent_production_timing(
     state = simulation.export_state()
     state["automations"][result.automation_id]["parameters"][field] = value
     with pytest.raises(PersistenceError, match=diagnostic):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
+def test_load_rejects_unbounded_production_history() -> None:
+    simulation = builder_factory_simulation()
+    result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    state = simulation.export_state()
+    state["automations"][result.automation_id]["parameters"]["produced_entity_ids"] = [
+        f"produced_{index}" for index in range(PRODUCTION_HISTORY_LIMIT + 1)
+    ]
+    with pytest.raises(PersistenceError, match="bounded history limit"):
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
         )

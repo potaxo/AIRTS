@@ -63,7 +63,7 @@ def test_repair_shortcut_only_sends_selected_units_below_half_health(health: int
         assert not simulation.live_automations
 
 
-def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:
+def test_extractor_selection_has_no_manual_income_action() -> None:
     game_map = load_map_data(
         {
             "id": "multi_generator_ui",
@@ -85,11 +85,7 @@ def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:
     app._selection_changed()
     selection.draw_selection(app, pygame.Surface(app.window_size))
     assert all(action != "economy" for _, action in app._command_buttons)
-    app._handle_key(pygame.K_g)
     assert not app.simulation.automations
-    before = app.simulation.resources["player"]
-    app.simulation.advance(20)
-    assert app.simulation.resources["player"] == before + 8
 
 
 def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
@@ -432,10 +428,17 @@ def test_selection_drag_outside_canvas_excludes_offscreen_units(
         pygame.font.quit()
 
 
-def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() -> None:
+@pytest.mark.parametrize("speed", [0.5, 1.0, 2.0, 4.0])
+def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup(speed: float) -> None:
     app = AirtsApp(interaction_simulation(), renderer_backend=RendererBackend.SOFTWARE)
+    app.game_speed = speed
     assert app.simulation.execute(SetDeveloperModeCommand(True)).accepted
     before = app.simulation.resources["player"]
+    income = 2000 + sum(
+        entity.profile.income_per_second
+        for entity in app.simulation.entities.values()
+        if entity.owner_id == "player" and entity.is_complete
+    )
     pygame.font.init()
     app.ui.font = pygame.font.Font(None, 24)
     app.ui.small_font = pygame.font.Font(None, 19)
@@ -464,10 +467,10 @@ def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup() ->
     ):
         app.run(max_frames=3)
     assert ticks[:2] == [0, 0]
-    assert 1 <= ticks[2] <= 2
+    assert max(1, int(2 * speed)) <= ticks[2] <= int(2.5 * speed)
     assert not app.paused
-    assert app.simulation.resources["player"] == before
-    assert app.simulation.developer_income_ticks == ticks[2]
+    assert app.simulation.resources["player"] == before + (ticks[2] // 10) * income
+    assert app.simulation.developer_income_ticks == ticks[2] % 10
 
 
 def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -> None:
@@ -788,7 +791,7 @@ def test_double_click_enemy_selects_same_kind_and_owner_in_canvas(
         pytest.param(200, 0, True, False, id="different-selection"),
     ],
 )
-def test_right_click_preserves_formation_and_double_click_gathers(
+def test_right_click_records_automatic_move_and_double_click_requests_gathering(
     delay_ms: int, offset_pixels: int, change_selection: bool, gathering: bool
 ) -> None:
     app = AirtsApp(builder_factory_simulation())
@@ -1042,7 +1045,7 @@ def test_save_and_load_failures_leave_current_world_available(tmp_path: Path) ->
     assert app.save_panel.open
 
 
-@pytest.mark.parametrize("size", [(1280, 720), (3840, 2160)])
+@pytest.mark.parametrize("size", [(760, 520), (1280, 720), (3840, 2160)])
 def test_settings_developer_mode_toggle_controls_income_and_refreshes_overlay(
     size: tuple[int, int],
 ) -> None:
@@ -1056,9 +1059,13 @@ def test_settings_developer_mode_toggle_controls_income_and_refreshes_overlay(
         app.settings_open = True
         app._draw(surface)
         buttons = {action: rectangle for rectangle, action in app._settings_buttons}
+        assert "developer_mode" not in buttons
+        app._handle_mouse_down(1, buttons["developer_settings"].center)
+        app._draw(surface)
+        buttons = {action: rectangle for rectangle, action in app._settings_buttons}
         toggle = buttons["developer_mode"]
         assert surface.get_rect().contains(toggle)
-        assert not toggle.colliderect(buttons["saves"])
+        assert not toggle.colliderect(buttons["ai_income"])
         assert not app.developer_mode
         previous = app._opengl_overlay_key()
         before = app.simulation.resources["player"]
@@ -1072,8 +1079,17 @@ def test_settings_developer_mode_toggle_controls_income_and_refreshes_overlay(
         assert not app.developer_mode
         app.simulation.advance(20)
         assert app.simulation.resources["player"] == before + 2000
+        app._handle_mouse_down(1, buttons["speed:2"].center)
+        assert app.game_speed == 2
+        app._handle_mouse_down(1, buttons["ai_income"].center)
+        assert app.ai_income_multiplier == 5
+        app._handle_mouse_down(1, buttons["ai_income"].center)
+        assert app.ai_income_multiplier == 1
+        app._handle_mouse_down(1, buttons["settings_back"].center)
+        assert app.settings_open and not app.developer_settings_open
         app._new_game()
         assert not app.developer_mode
+        assert app.game_speed == 2
     finally:
         pygame.font.quit()
 

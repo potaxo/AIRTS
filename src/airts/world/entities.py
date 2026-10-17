@@ -10,6 +10,8 @@ from airts.world.map import Cell, footprint_cells
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory, EntityProfile, UpgradeDefinition
 
+SHELL_BLAST_TICKS = 3
+
 
 class UnitState(StrEnum):
     IDLE = "idle"
@@ -71,7 +73,6 @@ class Entity:
     recovery_released: bool = False
     construction_progress: float | None = None
     upgrade: UpgradeState = field(default_factory=UpgradeState)
-    income_ticks: int = 0
 
     @property
     def profile(self) -> EntityProfile:
@@ -135,7 +136,6 @@ class Entity:
                 "tier": self.upgrade.tier,
                 "remaining_ticks": self.upgrade.remaining_ticks,
             },
-            "income_ticks": self.income_ticks,
             "state": self.state.value,
             "move_target": (
                 None if self.move_target is None else [self.move_target.x, self.move_target.y]
@@ -163,7 +163,6 @@ class Entity:
             ),
             "progress_distance": self.progress_distance,
             "no_progress_ticks": self.no_progress_ticks,
-            "congestion_stopped": False,  # Retired save/replay field, kept in the wire format.
             "collision_pressure": self.collision_pressure,
             "route_ticks": self.route_ticks,
             "hold_anchor": (

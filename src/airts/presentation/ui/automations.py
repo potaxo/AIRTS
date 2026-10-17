@@ -19,6 +19,7 @@ from airts.contracts.automations import (
 from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
+from airts.systems.economy import income_per_second
 
 AUTOMATION_ROW_HEIGHT = 34
 AUTOMATION_SCROLLBAR_MIN_THUMB_HEIGHT = 32
@@ -54,6 +55,7 @@ class AutomationsView(Protocol):
     real_fps: float
     right_panel_rect: pygame.Rect
     simulation: Simulation
+    show_ai_income: bool
     ui: UiPainter
     ui_scale: float
 
@@ -69,18 +71,10 @@ def panel_rows(view: AutomationsView) -> tuple[Automation, ...]:
         for automation in view.simulation.live_automations
         if automation.owner_id == "player"
     )
-    linked_defense_ids = {
-        parameters.defend_automation_id
-        for automation in live_automations
-        if automation.kind is AutomationKind.PRODUCTION
-        and isinstance((parameters := automation.parameters), ProductionParameters)
-        and parameters.defend_automation_id is not None
-    }
     return tuple(
         automation
         for automation in live_automations
-        if automation.automation_id not in linked_defense_ids
-        and (
+        if (
             automation.kind is view.automation_panel.group
             if view.automation_panel.group is not None
             else automation.kind not in {AutomationKind.PRODUCTION, AutomationKind.CONSTRUCTION}
@@ -148,11 +142,23 @@ def draw_panel(
     y += 38
     view.ui.small_text(
         screen,
-        f"Resources: {view.simulation.resources.get('player', 0)}",
+        f"Resources: {view.simulation.resources.get('player', 0)} "
+        f"(+{income_per_second(view.simulation, 'player')})",
         (x, y),
         theme.SUCCESS,
     )
     y += 20
+    if view.show_ai_income:
+        for owner_id, balance in sorted(view.simulation.resources.items()):
+            if owner_id == "player":
+                continue
+            view.ui.small_text(
+                screen,
+                f"AI {owner_id}: {balance} (+{income_per_second(view.simulation, owner_id)})",
+                (x, y),
+                theme.MUTED,
+            )
+            y += 20
     view.ui.text(screen, "Automations", (x, y), theme.TEXT)
     y += 25
     groups = (

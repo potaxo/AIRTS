@@ -9,6 +9,7 @@ PROFILE = EntityProfile(
     footprint=(2, 2),
     collision_radius=1,
     attack_damage=16,
+    attack_interval_ticks=6,
     attack_range=9,
     projectile_speed=20,
     construction_cost=250,

@@ -37,6 +37,7 @@ from airts.contracts.commands import (
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
+    SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
     StopCommand,
     ValidationFailure,
@@ -51,12 +52,14 @@ from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, Spatia
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import (
-    automation_control,
-    automation_execution,
+    automation_assignments,
+    automation_lifecycle,
+    automation_runtime,
     movement,
-    production,
-    spatial_commands,
+    production_orders,
 )
+from airts.systems.assignment_state import state_for_assignment
+from airts.systems.validation import validate_entities, validate_geometry
 from airts.world.entities import UnitState
 
 if TYPE_CHECKING:
@@ -113,6 +116,25 @@ def player_controlled_entity_ids(simulation: Simulation, command: Command) -> tu
     )
 
 
+def set_ai_income_multiplier(
+    simulation: Simulation, command: SetAIIncomeMultiplierCommand
+) -> CommandResult:
+    if type(command.multiplier) is not int or command.multiplier not in (1, 5):
+        return simulation._reject_validation(
+            "set_ai_income_multiplier",
+            ValidationFailure(
+                ValidationPhase.SCHEMA, "AI_INCOME_MULTIPLIER_MUST_BE_1_OR_5", "multiplier"
+            ),
+        )
+    if command.owner_id != "player" or command.owner_id not in simulation.resources:
+        return simulation._reject_validation(
+            "set_ai_income_multiplier",
+            ValidationFailure(ValidationPhase.OWNERSHIP, "DEVELOPER_MODE_PLAYER_ONLY", "owner_id"),
+        )
+    simulation.ai_income_multiplier = command.multiplier
+    return simulation._accept("set_ai_income_multiplier")
+
+
 def set_developer_mode(simulation: Simulation, command: SetDeveloperModeCommand) -> CommandResult:
     if type(command.enabled) is not bool:
         return simulation._reject_validation(
@@ -131,7 +153,7 @@ def set_developer_mode(simulation: Simulation, command: SetDeveloperModeCommand)
 
 
 def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) -> CommandResult:
-    automation, failure = automation_control.owned_automation(
+    automation, failure = automation_lifecycle.owned_automation(
         simulation, command.automation_id, command.owner_id
     )
     if failure is not None:
@@ -198,12 +220,40 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
             )
         elif automation.kind is AutomationKind.DEFEND:
             existing_defend = defend_parameters(automation)
+            if existing_defend.production_defense and not isinstance(
+                command.target, PolygonRegion | PolylineTarget
+            ):
+                return simulation._reject_validation(
+                    "modify_automation",
+                    ValidationFailure(
+                        ValidationPhase.SPATIAL,
+                        "PRODUCTION_DEFENSE_REQUIRES_LINE_OR_AREA",
+                        "target",
+                    ),
+                )
+            if existing_defend.production_defense:
+                assert isinstance(command.target, PolygonRegion | PolylineTarget)
+                incumbent = production_orders.shared_production_defense(
+                    simulation, automation.owner_id, command.target
+                )
+                if incumbent is not None and incumbent is not automation:
+                    return simulation._reject_validation(
+                        "modify_automation",
+                        ValidationFailure(
+                            ValidationPhase.CONFLICT, "PRODUCTION_DEFENSE_TARGET_IN_USE", "target"
+                        ),
+                    )
+            gathering_point = (
+                isinstance(command.target, PolygonRegion)
+                if existing_defend.production_defense
+                else existing_defend.gathering_point
+            )
             try:
                 stations, slots, _ = _allocate_defend_stations(
                     simulation,
                     command.target,
                     tuple(automation.entity_ids),
-                    gathering_point=existing_defend.gathering_point,
+                    gathering_point=gathering_point,
                 )
                 movement.validate_paths(
                     simulation, tuple(automation.entity_ids), tuple(stations.values())
@@ -216,8 +266,9 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
             new_parameters = DefendParameters(
                 command.target,
                 stations,
-                gathering_point=existing_defend.gathering_point,
+                gathering_point=gathering_point,
                 auto_repair=existing_defend.auto_repair,
+                production_defense=existing_defend.production_defense,
                 deployment_slots=slots,
                 assembly_radius=(
                     max(point.distance_to(target_center(command.target)) for point in slots)
@@ -245,7 +296,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                         "target",
                     ),
                 )
-            geometry_failure = spatial_commands.validate_geometry(simulation, command.target)
+            geometry_failure = validate_geometry(simulation, command.target)
             if geometry_failure is not None:
                 return simulation._reject_validation("modify_automation", geometry_failure)
             try:
@@ -318,8 +369,15 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                         linked.automation_id,
                         parameters=linked.parameters.to_dict(),
                     )
+                    if (
+                        isinstance(linked.parameters, DefendParameters)
+                        and linked.parameters.production_defense
+                    ):
+                        production_orders.synchronize_production_defense(simulation, linked)
     if production_target is not None:
-        production.attach_production_defense(simulation, automation, production_target)
+        production_orders.attach_production_defense(
+            simulation, automation, production_target, auto_repair=command.auto_repair
+        )
     if command.title is not None:
         automation.title = command.title.strip()
     if command.priority is not None:
@@ -336,7 +394,7 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                 entity.pursue_target = False
                 entity.path.clear()
                 entity.move_target = None
-                entity.state = simulation._state_for_assignment(entity_id)
+                entity.state = state_for_assignment(simulation, entity_id)
                 movement.reset_movement_liveness(entity)
             if isinstance(new_parameters, DefendParameters) and isinstance(
                 previous_parameters, DefendParameters
@@ -355,6 +413,11 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
                 simulation.entities[entity_id].clear_recovery_request()
     if command.minimum_units is not None:
         reinforcement_parameters(automation).minimum_units = command.minimum_units
+    if (
+        isinstance(automation.parameters, DefendParameters)
+        and automation.parameters.production_defense
+    ):
+        production_orders.synchronize_production_defense(simulation, automation)
     if command.target_count is not None:
         production_parameters(automation).target_count = command.target_count
     automation.modified_tick = simulation.tick
@@ -386,40 +449,37 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             ),
         )
     try:
+        continuing = frozenset(
+            key
+            for key in command.entity_ids
+            if command.queued
+            and key not in simulation.assignments
+            and not simulation.entities[key].pursue_target
+            and simulation.entities[key].repair_target_id is None
+            and simulation.entities[key].reclaim_target_id is None
+            and (simulation.entities[key].path or simulation.entities[key].move_queue)
+        )
+        origins = movement.move_origins(simulation, command.entity_ids, continuing=continuing)
+        gathering = command.gathering or movement.is_march(origins, command.target)
         destinations = simulation._allocate_destinations(
-            command.entity_ids, command.target, gathering=command.gathering
+            command.entity_ids, command.target, gathering=gathering, origins=origins
         )
         if command.queued:
+            blocked = simulation._building_cells()
             for key in command.entity_ids:
-                entity = simulation.entities[key]
-                start = (
-                    entity.move_queue[-1]
-                    if entity.move_queue
-                    else entity.move_target
-                    if not entity.pursue_target and entity.move_target
-                    else entity.position
-                )
-                simulation._routes.shared_path(
-                    start, destinations[key], simulation._building_cells()
-                )
-            continuing = frozenset(
-                key
-                for key in command.entity_ids
-                if key not in simulation.assignments
-                and not simulation.entities[key].pursue_target
-                and simulation.entities[key].repair_target_id is None
-                and simulation.entities[key].reclaim_target_id is None
-                and (simulation.entities[key].path or simulation.entities[key].move_queue)
-            )
+                simulation._routes.validate_connection(origins[key], destinations[key], blocked)
             replacing = tuple(key for key in command.entity_ids if key not in continuing)
             paths = (
                 movement.plan_group_paths(
-                    simulation, replacing, {key: destinations[key] for key in replacing}
+                    simulation,
+                    replacing,
+                    {key: destinations[key] for key in replacing},
+                    compact_approach=gathering,
                 )
                 if replacing
                 else {}
             )
-            automation_control.manual_override_many(simulation, replacing)
+            automation_assignments.manual_override_many(simulation, replacing)
             for key in replacing:
                 entity = simulation.entities[key]
                 movement.start_path(
@@ -435,7 +495,9 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                     simulation.entities[key].move_queue.append(destinations[key])
                     simulation.entities[key].state = UnitState.MOVING
             return simulation._accept("move")
-        paths = movement.plan_group_paths(simulation, command.entity_ids, destinations)
+        paths = movement.plan_group_paths(
+            simulation, command.entity_ids, destinations, compact_approach=gathering
+        )
     except PathfindingError as error:
         return simulation._reject_validation(
             "move",
@@ -446,7 +508,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                 {"target": [command.target.x, command.target.y]},
             ),
         )
-    automation_control.manual_override_many(simulation, command.entity_ids)
+    automation_assignments.manual_override_many(simulation, command.entity_ids)
     path_source = "human"
     for entity_id in command.entity_ids:
         simulation.entities[entity_id].pursue_target = False
@@ -483,7 +545,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
                 "attack",
                 ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
             )
-    automation_control.manual_override_many(simulation, command.entity_ids)
+    automation_assignments.manual_override_many(simulation, command.entity_ids)
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
         entity.path.clear()
@@ -502,7 +564,7 @@ def stop(
     failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("hold_position" if hold else "stop", failure)
-    automation_control.manual_override_many(simulation, command.entity_ids)
+    automation_assignments.manual_override_many(simulation, command.entity_ids)
     for entity_id in command.entity_ids:
         entity = simulation.entities[entity_id]
         entity.path.clear()
@@ -537,7 +599,8 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
             "create_patrol",
             ValidationFailure(ValidationPhase.PATH, error_reason(error), "target"),
         )
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.PATROL,
         command.title,
         command.owner_id,
@@ -546,10 +609,12 @@ def create_patrol(simulation: Simulation, command: CreatePatrolCommand) -> Comma
         list(command.entity_ids),
         PatrolParameters(command.target, waypoints, auto_repair=command.auto_repair),
     )
-    failure = simulation._validate_claims(automation, command.entity_ids, replace_existing=True)
+    failure = automation_lifecycle.validate_claims(
+        simulation, automation, command.entity_ids, replace_existing=True
+    )
     if failure is not None:
         return simulation._reject_validation("create_patrol", failure)
-    simulation._activate(automation, command.entity_ids)
+    automation_assignments.activate(simulation, automation, command.entity_ids)
     return simulation._accept("create_patrol", automation.automation_id)
 
 
@@ -567,7 +632,7 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
     )
     if failure is not None:
         return simulation._reject_validation("create_defend", failure)
-    geometry_failure = spatial_commands.validate_geometry(simulation, command.target)
+    geometry_failure = validate_geometry(simulation, command.target)
     if geometry_failure is not None:
         return simulation._reject_validation("create_defend", geometry_failure)
     try:
@@ -594,7 +659,8 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
             "create_defend",
             ValidationFailure(ValidationPhase.PATH, error_reason(error), "target"),
         )
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.DEFEND,
         command.title,
         command.owner_id,
@@ -614,11 +680,13 @@ def create_defend(simulation: Simulation, command: CreateDefendCommand) -> Comma
             ),
         ),
     )
-    failure = simulation._validate_claims(automation, command.entity_ids, replace_existing=True)
+    failure = automation_lifecycle.validate_claims(
+        simulation, automation, command.entity_ids, replace_existing=True
+    )
     if failure is not None:
         return simulation._reject_validation("create_defend", failure)
-    simulation._activate(automation, command.entity_ids)
-    automation_execution.coordinate_shared_defend_stations(
+    automation_assignments.activate(simulation, automation, command.entity_ids)
+    automation_runtime.coordinate_shared_defend_stations(
         simulation, command.target, command.owner_id
     )
     return simulation._accept("create_defend", automation.automation_id)
@@ -666,7 +734,8 @@ def create_reinforcement(
                 "target_automation_id",
             ),
         )
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.REINFORCEMENT,
         command.title,
         command.owner_id,
@@ -679,7 +748,7 @@ def create_reinforcement(
             command.minimum_units,
         ),
     )
-    simulation._activate(automation, ())
+    automation_assignments.activate(simulation, automation, ())
     return simulation._accept("create_reinforcement", automation.automation_id)
 
 
@@ -735,7 +804,8 @@ def create_repair(simulation: Simulation, command: CreateRepairAndReturnCommand)
             "create_repair_and_return",
             ValidationFailure(ValidationPhase.PATH, str(error), "entity_ids"),
         )
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.REPAIR_AND_RETURN,
         command.title,
         command.owner_id,
@@ -755,12 +825,13 @@ def create_repair(simulation: Simulation, command: CreateRepairAndReturnCommand)
             {entity_id: simulation.entities[entity_id].position for entity_id in eligible_ids},
         ),
     )
-    failure = simulation._validate_claims(
-        automation, eligible_ids, authority=ControlAuthority.EMERGENCY
+    failure = automation_lifecycle.validate_claims(
+        simulation, automation, eligible_ids, authority=ControlAuthority.EMERGENCY
     )
     if failure is not None:
         return simulation._reject_validation("create_repair_and_return", failure)
-    simulation._activate(
+    automation_assignments.activate(
+        simulation,
         automation,
         eligible_ids,
         authority=ControlAuthority.EMERGENCY,
@@ -787,7 +858,8 @@ def create_economy(simulation: Simulation, command: CreateEconomyCommand) -> Com
                 ValidationPhase.CAPABILITY, "ENTITY_NOT_RESOURCE_GENERATOR", "generator_ids"
             ),
         )
-    automation = simulation._new_automation(
+    automation = automation_lifecycle.new_automation(
+        simulation,
         AutomationKind.ECONOMY,
         command.title,
         command.owner_id,
@@ -800,10 +872,10 @@ def create_economy(simulation: Simulation, command: CreateEconomyCommand) -> Com
             starting_resources=simulation.resources.get(command.owner_id, 0),
         ),
     )
-    failure = simulation._validate_claims(automation, command.generator_ids)
+    failure = automation_lifecycle.validate_claims(simulation, automation, command.generator_ids)
     if failure is not None:
         return simulation._reject_validation("create_economy", failure)
-    simulation._activate(automation, command.generator_ids)
+    automation_assignments.activate(simulation, automation, command.generator_ids)
     return simulation._accept("create_economy", automation.automation_id)
 
 
@@ -826,49 +898,6 @@ def validate_automation_metadata(priority: int, title: str) -> ValidationFailure
     if not title.strip():
         return ValidationFailure(ValidationPhase.SCHEMA, "EMPTY_TITLE", "title")
     return validate_priority(priority)
-
-
-def validate_entities(
-    simulation: Simulation,
-    entity_ids: tuple[str, ...],
-    owner_id: str,
-    *,
-    require_movable: bool = False,
-) -> ValidationFailure | None:
-    if not entity_ids:
-        return ValidationFailure(ValidationPhase.REFERENCE, "NO_ENTITIES", "entity_ids")
-    if len(set(entity_ids)) != len(entity_ids):
-        return ValidationFailure(ValidationPhase.REFERENCE, "DUPLICATE_ENTITY", "entity_ids")
-    unknown = next((item for item in entity_ids if item not in simulation.entities), None)
-    if unknown is not None:
-        return ValidationFailure(
-            ValidationPhase.REFERENCE,
-            f"UNKNOWN_ENTITY:{unknown}",
-            "entity_ids",
-            {"entity_id": unknown},
-        )
-    unowned = next(
-        (item for item in entity_ids if simulation.entities[item].owner_id != owner_id), None
-    )
-    if unowned is not None:
-        return ValidationFailure(
-            ValidationPhase.OWNERSHIP,
-            f"ENTITY_NOT_OWNED:{unowned}",
-            "entity_ids",
-            {"entity_id": unowned, "owner_id": simulation.entities[unowned].owner_id},
-        )
-    if require_movable:
-        immovable = next(
-            (item for item in entity_ids if not simulation.entities[item].is_movable), None
-        )
-        if immovable is not None:
-            return ValidationFailure(
-                ValidationPhase.CAPABILITY,
-                f"ENTITY_NOT_MOVABLE:{immovable}",
-                "entity_ids",
-                {"entity_id": immovable},
-            )
-    return None
 
 
 def _allocate_defend_stations(

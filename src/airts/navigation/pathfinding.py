@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from itertools import chain
 from math import ceil, floor, inf
 
 import numpy as np
@@ -109,7 +110,9 @@ class RoutingService:
             np.zeros(2, dtype=np.int64),
             np.zeros(1),
         )
-        _branch_index(self._cost_grid, self.obstacle_mask(frozenset()), np.zeros((0, 2)), 0.5, 0.5)
+        _branch_index(
+            self._cost_grid, self.obstacle_mask(frozenset()), np.zeros((0, 2)), 0.5, 0.5, inf
+        )
         self._fields: OrderedDict[tuple[tuple[int, ...], frozenset[Cell]], _SearchField] = (
             OrderedDict()
         )
@@ -257,6 +260,8 @@ class RoutingService:
         path: PathResult,
         target: Point,
         blocked: frozenset[Cell],
+        *,
+        maximum_distance: float = inf,
     ) -> int:
         """Find the first safe exit in one numeric pass, materializing only its winner."""
         return _branch_index(
@@ -269,6 +274,7 @@ class RoutingService:
             ).reshape((-1, 2)),
             float(target.x),
             float(target.y),
+            maximum_distance,
         )
 
     def visible_waypoints(
@@ -282,13 +288,10 @@ class RoutingService:
         offsets = np.zeros(len(paths) + 1, dtype=np.int64)
         for index, path in enumerate(paths):
             offsets[index + 1] = offsets[index] + min(len(path) - 1, 16)
+        # Flatten coordinate pairs in C, retaining the sixteen-waypoint horizon
+        # without an extra Python yield for every individual coordinate.
         points = np.fromiter(
-            (
-                coordinate
-                for path in paths
-                for point in path[1:17]
-                for coordinate in (point.x, point.y)
-            ),
+            chain.from_iterable((point.x, point.y) for path in paths for point in path[1:17]),
             dtype=np.float64,
             count=int(offsets[-1]) * 2,
         ).reshape((-1, 2))
@@ -751,9 +754,12 @@ def _branch_index(
     points: FloatArray,
     bx: float,
     by: float,
+    maximum_distance: float,
 ) -> int:
     for index in range(len(points)):
         ax, ay = points[index]
+        if (ax - bx) ** 2 + (ay - by) ** 2 > maximum_distance**2:
+            continue
         if _clear_segment(costs, blocked, ax, ay, bx, by, inf):
             return index
     return -1

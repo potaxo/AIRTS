@@ -279,7 +279,7 @@ def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks(
         assert tick_elapsed < 2.0
 
 
-@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
+@pytest.mark.parametrize("gathering", [False, True], ids=["single", "double"])
 def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
     check_timing: bool,
     gathering: bool,
@@ -300,7 +300,7 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
 
 
 @pytest.mark.parametrize("unit_count", [2, 1000])
-@pytest.mark.parametrize("control", ["move", "defend", "patrol"])
+@pytest.mark.parametrize("control", ["move", "gather_move", "defend", "patrol"])
 @pytest.mark.parametrize("across_river", [False, True], ids=["local", "cross-river"])
 def test_gathering_on_large_river_map_does_not_freeze_input(
     check_timing: bool,
@@ -332,9 +332,12 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
             Point(target.x - 1, target.y - 1), Point(target.x + 1, target.y + 1)
         )
         pair_checks = simulation.collision_pair_check_count
+        fields_before = simulation.navigation_field_build_count
         started = perf_counter()
-        if control == "move":
-            result = simulation.execute(MoveCommand(selected, target, gathering=True))
+        if control in {"move", "gather_move"}:
+            result = simulation.execute(
+                MoveCommand(selected, target, gathering=control == "gather_move")
+            )
         elif automation_id is not None:
             result = simulation.execute(ModifyAutomationCommand(automation_id, target=area))
         elif control == "defend":
@@ -344,10 +347,13 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
         elapsed = perf_counter() - started
         record_property(f"gather_{index}_seconds", elapsed)
         record_property(
+            f"gather_{index}_fields", simulation.navigation_field_build_count - fields_before
+        )
+        record_property(
             f"gather_{index}_pair_checks", simulation.collision_pair_check_count - pair_checks
         )
         assert result.accepted, result.reason
-        if control == "move":
+        if control in {"move", "gather_move"}:
             goals = {key: simulation.entities[key].move_target for key in selected}
             assert len(set(goals.values())) == unit_count
             assert all(goal is not None for goal in goals.values())

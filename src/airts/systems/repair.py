@@ -16,8 +16,8 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import automation_control, movement
-from airts.systems.command_handlers import validate_entities
+from airts.systems import automation_assignments, movement
+from airts.systems.validation import validate_entities
 from airts.world.entities import Entity, UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
@@ -30,7 +30,11 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
     failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("repair_building", failure)
-    if any(simulation.entities[key].kind is not EntityKind.BUILDER for key in command.entity_ids):
+    if any(
+        not simulation.entities[key].profile.movable
+        or not simulation.entities[key].profile.can_repair
+        for key in command.entity_ids
+    ):
         return simulation._reject_validation(
             "repair_building",
             ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_BUILDER", "entity_ids"),
@@ -51,7 +55,7 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
             "repair_building",
             ValidationFailure(ValidationPhase.CAPABILITY, reason, "target_entity_id"),
         )
-    automation_control.manual_override_many(simulation, command.entity_ids)
+    automation_assignments.manual_override_many(simulation, command.entity_ids)
     for key in command.entity_ids:
         builder = simulation.entities[key]
         builder.path.clear()
@@ -76,7 +80,7 @@ def building_distance(point: Point, building: Entity) -> float:
 def builder_repair_points(
     simulation: Simulation, builder: Entity, building: Entity
 ) -> tuple[Point, ...]:
-    radius = builder.kind.profile.repair_range
+    radius = builder.profile.repair_range
     width, height = building.kind.profile.footprint
     blocked = simulation._building_cells()
     return tuple(
@@ -97,7 +101,9 @@ def drive_builders(simulation: Simulation) -> None:
     builders = [
         entity
         for entity in simulation.entities.values()
-        if entity.kind is EntityKind.BUILDER and entity.repair_target_id is not None
+        if entity.profile.movable
+        and entity.profile.can_repair
+        and entity.repair_target_id is not None
     ]
     if not builders:
         return
@@ -111,12 +117,12 @@ def drive_builders(simulation: Simulation) -> None:
             builder.state = UnitState.IDLE
             movement.reset_movement_liveness(builder)
             continue
-        if building_distance(builder.position, target) <= builder.kind.profile.repair_range:
+        if building_distance(builder.position, target) <= builder.profile.repair_range:
             builder.path.clear()
             builder.move_target = None
             builder.state = UnitState.REPAIRING
             movement.reset_movement_liveness(builder)
-            _heal(simulation, builder, target, builder.kind.profile.repair_rate)
+            _heal(simulation, builder, target, builder.profile.repair_rate)
         elif not builder.path and allowance.claim():
             try:
                 point, path = simulation._routes.shared_path_to_any(
@@ -174,7 +180,7 @@ def drive_hubs(simulation: Simulation) -> None:
                     rates[destination, key] = parameters.repair_rate
     for hub in sorted(hubs, key=lambda entity: entity.entity_id):
         target = simulation.entities.get(hub.repair_target_id or "")
-        radius = hub.kind.profile.repair_range
+        radius = hub.profile.repair_range
         center = hub.selection_position
         if (
             target is None
@@ -213,7 +219,7 @@ def drive_hubs(simulation: Simulation) -> None:
                 simulation,
                 hub,
                 target,
-                rates.get((hub.entity_id, target.entity_id), hub.kind.profile.repair_rate),
+                rates.get((hub.entity_id, target.entity_id), hub.profile.repair_rate),
             )
             if target.health == target.kind.profile.max_health:
                 hub.repair_target_id = None
