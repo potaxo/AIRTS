@@ -4,7 +4,7 @@ AIRTS is a Windows-native single-player RTS with base building, team skirmishes 
 rule-based AI, and persistent automations you can inspect and interrupt. Give units direct
 orders or draw routes and areas for patrol, defense, and factory reinforcements.
 
-The current game includes scouts, light and heavy tanks, artillery, builders, defense turrets,
+The current game includes scouts, light and heavy tanks, light artillery, tank destroyers, heavy artillery, builders, defense turrets,
 resource extraction, construction queues, repairs, and JSON save/load. Language-model control
 is planned; the playable game currently uses mouse/keyboard controls and rule-based opponents.
 [Design](docs/design.md) is the index for scope and gameplay contracts.
@@ -123,7 +123,7 @@ them, while a line distributes them along it.
 
 ### Production and construction
 
-Factories produce scouts, light tanks, heavy tanks, artillery, and builders. Command centers
+Factories produce scouts, light tanks, heavy tanks, light artillery, tank destroyers, artillery, and builders. Command centers
 produce builders. Select one or more sources of the same type and use the right panel:
 
 | Control | Action |
@@ -155,6 +155,15 @@ On the river map, extractors must occupy resource sites; clicking within three c
 center snaps placement to it. Completed extractors earn income automatically. Matter Synthesizers
 can be built on ordinary valid terrain and provide a more expensive, lower-output alternative.
 There is no manual gathering or income activation step.
+
+Select completed extractors or Matter Synthesizers to upgrade them from T1 to T2 and T3 in the
+right panel. It shows current output, the next upgrade's resource cost/time, and running progress.
+Upgrades charge the single resource immediately and keep producing at the current tier until
+completion. **Cancel upgrade** refunds the full upgrade cost and loses its progress; destruction
+does not refund it. Same-type selections apply each button to its displayed tier group. Unfinished
+buildings and max-tier buildings cannot upgrade, and insufficient funds disable the action.
+Upgrade progress and partial production cycles survive save/load. The
+[runtime contract](docs/milestones/runtime.md#entity-upgrades) owns the current balance table.
 
 Builders travel to queued blueprints and can wait for funds or occupants to move. An unstarted
 blueprint does not reserve money or space. Payment happens when construction begins, creating a

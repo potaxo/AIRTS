@@ -53,6 +53,22 @@ def tracks(
             rect(surface, STEEL, (x + 1, y, 1, 2))
 
 
+def artillery_barrel(surface: pygame.Surface, *, light: bool) -> None:
+    """Use the full tile's forward margin without enlarging the vehicle hull."""
+    left, width, tip, length = (29, 6, 3, 30) if light else (26, 12, 1, 36)
+    rect(surface, INK, (left, tip, width, length))
+    rect(surface, LIGHT, (left + 2, tip + 1, width - 3, length - 2))
+    rect(surface, WHITE, (left + 2, tip + 2, 1 if light else 3, length - 5))
+    if not light:
+        rect(surface, EDGE, (left + width - 3, tip + 2, 2, length - 4))
+        rect(surface, INK, (left - 1, 21, width + 2, 5))
+        rect(surface, STEEL, (left, 22, width, 3))
+        rect(surface, WHITE, (left + 2, 22, 3, 3))
+    rect(surface, INK, (left - 2, tip, width + 4, 5 if light else 6))
+    rect(surface, STEEL, (left, tip + 1, width, 2 if light else 3))
+    rect(surface, WHITE, (left, tip + 1, width, 1))
+
+
 def mobile(kind: EntityKind, weapon: bool) -> pygame.Surface:
     surface = pygame.Surface((48, 48), pygame.SRCALPHA, 32)
     if weapon:
@@ -60,13 +76,22 @@ def mobile(kind: EntityKind, weapon: bool) -> pygame.Surface:
             plate(surface, (20, 20, 9, 10), LIGHT)
             rect(surface, INK, (23, 10, 4, 14))
             rect(surface, WHITE, (24, 11, 2, 14))
-        elif kind is EntityKind.ARTILLERY:
-            rect(surface, INK, (20, 0, 8, 31))
-            rect(surface, LIGHT, (22, 0, 4, 29))
-            rect(surface, WHITE, (22, 1, 2, 25))
-            plate(surface, (17, 22, 14, 13), ARMOR)
-            rect(surface, INK, (18, 1, 12, 4))
+        elif kind is EntityKind.LIGHT_ARTILLERY:
+            # The long slim barrel is drawn behind this open cradle on the full tile.
+            plate(surface, (17, 24, 14, 10), STEEL)
+            for x in (17, 29):
+                rect(surface, LIGHT, (x, 19, 2, 12))
+        elif kind is EntityKind.TANK_DESTROYER:
+            # Long narrow cannon and angular mantlet distinguish the tank hunter.
+            rect(surface, INK, (21, 0, 6, 29))
+            rect(surface, LIGHT, (23, 1, 2, 27))
+            rect(surface, WHITE, (23, 2, 1, 23))
+            rect(surface, INK, (19, 1, 10, 4))
             rect(surface, STEEL, (20, 2, 8, 2))
+            polygon(surface, INK, [(18, 25), (21, 19), (27, 19), (30, 25), (28, 31), (20, 31)])
+            plate(surface, (20, 24, 9, 8), ARMOR)
+        elif kind is EntityKind.ARTILLERY:
+            plate(surface, (17, 22, 14, 13), ARMOR)
         else:
             heavy = kind is EntityKind.HEAVY_TANK
             rect(surface, INK, (20 if heavy else 21, 1 if heavy else 4, 8 if heavy else 6, 25))
@@ -109,6 +134,26 @@ def mobile(kind: EntityKind, weapon: bool) -> pygame.Surface:
         rect(surface, LIGHT, (37, 0, 3, 7))
         for x in (18, 24, 30):
             rect(surface, TRACK, (x, 34, 2, 4))
+    elif kind is EntityKind.LIGHT_ARTILLERY:
+        tracks(surface, 10, 32, 17, 25, 6)
+        plate(surface, (16, 16, 16, 26), STEEL)
+        rect(surface, TRACK, (18, 19, 12, 17))
+        rect(surface, EDGE, (19, 20, 10, 14))
+        for x in (17, 28):
+            rect(surface, LIGHT, (x, 21, 2, 14))
+        plate(surface, (18, 36, 12, 6), ARMOR)
+        rect(surface, WHITE, (22, 24, 5, 5))
+    elif kind is EntityKind.TANK_DESTROYER:
+        tracks(surface, 7, 34, 12, 31, 7)
+        polygon(surface, INK, [(14, 18), (20, 8), (28, 8), (35, 18), (35, 41), (14, 41)])
+        polygon(surface, ARMOR, [(16, 19), (21, 11), (27, 11), (33, 19), (33, 39), (16, 39)])
+        rect(surface, LIGHT, (20, 13, 9, 3))
+        rect(surface, EDGE, (16, 20, 3, 15))
+        rect(surface, STEEL, (30, 20, 3, 15))
+        rect(surface, TRACK, (19, 35, 11, 4))
+        for x in (19, 23, 27):
+            rect(surface, STEEL, (x, 36, 2, 2))
+        rect(surface, WHITE, (22, 24, 5, 5))
     elif kind is EntityKind.ARTILLERY:
         tracks(surface, 8, 32, 18, 27, 8)
         plate(surface, (15, 19, 19, 25), STEEL)
@@ -139,6 +184,8 @@ def mobile(kind: EntityKind, weapon: bool) -> pygame.Surface:
             rect(surface, LIGHT, (33, 21, 2, 11))
         rect(surface, WHITE, (22, 24, 5, 5))
     canvas = pygame.Surface((TILE_PIXELS, TILE_PIXELS), pygame.SRCALPHA, 32)
+    if weapon and kind in {EntityKind.LIGHT_ARTILLERY, EntityKind.ARTILLERY}:
+        artillery_barrel(canvas, light=kind is EntityKind.LIGHT_ARTILLERY)
     canvas.blit(surface, (8, 8))
     return canvas
 

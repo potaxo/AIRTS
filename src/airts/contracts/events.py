@@ -11,6 +11,9 @@ from pathlib import Path
 
 
 class EventType(StrEnum):
+    UPGRADE_STARTED = "upgrade_started"
+    UPGRADE_COMPLETED = "upgrade_completed"
+    UPGRADE_CANCELED = "upgrade_canceled"
     COMBAT_SUPPORT_JOINED = "combat_support_joined"
     COMMAND_ACCEPTED = "command_accepted"
     COMMAND_REJECTED = "command_rejected"

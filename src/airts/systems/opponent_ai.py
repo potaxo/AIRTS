@@ -27,13 +27,14 @@ from airts.contracts.commands import (
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
+    UpgradeEntityCommand,
 )
 from airts.contracts.spatial import Point
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems.combat import _firing_approach_points
 from airts.systems.construction import validate_building_placement
 from airts.world.entities import Entity
-from airts.world.map import footprint_cells
+from airts.world.map import Cell, footprint_cells
 from airts.world.opponents import OpponentState, Squad, SquadPhase
 from airts.world.units.catalog import EntityKind
 
@@ -52,6 +53,9 @@ ASSEMBLY_RADIUS = 7.0
 RETREAT_TICKS = 80
 ORDER_RETRY_TICKS = 50
 FORECAST_ROUNDS = 12
+ECONOMY_HORIZON_SECONDS = 20
+MAX_SUPPORT_UNITS = 3 * MAX_SQUAD_SIZE
+PRODUCTION_CLEARANCE = 3.0
 TARGET_VALUES = {
     EntityKind.COMMAND_CENTER: 550.0,
     EntityKind.FACTORY: 500.0,
@@ -143,6 +147,7 @@ class _Decision:
     home: Point
     rally: Point
     orders: int = 0
+    production_lanes: frozenset[Cell] = frozenset()
 
     def submit(self, command: Command) -> CommandResult | None:
         if self.orders >= MAX_ORDERS:
@@ -197,15 +202,28 @@ def drive_opponents(simulation: Simulation) -> None:
         )
         memory = simulation.opponents[slot.owner_id]
         decision = _Decision(simulation, slot.owner_id, memory, owned, enemies, index, home, home)
+        decision.production_lanes = _production_lanes(decision)
         frontier = _frontier(decision)
-        decision.rally = _safe_point(decision, frontier, 8) or home
+        decision.rally = _staging_point(decision, frontier)
         _repair_wounded(decision)
         _assign_squads(decision)
         threat = _base_threat(decision)
+        _clear_production_exits(decision)
         _drive_reserve(decision, threat)
         if simulation.tick % ECONOMY_TICKS < DECISION_TICKS:
-            _plan_construction(decision)
-            _plan_production(decision)
+            pressure = threat is not None and force_strength(
+                decision.threats(threat.position)
+            ) > force_strength(
+                [
+                    unit
+                    for unit in owned
+                    if unit.is_complete
+                    and unit.kind.profile.attack_damage > 0
+                    and unit.selection_position.distance_to(threat.position) <= LOCAL_RADIUS
+                ]
+            )
+            upgrade_reserve = _plan_growth(decision, threatened=pressure)
+            _plan_production(decision, threatened=pressure, upgrade_reserve=upgrade_reserve)
         squads = memory.squads
         offset = (simulation.tick // DECISION_TICKS) % max(1, len(squads))
         for squad in (squads[offset:] + squads[:offset])[:MAX_SQUAD_UPDATES]:
@@ -254,9 +272,97 @@ def _safe_point(decision: _Decision, desired: Point, radius: int) -> Point | Non
         if (
             simulation.game_map.is_passable(point)
             and simulation.game_map.cell_for(point) not in blocked
+            and not _near_producer(decision, point)
         ):
             return point
     return None
+
+
+def _production_lanes(decision: _Decision) -> frozenset[Cell]:
+    cells: set[Cell] = set()
+    sources = [
+        (entity.kind, entity.position) for entity in decision.owned if entity.kind.production_kinds
+    ]
+    sources.extend(
+        (job.building_kind, job.position)
+        for job in _pending_construction(decision)
+        if job.building_kind.production_kinds
+    )
+    for kind, position in sources:
+        width, height = kind.profile.footprint
+        cells.update(
+            (x, y)
+            for y in range(int(position.y) - 1, int(position.y) + height + 1)
+            for x in range(int(position.x) - 1, int(position.x) + width + 1)
+        )
+    return frozenset(cells)
+
+
+def _near_producer(decision: _Decision, point: Point) -> bool:
+    for source in decision.owned:
+        if not source.kind.production_kinds:
+            continue
+        width, height = source.kind.profile.footprint
+        dx = max(source.position.x - point.x, 0.0, point.x - source.position.x - width)
+        dy = max(source.position.y - point.y, 0.0, point.y - source.position.y - height)
+        if dx * dx + dy * dy < PRODUCTION_CLEARANCE * PRODUCTION_CLEARANCE:
+            return True
+    return False
+
+
+def _staging_point(decision: _Decision, anchor: Point) -> Point:
+    enemy = min(
+        decision.enemies,
+        key=lambda unit: (anchor.distance_to(unit.selection_position), unit.entity_id),
+        default=None,
+    )
+    if enemy is None:
+        desired = anchor
+    else:
+        dx, dy = enemy.selection_position.x - anchor.x, enemy.selection_position.y - anchor.y
+        length = max(1.0, sqrt(dx * dx + dy * dy))
+        direction = -1 if length < 2 * LOCAL_RADIUS else 1
+        desired = Point(
+            anchor.x + direction * 12 * dx / length, anchor.y + direction * 12 * dy / length
+        )
+    point = _safe_point(decision, desired, 10)
+    return point or _safe_point(decision, anchor, 12) or anchor
+
+
+def _clear_production_exits(decision: _Decision) -> None:
+    blocked = any(
+        job.reason_code == "SPAWN_BLOCKED"
+        for source in decision.owned
+        if source.kind.production_kinds
+        for job in decision.simulation.production_queue(source.entity_id)
+    )
+    clearance = set(decision.production_lanes) if blocked else set()
+    for job in decision.simulation.live_automations:
+        if (
+            job.owner_id == decision.owner_id
+            and job.reason_code == "SITE_OCCUPIED"
+            and isinstance(job.parameters, ConstructionParameters)
+        ):
+            clearance.update(footprint_cells(job.parameters.building_kind, job.parameters.position))
+    if not clearance:
+        return
+    units = tuple(
+        unit.entity_id
+        for unit in decision.owned
+        if unit.is_movable
+        and unit.kind.profile.attack_damage > 0
+        and unit.entity_id not in decision.simulation.assignments
+        and decision.simulation.game_map.cell_for(unit.position) in clearance
+        and not unit.pursue_target
+        and (
+            unit.move_target is None
+            or decision.simulation.game_map.cell_for(unit.move_target) in clearance
+        )
+    )[:MAX_SQUAD_SIZE]
+    if units:
+        decision.submit(
+            MoveCommand(units, decision.rally, owner_id=decision.owner_id, gathering=True)
+        )
 
 
 def _members(decision: _Decision, squad: Squad) -> list[Entity]:
@@ -315,6 +421,15 @@ def _assign_squads(decision: _Decision) -> None:
             None,
         )
         if gathering_squad is None:
+            gathering_squad = min(
+                (squad for squad in memory.squads if len(squad.entity_ids) < MAX_SQUAD_SIZE),
+                key=lambda squad: (
+                    unit.position.distance_to(_center(_members(decision, squad))),
+                    squad.entity_ids[0],
+                ),
+                default=None,
+            )
+        if gathering_squad is None:
             gathering_squad = Squad(phase_tick=simulation.tick)
             memory.squads.append(gathering_squad)
         gathering_squad.entity_ids.append(unit.entity_id)
@@ -364,12 +479,16 @@ def _retreat_point(decision: _Decision, enemies: list[Entity]) -> Point:
 def _move_squad(decision: _Decision, squad: Squad, destination: Point) -> None:
     tick = decision.simulation.tick
     units = _members(decision, squad)
+    if _near_producer(decision, destination):
+        destination = _safe_point(decision, destination, 12) or decision.rally
     if not units or tick < squad.retry_tick:
         return
     if squad.destination == destination and any(unit.move_target is not None for unit in units):
         return
     if all(
-        unit.position.distance_to(destination) <= ASSEMBLY_RADIUS and not unit.pursue_target
+        unit.position.distance_to(destination) <= ASSEMBLY_RADIUS
+        and not unit.pursue_target
+        and decision.simulation.game_map.cell_for(unit.position) not in decision.production_lanes
         for unit in units
     ):
         return
@@ -419,7 +538,22 @@ def _drive_reserve(decision: _Decision, threat: Entity | None) -> None:
         _attack_squad(decision, squad, threat)
     else:
         _set_phase(decision, squad, SquadPhase.GATHERING)
-        _move_squad(decision, squad, _safe_point(decision, decision.home, 8) or decision.home)
+        _move_squad(decision, squad, _staging_point(decision, decision.home))
+
+
+def _supported_force(decision: _Decision, units: list[Entity]) -> list[Entity]:
+    center = _center(units)
+    own_ids = {unit.entity_id for unit in units}
+    support = [
+        decision.simulation.entities[key]
+        for squad in decision.memory.squads
+        if squad.phase not in {SquadPhase.RETREATING, SquadPhase.DEFENDING}
+        for key in squad.entity_ids
+        if key not in own_ids
+        and decision.simulation.entities[key].position.distance_to(center) <= LOCAL_RADIUS
+    ]
+    support.sort(key=lambda unit: (unit.position.distance_to(center), unit.entity_id))
+    return units + support[: MAX_SUPPORT_UNITS - len(units)]
 
 
 def _choose_target(decision: _Decision, units: list[Entity]) -> Entity | None:
@@ -481,6 +615,31 @@ def _choose_target(decision: _Decision, units: list[Entity]) -> Entity | None:
 
 def _pressure_point(decision: _Decision, units: list[Entity]) -> Point:
     center = _center(units)
+    strength = force_strength(units)
+    own_ids = {unit.entity_id for unit in units}
+    leaders: list[tuple[float, str, Point]] = []
+    for squad in decision.memory.squads:
+        if (
+            squad.phase in {SquadPhase.RETREATING, SquadPhase.DEFENDING}
+            or squad.entity_ids[0] in own_ids
+        ):
+            continue
+        members = _members(decision, squad)
+        other_strength = force_strength(members)
+        leader_center = _center(members)
+        distance = center.distance_to(leader_center)
+        if other_strength < strength:
+            continue
+        if other_strength == strength and squad.entity_ids[0] > min(own_ids):
+            continue
+        if ASSEMBLY_RADIUS < distance <= 4 * LOCAL_RADIUS:
+            leaders.append((distance, squad.entity_ids[0], leader_center))
+    if leaders:
+        point = _safe_point(decision, min(leaders)[2], 6)
+        if point is not None and decision.simulation._routes.can_reach_any(
+            units[0].position, (point,), decision.simulation._building_cells()
+        ):
+            return point
     target = min(
         decision.enemies,
         key=lambda enemy: (center.distance_to(enemy.selection_position), enemy.entity_id),
@@ -508,9 +667,10 @@ def _pressure_point(decision: _Decision, units: list[Entity]) -> Point:
 
 def _drive_squad(decision: _Decision, squad: Squad, threat: Entity | None) -> None:
     units = _members(decision, squad)
+    supported = _supported_force(decision, units)
     center = _center(units)
     local = decision.threats(center)
-    margin = decision.margin(units, local)
+    margin = decision.margin(supported, local)
     if local and margin < -0.2:
         _set_phase(decision, squad, SquadPhase.RETREATING)
         _move_squad(decision, squad, squad.destination or _retreat_point(decision, local))
@@ -538,12 +698,12 @@ def _drive_squad(decision: _Decision, squad: Squad, threat: Entity | None) -> No
     elif squad.phase is SquadPhase.DEFENDING:
         _set_phase(decision, squad, SquadPhase.GATHERING)
     if squad.phase is SquadPhase.GATHERING:
-        assembly = squad.destination or decision.rally
+        assembly = squad.destination or center
         assembled = sum(unit.position.distance_to(assembly) <= ASSEMBLY_RADIUS for unit in units)
         if assembled < ceil(len(units) * 0.75):
             _move_squad(decision, squad, assembly)
             return
-        target = _choose_target(decision, units)
+        target = _choose_target(decision, supported)
         if target is None:
             _move_squad(decision, squad, _pressure_point(decision, units))
             return
@@ -551,7 +711,7 @@ def _drive_squad(decision: _Decision, squad: Squad, threat: Entity | None) -> No
         _set_phase(decision, squad, SquadPhase.ADVANCING)
     target = decision.simulation.entities.get(squad.target_id or "")
     if target is None:
-        target = _choose_target(decision, units)
+        target = _choose_target(decision, supported)
         if target is None:
             _set_phase(decision, squad, SquadPhase.GATHERING)
             _move_squad(decision, squad, _pressure_point(decision, units))
@@ -585,9 +745,88 @@ def _pending_construction(decision: _Decision) -> list[ConstructionParameters]:
     ]
 
 
-def _plan_construction(decision: _Decision) -> None:
+def _production_rate(decision: _Decision, kind: EntityKind) -> float:
+    return (
+        kind.profile.production_cost
+        * decision.simulation.TICKS_PER_SECOND
+        / kind.profile.production_ticks
+    )
+
+
+def _economy_forecast(decision: _Decision) -> tuple[float, float]:
+    income = sum(unit.profile.income_per_second for unit in decision.owned if unit.is_complete)
+    capacity = 0.0
+    for unit in decision.owned:
+        if unit.kind is not EntityKind.FACTORY or not unit.is_complete:
+            continue
+        loop = decision.simulation.continuous_production(unit.entity_id)
+        if loop is None:
+            kind = EntityKind.LIGHT_TANK
+        else:
+            assert isinstance(loop.parameters, ProductionParameters)
+            kind = loop.parameters.unit_kind
+        capacity += _production_rate(decision, kind)
+    return float(income), capacity
+
+
+def _income_upgrade_goal(
+    decision: _Decision, pending: list[ConstructionParameters], *, threatened: bool
+) -> tuple[Entity, float] | None:
+    if (
+        threatened
+        or any(not job.cost_paid for job in pending)
+        or not any(unit.kind is EntityKind.FACTORY and unit.is_complete for unit in decision.owned)
+        or not any(unit.kind is EntityKind.BUILDER for unit in decision.owned)
+        or any(
+            unit.upgrade.remaining_ticks and unit.profile.income_per_second
+            for unit in decision.owned
+        )
+    ):
+        return None
+    reclaiming = {unit.reclaim_target_id for unit in decision.owned if unit.reclaim_target_id}
+    candidates: list[tuple[float, str, Entity]] = []
+    for unit in decision.owned:
+        upgrade = unit.next_upgrade
+        if (
+            not unit.is_complete
+            or unit.upgrade.remaining_ticks
+            or unit.entity_id in reclaiming
+            or unit.health < unit.profile.max_health * 0.75
+            or upgrade is None
+        ):
+            continue
+        gain = upgrade.profile.income_per_second - unit.profile.income_per_second
+        if gain <= 0 or decision.threats(unit.selection_position):
+            continue
+        payback = (
+            upgrade.duration_ticks / decision.simulation.TICKS_PER_SECOND + upgrade.cost / gain
+        )
+        candidates.append((payback, unit.entity_id, unit))
+    if not candidates:
+        return None
+    payback, _, unit = min(candidates, key=lambda item: (item[0], item[1]))
+    return unit, payback
+
+
+def _reserve_income_upgrade(decision: _Decision, goal: tuple[Entity, float] | None) -> int:
+    """Start one affordable investment, or protect its cost from new military orders."""
+    if goal is None:
+        return 0
+    unit, _ = goal
+    upgrade = unit.next_upgrade
+    assert upgrade is not None
+    _, committed = _production_demand(decision)
+    if decision.simulation.resources.get(decision.owner_id, 0) - committed >= upgrade.cost:
+        result = decision.submit(UpgradeEntityCommand(unit.entity_id, owner_id=decision.owner_id))
+        if result is not None and result.accepted:
+            return 0
+    return upgrade.cost
+
+
+def _plan_growth(decision: _Decision, *, threatened: bool) -> int:
     simulation = decision.simulation
     pending = _pending_construction(decision)
+    upgrade_goal = _income_upgrade_goal(decision, pending, threatened=threatened)
     busy = {key for job in pending for key in job.builder_ids}
     builders = [
         entity
@@ -597,7 +836,7 @@ def _plan_construction(decision: _Decision) -> None:
         and entity.entity_id not in simulation.assignments
     ]
     if not builders or len(pending) >= 2:
-        return
+        return _reserve_income_upgrade(decision, upgrade_goal)
     counts = {
         kind: sum(entity.kind is kind for entity in decision.owned)
         + sum(job.building_kind is kind and job.site_entity_id is None for job in pending)
@@ -606,9 +845,7 @@ def _plan_construction(decision: _Decision) -> None:
     funds = simulation.resources.get(decision.owner_id, 0) - sum(
         job.building_kind.profile.construction_cost for job in pending if not job.cost_paid
     )
-    income = sum(
-        entity.kind.profile.income_per_second for entity in decision.owned if entity.is_complete
-    )
+    income, capacity = _economy_forecast(decision)
     frontier = _frontier(decision)
     exposed = [
         entity.selection_position
@@ -631,7 +868,16 @@ def _plan_construction(decision: _Decision) -> None:
         or funds >= EntityKind.FACTORY.profile.construction_cost
     ):
         options.append((EntityKind.FACTORY, decision.home))
-    if exposed and funds >= 350:
+    # Commit cheap income before competing spending, even while saving for it.
+    # Expensive fallback income is considered only after safe extractors fail.
+    if counts[EntityKind.RESOURCE_GENERATOR] < 2 or income < capacity * 1.15:
+        options.append((EntityKind.RESOURCE_GENERATOR, frontier))
+    if (
+        exposed
+        and funds
+        >= EntityKind.TURRET.profile.construction_cost
+        + EntityKind.RESOURCE_GENERATOR.profile.construction_cost
+    ):
         point = min(exposed, key=lambda point: (point.distance_to(frontier), point.x, point.y))
         enemy = min(
             decision.enemies,
@@ -643,7 +889,17 @@ def _plan_construction(decision: _Decision) -> None:
             length = max(1.0, sqrt(dx * dx + dy * dy))
             point = Point(point.x + 6 * dx / length, point.y + 6 * dy / length)
         options.append((EntityKind.TURRET, point))
-    if counts[EntityKind.FACTORY] < min(6, 1 + income // 40) and funds >= 550:
+    desired_factories = min(
+        8, max(1, ceil(income * 0.8 / _production_rate(decision, EntityKind.LIGHT_TANK)))
+    )
+    projected_surplus = funds + (income - capacity) * ECONOMY_HORIZON_SECONDS
+    if (
+        counts[EntityKind.FACTORY] < desired_factories
+        and funds
+        >= EntityKind.FACTORY.profile.construction_cost
+        + EntityKind.LIGHT_TANK.profile.production_cost
+        and projected_surplus >= EntityKind.FACTORY.profile.construction_cost
+    ):
         options.append((EntityKind.FACTORY, frontier))
     if (
         not counts[EntityKind.REPAIR_HUB]
@@ -656,8 +912,19 @@ def _plan_construction(decision: _Decision) -> None:
     ):
         options.append((EntityKind.REPAIR_HUB, frontier))
     options.append((EntityKind.RESOURCE_GENERATOR, frontier))
-    if funds >= 800 and counts[EntityKind.MATTER_SYNTHESIZER] < max(
-        1, ceil(counts[EntityKind.FACTORY] / 2)
+    army_cost = sum(
+        unit.kind.profile.production_cost
+        for unit in decision.owned
+        if unit.is_movable and unit.kind.profile.attack_damage > 0
+    )
+    desired_synthesizers = min(6, max(1, ceil(counts[EntityKind.FACTORY] / 2), army_cost // 2000))
+    if (
+        income > 0
+        and counts[EntityKind.MATTER_SYNTHESIZER] < desired_synthesizers
+        and not any(
+            unit.upgrade.remaining_ticks and unit.profile.income_per_second
+            for unit in decision.owned
+        )
     ):
         options.append((EntityKind.MATTER_SYNTHESIZER, decision.home))
     for kind, center in options:
@@ -667,12 +934,31 @@ def _plan_construction(decision: _Decision) -> None:
         if site is None:
             continue
         builder, point = site
+        if upgrade_goal is not None:
+            if kind.profile.income_per_second:
+                build_seconds = (
+                    simulation.CONSTRUCTION_REQUIRED_VALUE
+                    / builder.kind.profile.build_speed
+                    / simulation.TICKS_PER_SECOND
+                )
+                travel_seconds = builder.position.distance_to(point) / builder.speed
+                payback = (
+                    kind.profile.construction_cost / kind.profile.income_per_second
+                    + build_seconds
+                    + travel_seconds
+                )
+                prefer_upgrade = upgrade_goal[1] <= payback
+            else:
+                prefer_upgrade = income < capacity * 1.15
+            if prefer_upgrade:
+                return _reserve_income_upgrade(decision, upgrade_goal)
         decision.submit(
             CreateConstructionCommand(
                 builder.entity_id, kind, point, owner_id=decision.owner_id, title="AI expansion"
             )
         )
-        return
+        return 0
+    return _reserve_income_upgrade(decision, upgrade_goal)
 
 
 def _construction_site(
@@ -689,6 +975,12 @@ def _construction_site(
         if isinstance(job := automation.parameters, ConstructionParameters)
     }
     reserved = set().union(*(footprint_cells(job.building_kind, job.position) for job in pending))
+    resource_cells = set().union(
+        *(
+            footprint_cells(EntityKind.RESOURCE_GENERATOR, site)
+            for site in simulation.game_map.resource_sites or ()
+        )
+    )
     if kind is EntityKind.RESOURCE_GENERATOR:
         candidates = (
             list(simulation.game_map.resource_sites or ())
@@ -709,9 +1001,13 @@ def _construction_site(
         ]
     candidates.sort(key=lambda point: (point.distance_to(center), point.x, point.y))
     for point in candidates[:MAX_PLACEMENT_CANDIDATES]:
+        cells = footprint_cells(kind, point)
         if (
             point in claimed
-            or reserved & footprint_cells(kind, point)
+            or reserved & cells
+            or decision.production_lanes & cells
+            or kind is not EntityKind.RESOURCE_GENERATOR
+            and resource_cells & cells
             or decision.threats(point, 12)
         ):
             continue
@@ -742,9 +1038,28 @@ def _construction_site(
     return None
 
 
-def _plan_production(decision: _Decision) -> None:
+def _production_demand(decision: _Decision) -> tuple[dict[EntityKind, int], int]:
+    simulation = decision.simulation
+    counts = {kind: sum(entity.kind is kind for entity in decision.owned) for kind in EntityKind}
+    committed = 0
+    for factory in decision.owned:
+        if not factory.kind.production_kinds or not factory.is_complete:
+            continue
+        for job in simulation.production_queue(factory.entity_id):
+            parameters = job.parameters
+            assert isinstance(parameters, ProductionParameters)
+            if not parameters.continuous:
+                for unit_kind in factory.kind.production_kinds:
+                    count = parameters.remaining_count(unit_kind)
+                    counts[unit_kind] += count
+                    paid = int(parameters.cost_paid and parameters.current_unit_kind is unit_kind)
+                    committed += max(0, count - paid) * unit_kind.profile.production_cost
+    return counts, committed
+
+
+def _plan_production(decision: _Decision, *, threatened: bool, upgrade_reserve: int) -> None:
     simulation, memory = decision.simulation, decision.memory
-    reserve = sum(
+    reserve = upgrade_reserve + sum(
         job.building_kind.profile.construction_cost
         for job in _pending_construction(decision)
         if not job.cost_paid
@@ -754,16 +1069,10 @@ def _plan_production(decision: _Decision) -> None:
         for key in memory.budget_paused_ids
         if key in simulation.automations and not simulation.automations[key].status.terminal
     ]
-    counts = {kind: sum(entity.kind is kind for entity in decision.owned) for kind in EntityKind}
+    counts, committed = _production_demand(decision)
     sources = [
         entity for entity in decision.owned if entity.kind.production_kinds and entity.is_complete
     ]
-    for factory in sources:
-        for job in simulation.production_queue(factory.entity_id):
-            parameters = job.parameters
-            assert isinstance(parameters, ProductionParameters)
-            if not parameters.continuous:
-                counts[parameters.unit_kind] += parameters.target_count - parameters.produced_count
     offset = (simulation.tick // ECONOMY_TICKS) % max(1, len(sources))
     for factory in sources[offset:] + sources[:offset]:
         jobs = simulation.production_queue(factory.entity_id)
@@ -785,23 +1094,20 @@ def _plan_production(decision: _Decision) -> None:
                 kind = EntityKind.BUILDER
             elif factory.kind is EntityKind.COMMAND_CENTER:
                 continue
-            elif counts[EntityKind.SCOUT] < max(1, ceil(counts[EntityKind.LIGHT_TANK] / 12)):
-                kind = EntityKind.SCOUT
-            elif counts[EntityKind.HEAVY_TANK] < ceil(
-                counts[EntityKind.LIGHT_TANK] / 3
-            ) and not any(enemy.kind is EntityKind.TURRET for enemy in decision.enemies):
-                kind = EntityKind.HEAVY_TANK
-            elif counts[EntityKind.LIGHT_TANK] >= 4 and counts[EntityKind.ARTILLERY] < ceil(
-                counts[EntityKind.LIGHT_TANK]
-                / (4 if any(enemy.kind is EntityKind.TURRET for enemy in decision.enemies) else 8)
-            ):
-                kind = EntityKind.ARTILLERY
-            elif counts[EntityKind.HEAVY_TANK] < ceil(counts[EntityKind.LIGHT_TANK] / 3):
-                kind = EntityKind.HEAVY_TANK
-        funds = simulation.resources.get(decision.owner_id, 0)
+            else:
+                kind = _composition_goal(decision, counts)
+            if threatened and kind in {
+                EntityKind.HEAVY_TANK,
+                EntityKind.ARTILLERY,
+                EntityKind.LIGHT_ARTILLERY,
+                EntityKind.TANK_DESTROYER,
+            }:
+                kind = EntityKind.LIGHT_TANK
+        funds = simulation.resources.get(decision.owner_id, 0) - committed
         # Without saving for a heavy tank, a cheap continuous loop can spend
         # every income payment before the more expensive unit becomes affordable.
-        saving = reserve + (kind.profile.production_cost if kind is not None else 0)
+        construction_budget = 0 if threatened else reserve
+        saving = construction_budget + (kind.profile.production_cost if kind is not None else 0)
         if loop is not None:
             key = loop.automation_id
             if key in memory.budget_paused_ids and loop.status is not AutomationStatus.PAUSED:
@@ -833,11 +1139,20 @@ def _plan_production(decision: _Decision) -> None:
                     continuous=True,
                     owner_id=decision.owner_id,
                     title="AI production",
+                    rally_point=decision.rally,
                 )
             )
             if result is not None and result.accepted:
                 loop = simulation.automations[result.automation_id or ""]
-        if kind is None or funds - reserve < kind.profile.production_cost:
+        if loop is not None and not finite and loop.status is not AutomationStatus.PAUSED:
+            parameters = loop.parameters
+            assert isinstance(parameters, ProductionParameters)
+            if (
+                not parameters.cost_paid
+                or parameters.build_ticks - parameters.progress_ticks < ECONOMY_TICKS
+            ):
+                committed += parameters.unit_kind.profile.production_cost
+        if kind is None or funds - construction_budget < kind.profile.production_cost:
             continue
         result = decision.submit(
             CreateProductionCommand(
@@ -846,9 +1161,51 @@ def _plan_production(decision: _Decision) -> None:
                 1,
                 owner_id=decision.owner_id,
                 title="AI production",
+                rally_point=decision.rally,
             )
         )
         if result is not None and result.accepted:
             counts[kind] += 1
-            if loop is not None and loop.automation_id in memory.budget_paused_ids:
-                memory.budget_paused_ids.remove(loop.automation_id)
+            committed += kind.profile.production_cost
+
+
+def _composition_goal(decision: _Decision, counts: dict[EntityKind, int]) -> EntityKind | None:
+    if counts[EntityKind.SCOUT] < max(1, ceil(counts[EntityKind.LIGHT_TANK] / 12)):
+        return EntityKind.SCOUT
+    armored = sum(
+        unit.kind in {EntityKind.HEAVY_TANK, EntityKind.TANK_DESTROYER} for unit in decision.enemies
+    )
+    defenses = sum(unit.kind is EntityKind.TURRET and unit.is_complete for unit in decision.enemies)
+    targets = {
+        EntityKind.HEAVY_TANK: ceil(counts[EntityKind.LIGHT_TANK] / (2 if armored > 3 else 3)),
+        EntityKind.ARTILLERY: ceil(counts[EntityKind.LIGHT_TANK] / (4 if defenses else 8)),
+        EntityKind.LIGHT_ARTILLERY: (
+            ceil(counts[EntityKind.LIGHT_TANK] / 6) if counts[EntityKind.LIGHT_TANK] >= 4 else 0
+        ),
+        EntityKind.TANK_DESTROYER: min(ceil(armored / 2), ceil(counts[EntityKind.LIGHT_TANK] / 2)),
+    }
+    candidates = [
+        kind
+        for kind, target in targets.items()
+        if counts[kind] < target
+        and (kind is not EntityKind.ARTILLERY or counts[EntityKind.LIGHT_TANK] >= 4)
+    ]
+    return max(
+        candidates,
+        key=lambda kind: (
+            (targets[kind] - counts[kind])
+            / max(1, targets[kind])
+            * (
+                1.8
+                if kind is EntityKind.TANK_DESTROYER
+                else 1.5
+                if kind is EntityKind.ARTILLERY and defenses
+                else 0.8
+                if kind is EntityKind.LIGHT_ARTILLERY
+                else 1.0
+            ),
+            -kind.profile.production_ticks,
+            kind.value,
+        ),
+        default=None,
+    )

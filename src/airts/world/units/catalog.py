@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from airts.world.units import artillery, builder, buildings, heavy_tank, light_tank, scout, turret
-from airts.world.units.schema import EntityProfile
+from airts.world.units import (
+    artillery,
+    builder,
+    buildings,
+    heavy_tank,
+    light_artillery,
+    light_tank,
+    scout,
+    tank_destroyer,
+    turret,
+)
+from airts.world.units.schema import EntityProfile, UpgradeDefinition
 
 
 class EntityKind(StrEnum):
@@ -14,6 +24,8 @@ class EntityKind(StrEnum):
     HEAVY_TANK = "heavy_tank"
     BUILDER = "builder"
     ARTILLERY = "artillery"
+    LIGHT_ARTILLERY = "light_artillery"
+    TANK_DESTROYER = "tank_destroyer"
     TURRET = "turret"
     FACTORY = "factory"
     REPAIR_HUB = "repair_hub"
@@ -27,6 +39,10 @@ class EntityKind(StrEnum):
         return _ENTITY_PROFILES[self]
 
     @property
+    def upgrades(self) -> tuple[UpgradeDefinition, ...]:
+        return _ENTITY_UPGRADES.get(self, ())
+
+    @property
     def production_kinds(self) -> tuple[EntityKind, ...]:
         if self is EntityKind.FACTORY:
             return (
@@ -35,6 +51,8 @@ class EntityKind(StrEnum):
                 EntityKind.HEAVY_TANK,
                 EntityKind.BUILDER,
                 EntityKind.ARTILLERY,
+                EntityKind.LIGHT_ARTILLERY,
+                EntityKind.TANK_DESTROYER,
             )
         if self is EntityKind.COMMAND_CENTER:
             return (EntityKind.BUILDER,)
@@ -62,10 +80,17 @@ _ENTITY_PROFILES: dict[EntityKind, EntityProfile] = {
     EntityKind.HEAVY_TANK: heavy_tank.PROFILE,
     EntityKind.BUILDER: builder.PROFILE,
     EntityKind.ARTILLERY: artillery.PROFILE,
+    EntityKind.LIGHT_ARTILLERY: light_artillery.PROFILE,
+    EntityKind.TANK_DESTROYER: tank_destroyer.PROFILE,
     EntityKind.TURRET: turret.PROFILE,
     EntityKind.FACTORY: buildings.FACTORY,
     EntityKind.REPAIR_HUB: buildings.REPAIR_HUB,
     EntityKind.COMMAND_CENTER: buildings.COMMAND_CENTER,
     EntityKind.RESOURCE_GENERATOR: buildings.RESOURCE_GENERATOR,
     EntityKind.MATTER_SYNTHESIZER: buildings.MATTER_SYNTHESIZER,
+}
+
+_ENTITY_UPGRADES: dict[EntityKind, tuple[UpgradeDefinition, ...]] = {
+    EntityKind.RESOURCE_GENERATOR: buildings.RESOURCE_GENERATOR_UPGRADES,
+    EntityKind.MATTER_SYNTHESIZER: buildings.MATTER_SYNTHESIZER_UPGRADES,
 }

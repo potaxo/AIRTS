@@ -20,6 +20,12 @@ from airts.presentation.palette import (
     Color,
     match_color,
 )
+from airts.presentation.projectile_effects import (
+    SHELL_CORE_RADIUS,
+    SHELL_RIM_RADIUS,
+    blast_circles,
+    shell_visual_position,
+)
 from airts.presentation.rendering import SceneView, order_feedback
 from airts.presentation.ui.theme import BACKGROUND
 from airts.presentation.visuals.assets import atlas_pixels
@@ -595,6 +601,21 @@ class OpenGLFrameBuilder:
         trace_chunks = []
         retained = {}
         for trace in simulation.projectile_traces:
+            if trace.weapon_kind.profile.splash_radius > 0:
+                for point, radius, blast_color, width in blast_circles(
+                    trace, simulation.tick, simulation.TICKS_PER_SECOND
+                ):
+                    append_shape(
+                        shapes,
+                        center=(origin_x + point.x * tile_size, origin_y + point.y * tile_size),
+                        half_size=(radius * tile_size, radius * tile_size),
+                        minimum_half_size=(1.0, 1.0),
+                        color=_float_color(blast_color) if width == 0 else (0.0, 0.0, 0.0, 0.0),
+                        circle=True,
+                        outline_width=float(width),
+                        outline_color=_float_color(blast_color),
+                    )
+                continue
             cached = self._trace_buffers.get(trace.projectile_id)
             if cached is None or cached[0] is not trace:
                 append_trajectory(trace.points, _float_color(PROJECTILE_COLORS[trace.weapon_kind]))
@@ -606,22 +627,25 @@ class OpenGLFrameBuilder:
         for projectile in simulation.projectiles.values():
             raw_color = PROJECTILE_COLORS[projectile.weapon_kind]
             color = _float_color(raw_color)
-            append_trajectory(projectile.trajectory, color)
+            shell = projectile.weapon_kind.profile.splash_radius > 0
+            if not shell:
+                append_trajectory(projectile.trajectory, color)
             destination_color = _float_color(
                 (raw_color[0] // 2, raw_color[1] // 2, raw_color[2] // 2)
             )
-            _append_line_vertex(
-                lines,
-                origin_x + projectile.position.x * tile_size,
-                origin_y + projectile.position.y * tile_size,
-                destination_color,
-            )
-            _append_line_vertex(
-                lines,
-                origin_x + projectile.destination.x * tile_size,
-                origin_y + projectile.destination.y * tile_size,
-                destination_color,
-            )
+            if not shell:
+                _append_line_vertex(
+                    lines,
+                    origin_x + projectile.position.x * tile_size,
+                    origin_y + projectile.position.y * tile_size,
+                    destination_color,
+                )
+                _append_line_vertex(
+                    lines,
+                    origin_x + projectile.destination.x * tile_size,
+                    origin_y + projectile.destination.y * tile_size,
+                    destination_color,
+                )
             center = (
                 origin_x + projectile.position.x * tile_size,
                 origin_y + projectile.position.y * tile_size,
@@ -631,13 +655,30 @@ class OpenGLFrameBuilder:
                 origin_x + previous_position.x * tile_size,
                 origin_y + previous_position.y * tile_size,
             )
+            if shell:
+                append_shape(
+                    shapes,
+                    center=center,
+                    previous_center=previous_center,
+                    half_size=(0.0, 0.0),
+                    minimum_half_size=(3.0, 3.0),
+                    color=_float_color((45, 39, 32)),
+                    circle=True,
+                )
+                visual = shell_visual_position(projectile, projectile.position)
+                previous_visual = shell_visual_position(projectile, previous_position)
+                center = (origin_x + visual.x * tile_size, origin_y + visual.y * tile_size)
+                previous_center = (
+                    origin_x + previous_visual.x * tile_size,
+                    origin_y + previous_visual.y * tile_size,
+                )
             append_shape(
                 shapes,
                 center=center,
                 previous_center=previous_center,
                 half_size=(0.0, 0.0),
-                minimum_half_size=(3.0, 3.0),
-                color=_float_color((255, 255, 255)),
+                minimum_half_size=(SHELL_RIM_RADIUS, SHELL_RIM_RADIUS) if shell else (3.0, 3.0),
+                color=_float_color((255, 226, 150) if shell else (255, 255, 255)),
                 circle=True,
             )
             append_shape(
@@ -645,7 +686,7 @@ class OpenGLFrameBuilder:
                 center=center,
                 previous_center=previous_center,
                 half_size=(0.0, 0.0),
-                minimum_half_size=(2.0, 2.0),
+                minimum_half_size=(SHELL_CORE_RADIUS, SHELL_CORE_RADIUS) if shell else (2.0, 2.0),
                 color=color,
                 circle=True,
             )

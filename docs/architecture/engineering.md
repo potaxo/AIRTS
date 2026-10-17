@@ -34,7 +34,9 @@ Internal calls import their owner directly. JSON tags carry data, not Python mod
 Each mobile kind has one keyword-based immutable profile; buildings share the same schema.
 The explicit catalog owns tag/profile and producer bindings, never dynamic plugin discovery.
 Armed profiles require positive projectile speed; collision radii and relative mass must be finite
-and positive; weapon intervals are positive integer ticks. Each mobile profile declares its mass;
+and positive; weapon intervals are positive integer ticks. Mobile production times are positive
+integer ticks owned by each profile, with nonnegative integer timing for other profiles.
+Each mobile profile declares its mass;
 buildings remain hard obstacles regardless of mass. The catalog's `BUILDABLE_KINDS` is shared by
 construction validation and the Builder controls. Artillery and turrets have independent definitions.
 Add a kind through its definition, catalog/producer binding and presentation palette; opponent

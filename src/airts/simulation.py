@@ -25,6 +25,7 @@ from airts.contracts.automations import (
 )
 from airts.contracts.commands import (
     AttackCommand,
+    CancelUpgradeCommand,
     Command,
     CommandResult,
     ControlAuthority,
@@ -53,6 +54,7 @@ from airts.contracts.commands import (
     SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
+    UpgradeEntityCommand,
     ValidationFailure,
     ValidationPhase,
     command_to_dict,
@@ -84,6 +86,7 @@ from airts.systems import production as production_system
 from airts.systems import reclamation as reclamation_system
 from airts.systems import repair as repair_system
 from airts.systems import skirmish as skirmish_system
+from airts.systems import upgrades as upgrade_system
 from airts.systems.repair_positions import service_route
 from airts.world._numeric import BoolArray
 from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
@@ -104,6 +107,7 @@ class Simulation:
     LARGE_SCENE_GC_ENTITY_THRESHOLD = 512
     LARGE_SCENE_GC_CELL_THRESHOLD = 256 * 256
     TICKS_PER_SECOND = 10
+    INCOME_INTERVAL_TICKS = 2 * TICKS_PER_SECOND
     TICK_SECONDS = 1.0 / TICKS_PER_SECOND
     NO_PROGRESS_YIELD_TICKS = 30
     DESTINATION_REPATH_TICKS = 50
@@ -124,7 +128,6 @@ class Simulation:
     COMBAT_PATH_BUDGET = 16
     GATHERING_CACHE_TARGET_LIMIT = 16
     GATHERING_CACHE_SLOT_LIMIT = 16_384
-    PRODUCTION_BUILD_TICKS = 5
     CONSTRUCTION_BUILD_TICKS = 20
     CONSTRUCTION_REQUIRED_VALUE = 100.0
 
@@ -352,6 +355,10 @@ class Simulation:
     def _execute_command(self, command: Command, *, record: bool) -> CommandResult:
         if record:
             self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
+        if isinstance(command, UpgradeEntityCommand):
+            return upgrade_system.start_upgrade(self, command)
+        if isinstance(command, CancelUpgradeCommand):
+            return upgrade_system.cancel_upgrade(self, command)
         if isinstance(command, SetDeveloperModeCommand):
             return command_handlers.set_developer_mode(self, command)
         if isinstance(command, CreateSpatialReferenceCommand):
@@ -422,6 +429,7 @@ class Simulation:
             self._opponent_command_count = 0
             self._opponent_candidate_count = 0
             self._opponent_forecast_count = 0
+            upgrade_system.advance_upgrades(self)
             economy_system.generate_income(self)
             economy_system.generate_developer_income(self)
             economy_system.spawn_ambient_enemy(self)

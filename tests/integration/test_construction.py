@@ -322,6 +322,12 @@ def test_poor_builder_travels_waits_then_builds_fifo_without_remote_charge() -> 
     assert simulation.resources["player"] == 0
     simulation.advance(100)
     assert first_job.status is AutomationStatus.COMPLETED
+    assert site.is_complete
+    # At 2/s the completed extractor cannot yet fund the 250 repair hub.
+    assert (
+        simulation.automations[second.automation_id or ""].reason_code == "INSUFFICIENT_RESOURCES"
+    )
+    simulation.advance(1300)
     assert simulation.automations[second.automation_id or ""].status is AutomationStatus.COMPLETED
     assert site.is_complete
     assert not simulation.assignments

@@ -47,6 +47,13 @@ patterns in `visuals/terrain.py` and panel/button/text roles in `ui/theme.py`. T
 appearance out of gameplay profiles. Terrain and chrome use code-native drawing with existing
 dependencies; no generated covers or image-generation service is involved.
 
+Artillery feedback uses shared [projectile effects](../../src/airts/presentation/projectile_effects.py)
+in both backends: a larger orange shell with a pale rim follows a display-only parabolic arc above
+its ground shadow. Impact shows a one-second full damage-radius outline, expanding shockwave,
+central flash and radial embers, even when no enemy is hit. Radius follows the combat profile;
+expiry follows the saved trace and freezes with simulation pause. Ordinary projectiles keep their
+small fixed-pixel cores. OpenGL packs these effects into existing world shape batches.
+
 ## Art conventions
 
 Each source is a 64x64 RGBA PNG, facing north, with its rotation pivot at the exact image center.
@@ -55,7 +62,11 @@ material ramp is tinted by the shared entity/team palette at display time. Black
 for software transparency; shipped palette colors keep all opaque material pixels nonblack.
 
 Scouts have narrow wheeled hulls, light tanks narrow tracks, heavy tanks wide reinforced hulls,
-builders an asymmetric claw and artillery a long barrel/rear stabilizers. Turret pedestals,
+builders an asymmetric claw and heavy artillery a long barrel/rear stabilizers. Light artillery
+uses a compact open cradle and a long slim barrel; tank destroyers have a wedge hull and long narrow cannon.
+Heavy artillery has a visibly thicker barrel and broad muzzle brake. Both artillery barrels extend
+into the sprite tile's forward transparent margin; hull images, display sizes, collision radii,
+footprints and mass stay independent of this visual overhang. Turret pedestals,
 factory bays, repair crosses, command antennas, extractor plumbing and synthesis cores provide
 building silhouettes. Vehicle/turret weapons have separate centered layers. Display sizes preserve
 a smaller scout/light tank and a broader heavy tank without imposing different grid occupancies.

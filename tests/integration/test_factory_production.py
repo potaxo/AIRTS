@@ -63,7 +63,7 @@ def test_rejected_production_retarget_preserves_linked_work(
             defend_target=rectangle_region(Point(14, 2), Point(18, 6)),
         )
     )
-    simulation.advance(5)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
     before = simulation.snapshot()
 
     result = simulation.execute(
@@ -95,7 +95,7 @@ def test_finite_production_completes_with_deterministic_ids_and_releases_factory
     )
     automation_id = created.automation_id or ""
 
-    simulation.advance(20)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks * 2)
 
     automation = simulation.automations[automation_id]
     assert automation.status is AutomationStatus.COMPLETED
@@ -119,7 +119,7 @@ def test_continuous_factory_production_assigns_units_to_compact_area_defense() -
         )
     )
 
-    simulation.advance(16)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks * 3 + 1)
 
     production = simulation.automations[created.automation_id or ""]
     assert isinstance(production.parameters, ProductionParameters)
@@ -140,7 +140,7 @@ def test_continuous_factory_production_assigns_units_to_compact_area_defense() -
     )
     assert simulation.navigation_field_build_count <= len(defend.parameters.deployment_slots)
 
-    simulation.advance(10)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks * 2)
     assert parameters.produced_count == 5
     assert production.status is AutomationStatus.ACTIVE
 
@@ -181,7 +181,7 @@ def test_factory_keeps_only_latest_continuous_production_request() -> None:
             defend_target=first_target,
         )
     )
-    simulation.advance(5)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
     first_automation = simulation.automations[first.automation_id or ""]
     assert isinstance(first_automation.parameters, ProductionParameters)
     first_defend = simulation.automations[first_automation.parameters.defend_automation_id or ""]
@@ -204,7 +204,7 @@ def test_factory_keeps_only_latest_continuous_production_request() -> None:
     assert [item.automation_id for item in simulation.production_queue("factory")] == [second_id]
     assert simulation.assignments["factory"] == second_id
 
-    simulation.advance(5)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks)
     second_parameters = simulation.automations[second_id].parameters
     assert isinstance(second_parameters, ProductionParameters)
     second_defend = simulation.automations[second_parameters.defend_automation_id or ""]
@@ -247,7 +247,7 @@ def test_production_waits_when_no_spawn_cell_is_available() -> None:
     simulation = Simulation(game_map)
     created = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
 
-    simulation.advance(10)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
 
     automation = simulation.automations[created.automation_id or ""]
     assert automation.status is AutomationStatus.WAITING
@@ -273,7 +273,7 @@ def test_production_preserves_disc_clearance_across_empty_neighbor_cells(kind: E
     )
     result = simulation.execute(CreateProductionCommand("factory", kind, 1))
     assert result.accepted
-    for _ in range(10):
+    for _ in range(kind.profile.production_ticks):
         simulation.advance()
         units = [entity for entity in simulation.entities.values() if entity.is_movable]
         for index, first in enumerate(units):
@@ -305,7 +305,7 @@ def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_over
         )
     )
     result = simulation.execute(CreateProductionCommand("factory", EntityKind.HEAVY_TANK, 1))
-    simulation.advance(10)
+    simulation.advance(EntityKind.HEAVY_TANK.profile.production_ticks)
     automation = simulation.automations[result.automation_id or ""]
     assert automation.status is AutomationStatus.WAITING
     assert automation.reason_code == "SPAWN_BLOCKED"
@@ -337,7 +337,7 @@ def test_production_uses_legal_space_within_an_occupied_mobile_cell() -> None:
         )
     )
     result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
-    simulation.advance(10)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
     produced = simulation.entities["scout_001"]
     blocker = simulation.entities["blocker"]
     assert produced.position == Point(7.5, 7.5)
@@ -391,7 +391,7 @@ def test_factory_production_requests_run_fifo_and_paused_jobs_resume_without_con
     assert resumed_active.accepted
     assert simulation.assignments["factory"] == first_id
 
-    simulation.advance(30)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks * 3)
 
     assert [simulation.automations[item].status for item in (first_id, second_id, third_id)] == [
         AutomationStatus.COMPLETED
@@ -413,7 +413,11 @@ def test_factory_production_requests_run_fifo_and_paused_jobs_resume_without_con
             (third_id, "FACTORY_QUEUE_STARTED"),
         )
     ]
-    assert active_ticks == [0, 5, 10]
+    assert active_ticks == [
+        0,
+        EntityKind.SCOUT.profile.production_ticks,
+        EntityKind.SCOUT.profile.production_ticks * 2,
+    ]
 
 
 def test_canceling_factory_job_starts_next_without_disturbing_the_active_job() -> None:
@@ -456,7 +460,7 @@ def test_production_charges_cost_and_waits_for_resources() -> None:
         and event.details["reason"] == "PRODUCTION_COST"
         for event in simulation.events.events
     )
-    simulation.advance(3)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks - 2)
     assert not simulation.automations[created.automation_id or ""].parameters.to_dict()[
         "produced_entity_ids"
     ]
@@ -474,19 +478,34 @@ def test_production_charges_cost_and_waits_for_resources() -> None:
 
 
 @pytest.mark.parametrize(
-    "kind",
-    [EntityKind.SCOUT, EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK, EntityKind.BUILDER],
-    ids=lambda kind: kind.value,
+    ("kind", "seconds"),
+    [
+        (EntityKind.SCOUT, 2),
+        (EntityKind.BUILDER, 2.5),
+        (EntityKind.LIGHT_TANK, 4),
+        (EntityKind.HEAVY_TANK, 6.5),
+        (EntityKind.ARTILLERY, 8.5),
+        (EntityKind.LIGHT_ARTILLERY, 5.5),
+        (EntityKind.TANK_DESTROYER, 6),
+    ],
 )
-def test_factory_can_produce_every_mobile_unit_kind_through_shared_logic(kind: EntityKind) -> None:
+def test_factory_can_produce_every_mobile_unit_kind_through_shared_logic(
+    kind: EntityKind,
+    seconds: float,
+) -> None:
     simulation = builder_factory_simulation()
     before = simulation.resources["player"]
     result = simulation.execute(CreateProductionCommand("factory", kind, 1))
     assert result.accepted
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    assert kind.profile.production_ticks * Simulation.TICK_SECONDS == seconds
     production = simulation.automations[result.automation_id or ""]
     parameters = production.parameters
     assert isinstance(parameters, ProductionParameters)
+    simulation.advance(kind.profile.production_ticks - 1)
+    assert production.status is AutomationStatus.ACTIVE
+    assert parameters.produced_count == 0
+    assert parameters.progress_ticks == kind.profile.production_ticks - 1
+    simulation.advance()
     assert production.status is AutomationStatus.COMPLETED
     assert simulation.entities[parameters.produced_entity_ids[0]].kind is kind
     assert simulation.resources["player"] == before - kind.profile.production_cost
@@ -532,7 +551,7 @@ def test_factory_plus_starts_immediately_and_minus_removes_newest_request() -> N
     app._handle_command_click(button.center)
     for factory_id in ("factory", "factory_2"):
         assert len(app.simulation.production_queue(factory_id)) == 2
-    app.simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    app.simulation.advance(EntityKind.SCOUT.profile.production_ticks)
     assert sum(entity.kind is EntityKind.SCOUT for entity in app.simulation.entities.values()) == 3
     assert "2 factories" in app.notice
 
@@ -565,14 +584,14 @@ def test_command_center_builder_production_saves_and_replays(
         CreateProductionCommand("center", EntityKind.BUILDER, 2, continuous=continuous)
     )
     assert result.accepted
-    simulation.advance(5)
+    simulation.advance(EntityKind.BUILDER.profile.production_ticks)
     save_path = tmp_path / "builder-production.json"
     save_simulation(simulation, save_path)
     restored = load_simulation(save_path)
     replayed = run_replay(capture_replay(simulation))
     assert restored.export_state() == replayed.export_state() == simulation.export_state()
     for instance in (simulation, restored, replayed):
-        instance.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+        instance.advance(EntityKind.BUILDER.profile.production_ticks * 2)
     assert restored.export_state() == replayed.export_state() == simulation.export_state()
     parameters = simulation.automations[result.automation_id or ""].parameters
     assert isinstance(parameters, ProductionParameters)
@@ -592,7 +611,7 @@ def test_reduce_finite_batch_preserves_progress_save_and_replay(
         CreateProductionBatchCommand("factory", ((EntityKind.SCOUT, 2), (EntityKind.BUILDER, 1)))
     )
     assert result.accepted
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS + 3)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks + 3)
     parameters = simulation.automations[result.automation_id or ""].parameters
     assert isinstance(parameters, ProductionParameters)
     assert parameters.produced_count == 1
@@ -601,13 +620,16 @@ def test_reduce_finite_batch_preserves_progress_save_and_replay(
     assert parameters.target_count == 2
     assert parameters.remaining_count(remove_kind) == 0
     assert parameters.progress_ticks == (0 if remove_kind is EntityKind.SCOUT else 3)
+    assert parameters.build_ticks == parameters.current_unit_kind.profile.production_ticks
     destination = tmp_path / "reduced-batch.json"
     save_simulation(simulation, destination)
     restored = load_simulation(destination)
     replayed = run_replay(capture_replay(simulation))
     assert restored.export_state() == replayed.export_state() == simulation.export_state()
     for instance in (simulation, restored, replayed):
-        instance.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+        instance.advance(
+            EntityKind.SCOUT.profile.production_ticks + EntityKind.BUILDER.profile.production_ticks
+        )
     assert restored.export_state() == replayed.export_state() == simulation.export_state()
     assert parameters.produced_count == 2
     assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
@@ -666,7 +688,11 @@ def test_finite_factory_batch_obeys_order_and_exact_quantities_then_leaves_live_
     )
     assert result.accepted
 
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 6)
+    simulation.advance(
+        EntityKind.LIGHT_TANK.profile.production_ticks * 2
+        + EntityKind.HEAVY_TANK.profile.production_ticks
+        + EntityKind.SCOUT.profile.production_ticks * 3
+    )
 
     automation = simulation.automations[result.automation_id or ""]
     parameters = automation.parameters
@@ -681,6 +707,25 @@ def test_finite_factory_batch_obeys_order_and_exact_quantities_then_leaves_live_
     ]
     assert automation.status is AutomationStatus.COMPLETED
     assert automation not in simulation.live_automations
+    completion_ticks = [
+        event.tick
+        for event in simulation.events.events
+        if event.event_type is EventType.PRODUCTION_COMPLETED
+        and event.details["automation_id"] == automation.automation_id
+    ]
+    elapsed = 0
+    expected_ticks = []
+    for kind in (
+        EntityKind.LIGHT_TANK,
+        EntityKind.LIGHT_TANK,
+        EntityKind.HEAVY_TANK,
+        EntityKind.SCOUT,
+        EntityKind.SCOUT,
+        EntityKind.SCOUT,
+    ):
+        elapsed += kind.profile.production_ticks
+        expected_ticks.append(elapsed)
+    assert completion_ticks == expected_ticks
 
 
 def test_continuous_factory_production_repeats_one_kind_until_canceled() -> None:
@@ -690,7 +735,7 @@ def test_continuous_factory_production_repeats_one_kind_until_canceled() -> None
     )
     assert result.accepted
 
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 3)
+    simulation.advance(EntityKind.BUILDER.profile.production_ticks * 3)
     automation = simulation.automations[result.automation_id or ""]
     parameters = automation.parameters
     assert isinstance(parameters, ProductionParameters)
@@ -702,7 +747,7 @@ def test_continuous_factory_production_repeats_one_kind_until_canceled() -> None
     assert automation.status is AutomationStatus.ACTIVE
 
     simulation.execute(CancelAutomationCommand(automation.automation_id))
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+    simulation.advance(EntityKind.BUILDER.profile.production_ticks * 2)
     assert parameters.produced_count == 3
     assert automation not in simulation.live_automations
 
@@ -724,7 +769,9 @@ def test_finite_player_queue_preempts_then_resumes_continuous_loop() -> None:
     assert queue_result.accepted
     assert simulation.production_queue("factory")[0].automation_id == queue_result.automation_id
 
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+    simulation.advance(
+        EntityKind.SCOUT.profile.production_ticks + EntityKind.BUILDER.profile.production_ticks
+    )
     queue = simulation.automations[queue_result.automation_id or ""]
     queue_parameters = queue.parameters
     assert isinstance(queue_parameters, ProductionParameters)
@@ -752,7 +799,7 @@ def test_produce_and_defend_only_assigns_future_units(prior_order: str, line_tar
             ),
         )
     )
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    simulation.advance(EntityKind.HEAVY_TANK.profile.production_ticks)
     loop = simulation.automations[loop_result.automation_id or ""]
     parameters = loop.parameters
     assert isinstance(parameters, ProductionParameters)
@@ -787,7 +834,7 @@ def test_produce_and_defend_only_assigns_future_units(prior_order: str, line_tar
     if existing_defense is not None:
         assert existing_defense.to_dict() == existing_defense_state
 
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    simulation.advance(EntityKind.HEAVY_TANK.profile.production_ticks)
 
     assert len(parameters.produced_entity_ids) == 2
     new_id = parameters.produced_entity_ids[-1]
@@ -831,7 +878,7 @@ def test_factory_production_and_linked_area_defense_share_one_panel_item() -> No
         )
     )
     assert result.accepted
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
     assert {item.kind for item in simulation.live_automations} == {
         AutomationKind.PRODUCTION,
         AutomationKind.DEFEND,
@@ -881,7 +928,7 @@ def test_factory_produce_and_defend_supports_line_target() -> None:
     app.active_target = target
 
     app._create_production()
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS * 2)
+    simulation.advance(EntityKind.HEAVY_TANK.profile.production_ticks * 2)
 
     production = simulation.automations[loop.automation_id or ""]
     parameters = production.parameters

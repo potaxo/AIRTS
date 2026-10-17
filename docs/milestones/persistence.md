@@ -52,9 +52,9 @@ diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v18 | Current write/read format; includes player control timestamps for automatic support |
-| Match save v11 | Current write/read format with player control timestamps and victory based on surviving assets |
-| Sandbox replay v24 / match replay v18 | Current diagnostic formats and exact verification |
+| Sandbox save v21 | Current write/read format; paid entity upgrades and per-building income cycles |
+| Match save v14 | Current write/read format with paid upgrades and per-building income cycles |
+| Sandbox replay v27 / match replay v24 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves require construction progress and site references and validate owner, kind,
@@ -62,10 +62,38 @@ position, payment and live jobs. Match results use current surviving-asset victo
 The adapter's exact tags/validators are authoritative. Legacy migration branches are removed;
 old sandbox and match saves are rejected before world reconstruction.
 
-Forward expansion, siege production and continuous cleanup regenerate AI decisions from the saved
-squad memory and current world. They introduce no additional memory fields. Match save v9 rejects
-earlier result semantics, and match replay v15 rejects earlier AI trajectories and events; sandbox
-formats are unchanged. Current continuation and command replay verification remain enabled.
+Entity upgrades require a configured integer tier, valid paid remaining ticks and an income-cycle
+counter below the two-second interval. Max-tier entities cannot carry a running transition;
+unfinished entities cannot carry upgrades or partial income. Reload resumes paid work and the
+partial cycle without another resource transaction. Upgrade and income semantics version both save
+and replay formats; previous tags are explicitly rejected without migration.
+
+Projectile speed changes and fixed artillery splash replace the previous tracking/single-target
+artillery semantics. Earlier save/replay tags are rejected without migration. Current saves retain
+the launch-time shell destination, current position, speed and trajectory; weapon kind resolves the
+immutable splash profile. Artillery trace endpoints and expiry also resume impact feedback after load,
+including empty impacts. Current command recording and exact replay verification remain enabled;
+combat coverage checks moving-target escape, splash falloff and continuation through impact.
+
+Per-kind production replaces the former shared half-second duration. The saved current item's
+build time must match its immutable unit profile, and progress cannot exceed that duration.
+Mixed batches update the duration whenever their current kind changes, including cancellation;
+paid progress survives pause, queue preemption and load. Earlier save/replay tags are rejected
+without migration. Current exact command-replay diagnostics remain active.
+
+Light artillery and tank destroyers use existing kind tags, production queues, projectiles and
+traces without adding kind-specific save fields. Current replay formats reject earlier AI
+composition expectations. Current exact replay
+verification remains active, including production and combat with the new kinds.
+
+Opponent cash forecasts, production clearance and nearby reinforcement estimates are derived from
+the world, profiles, existing automation queues and saved squad memory. They add no authoritative
+fields; income-upgrade selection and unpaid upgrade savings are likewise derived from existing
+entity tiers, prices, threats and committed orders. Current saves resume with the current policy.
+Match replay v24 rejects expectations from before autonomous income-upgrade decisions; sandbox
+replay remains v27. Current replay formats reject earlier policy trajectories and events. Current
+save continuation and command-replay verification remain enabled; AI decisions are regenerated, never
+recorded a second time as external inputs.
 
 Developer mode and its partial-second tick counter are authoritative save/snapshot state.
 Current formats require a boolean toggle and a counter within the enabled one-second interval;
@@ -109,9 +137,9 @@ explicitly, since their recorded trajectories and events may differ; verify thos
 with their original implementation.
 
 Radius-aware stalled recovery, safe edge gathering and weighted-terrain lookahead change movement
-trajectories and path events without adding authoritative state. Sandbox save v16 and match save v9
-remain current: stored paths continue through the current movement controller and its full collision
-certification. Sandbox replay v22 and match replay v16 reject earlier recordings; current command
+trajectories and path events without adding authoritative state. Stored paths in current-format saves
+continue through the current movement controller and its full collision certification.
+Sandbox replay v22 and match replay v16 first rejected earlier recordings; current command
 recording and exact verification remain enabled. Shared fields and branch-search scratch rebuild
 after load. Group routing retains its existing dispatch allowances and stable station identities.
 

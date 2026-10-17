@@ -154,7 +154,8 @@ def test_production_retarget_preserves_existing_member_return_phases(
     assert created.accepted
     production = simulation.automations[created.automation_id or ""]
     assert isinstance(production.parameters, ProductionParameters)
-    while len(production.parameters.produced_entity_ids) < 3 and simulation.tick < 30:
+    deadline = EntityKind.SCOUT.profile.production_ticks * 3 + Simulation.TICKS_PER_SECOND
+    while len(production.parameters.produced_entity_ids) < 3 and simulation.tick < deadline:
         simulation.advance()
     ids = tuple(production.parameters.produced_entity_ids)
     assert len(ids) == 3

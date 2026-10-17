@@ -158,7 +158,7 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
         supersede_continuous_production(simulation, command.factory_id)
     else:
         preempt_continuous_production(simulation, command.factory_id)
-    build_ticks = simulation.PRODUCTION_BUILD_TICKS
+    build_ticks = command.unit_kind.profile.production_ticks
     automation = simulation._new_automation(
         AutomationKind.PRODUCTION,
         command.title,
@@ -312,6 +312,8 @@ def reduce_production(simulation: Simulation, command: ReduceProductionCommand) 
                 parameters.progress_ticks = 0
                 parameters.cost_paid = False
             parameters.sequence = tuple(sequence)
+            if removing_current:
+                parameters.build_ticks = parameters.current_unit_kind.profile.production_ticks
         job.modified_tick = simulation.tick
     simulation.events.record(
         simulation.tick,
@@ -400,6 +402,8 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
         if parameters.sequence_produced >= parameters.sequence[parameters.sequence_index][1]:
             parameters.sequence_index += 1
             parameters.sequence_produced = 0
+        if parameters.produced_count < parameters.target_count:
+            parameters.build_ticks = parameters.current_unit_kind.profile.production_ticks
     if parameters.defend_target is not None:
         assign_produced_defender(simulation, automation, parameters, entity_id)
     elif parameters.patrol_target is not None:

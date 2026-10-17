@@ -23,6 +23,7 @@ from airts.contracts.commands import (
     MoveCommand,
     ReclaimBuildingCommand,
     RepairBuildingCommand,
+    SetDeveloperModeCommand,
     StopCommand,
 )
 from airts.contracts.spatial import Point, PolylineTarget
@@ -364,13 +365,16 @@ def test_synthesizer_builds_off_site_and_earns_only_after_completion(tmp_path: P
     assert simulation.export_state() == restored.export_state()
     assert site.is_complete
     balance = simulation.resources["player"]
-    simulation.advance(10)
-    assert simulation.resources["player"] == balance + 5
+    simulation.advance(20)
+    assert simulation.resources["player"] == balance + 2
 
 
 def test_synthesis_commands_replay() -> None:
     simulation = repair_world()
-    # Default opening balance suffices after an extractor produces sandbox income.
+    # Fund this construction/replay scenario through a recorded developer command.
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
+    simulation.advance(10)
+    assert simulation.execute(SetDeveloperModeCommand(False)).accepted
     simulation.execute(
         CreateConstructionCommand("builder", EntityKind.RESOURCE_GENERATOR, Point(30, 25))
     )

@@ -35,7 +35,16 @@ pursuit, retreat from unfavorable fights and regroup. Candidate selection mixes 
 targets. Small forces can raid exposed assets; destroying a target triggers selection from the
 current position instead of a return home. When no favorable target exists, squads stage toward
 the enemy outside its local threat area. Small raids use the reserve; larger raids
-recall the nearest capable squad. Severely wounded units use repair-and-return through shared commands.
+recall the nearest capable squad. New units reinforce non-full advancing squads instead of creating
+single-unit attack waves. Local estimates include up to 96 nearby squad members, excluding retreating
+and defending partners; distant reinforcements are not counted as present. When no favorable attack
+exists, weaker groups can join a stronger nearby group before advancing. Severely wounded units use
+repair-and-return through shared commands.
+
+Staging points sit away from production buildings and behind the anchor when enemies are close.
+New AI production uses an off-building rally point. Construction preserves producer exit rings and
+resource footprints. `SPAWN_BLOCKED` and `SITE_OCCUPIED` trigger bounded orders to clear idle,
+unassigned combat units; repairing/automated units and ongoing pursuit retain their control.
 
 Combat estimates use health, profile firing cadence, damage and range; close decisions add twelve
 aggregate exchanges with approach delays. Fixed turrets wait for mobile enemies to approach;
@@ -45,10 +54,30 @@ routing and reinforcement prediction. Knowledge uses the current fully visible w
 Economy avoids enemy-controlled or unreachable sites, replaces lost builders/factories (using
 command centers for builders when necessary), restores income before an unaffordable factory,
 expands extraction and protects remote extractors with turrets. Factory capacity scales with income;
-additional factories and repair facilities use forward holdings. When safe extractor locations
-are exhausted, supplementary Matter Synthesizers use surplus funds. Production mixes light tanks,
-scouts, heavy tanks and artillery, with more artillery against turrets. Unpaid construction and needed expensive units reserve funds
-by pausing continuous production; only AI budget pauses resume automatically. Manual pauses persist.
+additional factories and repair facilities use forward holdings. Capacity and a twenty-second cash
+forecast read current per-kind production times and prices. Income shortage prioritizes extraction;
+when safe extractor locations are exhausted, supplementary Matter Synthesizer plans commit before
+the full price is affordable, so military spending cannot prevent the savings goal from starting.
+The desired synthesizer count scales with factory count and army investment. Construction remains
+limited to two concurrent jobs. No free resources or discounts are granted.
+
+Income forecasts read each building's effective tier profile. Resource upgrades compete with
+new income buildings using completion time plus cost per additional income; expansion estimates
+include straight-line builder travel and construction time, not a routed arrival prediction.
+The AI considers the next configured income-increasing upgrade, without hard-coded tiers or prices,
+on completed, healthy, unthreatened sources not targeted for reclamation. One income upgrade runs
+at a time; unaffordable chosen upgrades reserve funds through the existing production budget pauses.
+Existing unpaid construction and finite production commitments take precedence, and missing builders
+or factories are restored before upgrades. Busy builders do not prevent upgrades. Local military
+inferiority suspends new upgrade investment; already paid upgrades continue. Additional synthesizer
+plans wait while an income upgrade is running. Non-income upgrade benefits are not evaluated.
+
+Production scores heavy tanks, light artillery support, tank destroyers against enemy heavy tanks
+and tank destroyers, and heavy artillery against completed turrets. Light tanks remain the main force.
+Emergency defense can spend growth reserves and favors faster light tanks over expensive additions.
+Queued unpaid items and newly committed orders reduce the budget available to other factories.
+Unpaid construction and needed units reserve funds by pausing continuous production; AI pause
+ownership survives intervening finite queues until an actual resume. Manual pauses persist.
 
 Owners decide every ten ticks with staggered slots; economy runs every twenty. A decision updates
 at most two combat squads of up to 32 units, checks four attack candidates per squad and attempts
@@ -59,11 +88,25 @@ Decisions derive from ticks and authoritative state; ambient enemy generation is
 Saved squad membership, phases, targets, destinations, command/retry ticks and budget pauses are
 validated by the persistence adapter. Current save continuation/replay uses the same decision logic.
 
-The policy adapts resource-centered expansion, building ratios and mixed-unit production from
-[OpenRA's AI rules](https://github.com/OpenRA/OpenRA/blob/bleed/mods/ra/rules/ai.yaml) and safe expansion
-with reserved construction funds from [Sharpy's Expand plan](https://github.com/DrInfy/sharpy-sc2/blob/master/sharpy/plans/acts/expand.py).
-These are design references, not runtime dependencies or copied engines. There is no learned policy,
-terrain influence map or fog-of-war inference.
+## Research basis
+
+[AIIDE 2025's official results](https://davechurchill.ca/starcraft/aiide/results/2025/)
+rank BananaBrain first: 3,002 wins in 3,408 games (88.09%). Its
+[published tournament source](https://davechurchill.ca/starcraft/aiide/results/2025/bots/BananaBrain.zip)
+is the principal implementation reference. `Macro.cpp` compares income and training cost rates,
+reserves committed resources and projects affordability; `BuildingPlacement.cpp` and
+`UnitPotential.cpp` account for clearance, threats and friendly-unit repulsion. AIRTS adapts those
+ideas to its single-resource economy, existing collision system and shared command boundary.
+
+[Stardust's producer](https://github.com/bmnielsen/Stardust/blob/main/src/Producer/Producer.cpp)
+provides a second resource-scheduling reference, and its
+[attack squad](https://github.com/bmnielsen/Stardust/blob/main/src/General/Squads/AttackBaseSquad.cpp)
+considers arriving reinforcements and linking clusters before attacking. Earlier resource-centered
+expansion references are [OpenRA](https://github.com/OpenRA/OpenRA/blob/bleed/mods/ra/rules/ai.yaml)
+and [Sharpy](https://github.com/DrInfy/sharpy-sc2/blob/master/sharpy/plans/acts/expand.py).
+These are algorithm/design references, not ported bot code or runtime dependencies. The policy uses
+bounded heuristics and rolling forecasts, without training, neural inference, a terrain influence
+map or fog-of-war inference. Tournament standing does not establish AIRTS playing strength.
 
 ## Verification owners
 

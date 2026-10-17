@@ -38,17 +38,18 @@ def drive_economy(simulation: Simulation, automation: Automation) -> None:
 
 
 def generate_income(simulation: Simulation) -> None:
-    """Credit the fixed generator income interval in stable owner order."""
+    """Keep each completed producer's two-second cycle across upgrades and saves."""
 
-    if simulation.tick % 10:
-        return
     generators: dict[str, int] = {}
     for entity in simulation.entities.values():
-        if entity.kind.profile.income_per_second and entity.is_complete:
-            income = entity.kind.profile.income_per_second
-            if entity.kind is EntityKind.RESOURCE_GENERATOR and not simulation.game_map.match_slots:
-                income = 1000
-            generators[entity.owner_id] = generators.get(entity.owner_id, 0) + income
+        if not entity.profile.income_per_second or not entity.is_complete:
+            continue
+        entity.income_ticks += 1
+        if entity.income_ticks < simulation.INCOME_INTERVAL_TICKS:
+            continue
+        entity.income_ticks = 0
+        income = entity.profile.income_per_second * 2
+        generators[entity.owner_id] = generators.get(entity.owner_id, 0) + income
     for owner_id, amount in sorted(generators.items()):
         simulation.resources[owner_id] = simulation.resources.get(owner_id, 0) + amount
         simulation.events.record(

@@ -186,7 +186,7 @@ def test_replay_preserves_defense_and_completed_production(tmp_path: Path) -> No
     )
     assert defense.accepted and defense.automation_id is not None
     assert production.accepted and production.automation_id is not None
-    simulation.advance(25)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks + 20)
     assert simulation.assignments["tank_01"] == defense.automation_id
     assert simulation.entities["tank_01"].position != initial_position
     automation = simulation.automations[production.automation_id]

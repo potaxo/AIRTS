@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from math import ceil, sqrt
 
+import pytest
+
 from airts.contracts.automations import DefendParameters, ProductionParameters
 from airts.contracts.commands import (
     CreateProductionCommand,
     MoveCommand,
     PauseAutomationCommand,
     ResumeAutomationCommand,
+    SetDeveloperModeCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
 from airts.navigation.collision.geometry import collision_radius
@@ -46,6 +49,7 @@ def _assert_physical_clearance(simulation: Simulation) -> None:
         assert simulation.occupancy.cells_for(entity.entity_id) == entity.occupied_cells
 
 
+@pytest.mark.usefixtures("dense_production")
 def test_continuous_mixed_production_defense_arrivals_and_internal_squad_exit() -> None:
     """Actual production/defense creates the crowd; no position injection occurs."""
     target = rectangle_region(Point(39, 27), Point(41, 29))
@@ -66,6 +70,8 @@ def test_continuous_mixed_production_defense_arrivals_and_internal_squad_exit() 
         ),
         random_seed=173,
     )
+    # This is a full-density movement workload, not an opening-economy acceptance test.
+    assert simulation.execute(SetDeveloperModeCommand(True)).accepted
     productions = []
     for factory, kind in (
         ("factory_light", EntityKind.LIGHT_TANK),

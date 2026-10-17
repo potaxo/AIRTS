@@ -186,7 +186,7 @@ def test_production_defense_inherits_and_updates_auto_repair(enabled: bool, tmp_
     path = tmp_path / "production-choice.json"
     save_simulation(simulation, path)
     simulation = load_simulation(path)
-    simulation.advance(Simulation.PRODUCTION_BUILD_TICKS + 1)
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks + 1)
     production = simulation.automations[automation_id].parameters
     assert isinstance(production, ProductionParameters)
     defense = simulation.automations[production.defend_automation_id or ""]

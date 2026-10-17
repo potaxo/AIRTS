@@ -296,14 +296,14 @@ def test_combat_route_admission_rotates_and_dispatches_every_pending_member() ->
 
 def test_economy_automation_collects_generator_income_to_target() -> None:
     simulation = economy_combat_simulation()
-    result = simulation.execute(CreateEconomyCommand(("generator",), 1500))
-    simulation.advance(10)
+    result = simulation.execute(CreateEconomyCommand(("generator",), 508))
+    simulation.advance(40)
     automation = simulation.automations[result.automation_id or ""]
 
-    assert simulation.resources["player"] == 1500
+    assert simulation.resources["player"] == 508
     assert automation.kind is AutomationKind.ECONOMY
     assert automation.status is AutomationStatus.COMPLETED
-    assert automation.parameters.to_dict()["collected"] == 1000
+    assert automation.parameters.to_dict()["collected"] == 8
 
 
 def test_seeded_enemy_tank_reinforcements_spawn_on_the_right_each_second() -> None:
@@ -667,12 +667,12 @@ def test_developer_mode_bonus_is_player_only_and_resets_when_disabled() -> None:
     simulation.advance(3)
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted
     simulation.advance(9)
-    assert simulation.resources["player"] == 1500  # Ordinary extractor income only.
+    assert simulation.resources["player"] == 500  # First income cycle is not complete.
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted  # Preserve timer.
     simulation.advance()
-    assert simulation.resources["player"] == 3500
+    assert simulation.resources["player"] == 2500
     simulation.advance(20)
-    assert simulation.resources["player"] == 9500
+    assert simulation.resources["player"] == 6504
     assert simulation.resources["enemy"] == enemy_balance
     bonuses = [
         event
@@ -686,12 +686,12 @@ def test_developer_mode_bonus_is_player_only_and_resets_when_disabled() -> None:
     assert simulation.execute(SetDeveloperModeCommand(False)).accepted
     assert simulation.developer_income_ticks == 0
     simulation.advance(20)
-    assert simulation.resources["player"] == 12500  # Normal income continues.
+    assert simulation.resources["player"] == 6512  # Normal income continues.
     assert simulation.execute(SetDeveloperModeCommand(True)).accepted
     simulation.advance(9)
-    assert simulation.resources["player"] == 13500
+    assert simulation.resources["player"] == 6512
     simulation.advance()
-    assert simulation.resources["player"] == 15500
+    assert simulation.resources["player"] == 8512
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
 
@@ -712,7 +712,7 @@ def test_resource_generators_produce_without_an_automation() -> None:
 
     simulation.advance(20)
 
-    assert simulation.resources["player"] == 2500
+    assert simulation.resources["player"] == 504
 
 
 def test_defenders_keep_their_route_when_firing_at_an_enemy_far_from_their_station() -> None:

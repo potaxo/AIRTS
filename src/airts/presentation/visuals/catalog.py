@@ -27,6 +27,12 @@ APPEARANCES = {
     EntityKind.ARTILLERY: Appearance(
         "units/artillery/body.png", (1.6, 1.6), "units/artillery/weapon.png"
     ),
+    EntityKind.LIGHT_ARTILLERY: Appearance(
+        "units/light_artillery/body.png", (1.4, 1.4), "units/light_artillery/weapon.png"
+    ),
+    EntityKind.TANK_DESTROYER: Appearance(
+        "units/tank_destroyer/body.png", (1.45, 1.45), "units/tank_destroyer/weapon.png"
+    ),
     EntityKind.TURRET: Appearance(
         "buildings/turret/body.png", (2, 2), "buildings/turret/weapon.png"
     ),

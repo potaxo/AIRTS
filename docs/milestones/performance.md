@@ -58,6 +58,12 @@ swap wait. Renderer correctness and resource lifetime belong to the linked integ
 
 Behavior and timing variants retain identical full workloads; only timing enforces wall-clock
 budgets. Software and GPU gates measure different costs and remain separate.
+Production-density stress fixtures explicitly use five-tick unit profiles to retain the same spawn
+counts and frame/tick windows independently of normal gameplay production balance. The dedicated
+production integration tests use the real per-kind profiles and verify their completion boundaries.
+The mixed production/arrival integration scenario explicitly enables developer income so
+opening income balance cannot reduce the required population. Selected AI budget/placement tests
+use a declared 25/s established-economy fixture; upgrade and opening-income coverage uses real profiles.
 
 | Executable contract | Workload and gate |
 | --- | --- |

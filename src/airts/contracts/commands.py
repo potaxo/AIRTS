@@ -137,6 +137,18 @@ class ReclaimBuildingCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class UpgradeEntityCommand:
+    entity_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
+class CancelUpgradeCommand:
+    entity_id: str
+    owner_id: str = "player"
+
+
+@dataclass(frozen=True, slots=True)
 class RemoveEntityCommand:
     """Authoritative system input for deterministic entity removal and replay."""
 
@@ -332,6 +344,8 @@ Command = (
     | AttackCommand
     | RepairBuildingCommand
     | ReclaimBuildingCommand
+    | UpgradeEntityCommand
+    | CancelUpgradeCommand
     | RemoveEntityCommand
     | CreatePatrolCommand
     | CreateDefendCommand
@@ -365,6 +379,14 @@ class CommandResult:
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, UpgradeEntityCommand | CancelUpgradeCommand):
+        return {
+            "type": "upgrade_entity"
+            if isinstance(command, UpgradeEntityCommand)
+            else "cancel_upgrade",
+            "entity_id": command.entity_id,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, SetDeveloperModeCommand):
         return {
             "type": "set_developer_mode",
@@ -627,6 +649,11 @@ def command_from_dict(raw_data: object) -> Command:
                 else _boolean(data["auto_repair"], "auto_repair")
             ),
         )
+    if command_type in {"upgrade_entity", "cancel_upgrade"}:
+        upgrade_class = (
+            UpgradeEntityCommand if command_type == "upgrade_entity" else CancelUpgradeCommand
+        )
+        return upgrade_class(_string(data.get("entity_id"), "entity_id"), owner_id)
     if command_type == "move":
         return MoveCommand(
             _entity_ids(data.get("entity_ids")),

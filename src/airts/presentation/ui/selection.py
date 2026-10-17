@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Protocol
 
@@ -75,7 +76,9 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             (x, y),
             theme.MUTED,
         )
-        draw_unit_details(view, screen, inspected.kind, x, y + 28)
+        y = draw_unit_details(view, screen, inspected.kind, x, y + 28)
+        if inspected.kind.upgrades:
+            draw_upgrade_controls(view, screen, (inspected,), x, y, read_only=True)
         view._type_buttons.clear()
         return
     kinds: dict[EntityKind, int] = {}
@@ -108,7 +111,16 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         )
         return
     if read_only:
-        draw_unit_details(view, screen, detail_kind, x, y + 12)
+        y = draw_unit_details(view, screen, detail_kind, x, y + 12)
+        if detail_kind.upgrades:
+            draw_upgrade_controls(
+                view,
+                screen,
+                tuple(e for e in selected if e.kind is detail_kind),
+                x,
+                y,
+                read_only=True,
+            )
         return
     y += 12
     profile = detail_kind.profile
@@ -212,13 +224,9 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         if view.production_detail_kind in detail_kind.production_kinds:
             y = draw_unit_details(view, screen, view.production_detail_kind, x, y + 12)
     elif profile.income_per_second:
-        income = profile.income_per_second
-        if (
-            detail_kind is EntityKind.RESOURCE_GENERATOR
-            and not view.simulation.game_map.match_slots
-        ):
-            income = 1000
-        view.ui.small_text(screen, f"Income {income}/s when complete", (x, y), theme.MUTED)
+        draw_upgrade_controls(
+            view, screen, tuple(entity for entity in selected if entity.kind is detail_kind), x, y
+        )
     elif detail_kind is EntityKind.REPAIR_HUB:
         view.ui.small_text(
             screen,
@@ -238,6 +246,80 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         )
 
 
+def draw_upgrade_controls(
+    view: SelectionView,
+    screen: pygame.Surface,
+    entities: tuple[Entity, ...],
+    x: int,
+    y: int,
+    *,
+    read_only: bool = False,
+) -> None:
+    """One row per selected tier/progress group, with independent building commands."""
+    groups: dict[tuple[int, bool, bool], list[Entity]] = {}
+    for entity in entities:
+        key = (entity.upgrade.tier, bool(entity.upgrade.remaining_ticks), entity.is_complete)
+        groups.setdefault(key, []).append(entity)
+    for (tier, upgrading, complete), members in sorted(groups.items()):
+        entity = members[0]
+        suffix = f" x{len(members)}" if len(members) > 1 else ""
+        view.ui.small_text(
+            screen,
+            f"T{tier}{suffix}"
+            + (
+                f" | {entity.profile.income_per_second * 2} each / 2s"
+                if entity.profile.income_per_second
+                else ""
+            )
+            + ("" if complete else " | Unfinished"),
+            (x, y),
+            theme.MUTED,
+        )
+        y += 24
+        definition = entity.next_upgrade
+        if not complete:
+            continue
+        if definition is None:
+            view.ui.small_text(screen, "Maximum tier", (x, y), theme.SUCCESS)
+            y += 28
+            continue
+        if upgrading:
+            remaining = max(item.upgrade.remaining_ticks for item in members)
+            view.ui.small_text(
+                screen,
+                f"To T{tier + 1}: up to {remaining / Simulation.TICKS_PER_SECOND:.1f}s",
+                (x, y),
+                theme.ACCENT,
+            )
+            y += 22
+            label = "Cancel upgrade (full refund)"
+            operation = "cancel_upgrade"
+            enabled = True
+            progress = 1 - remaining / definition.duration_ticks
+            bar = pygame.Rect(x, y, view.right_panel_rect.width - 32, 6)
+            pygame.draw.rect(screen, theme.MUTED, bar)
+            pygame.draw.rect(
+                screen, theme.SUCCESS, (bar.x, bar.y, round(bar.width * progress), bar.height)
+            )
+            y += 12
+        else:
+            total_cost = definition.cost * len(members)
+            label = f"Upgrade T{tier + 1}: {total_cost} | {definition.duration_ticks / Simulation.TICKS_PER_SECOND:g}s"
+            operation = "upgrade"
+            enabled = view.simulation.resources.get(entity.owner_id, 0) >= total_cost
+            if not enabled:
+                label += " (need resources)"
+        if read_only:
+            continue
+        rectangle = pygame.Rect(x, y, view.right_panel_rect.width - 32, 32)
+        view.ui.button(screen, rectangle, label, enabled=enabled)
+        if enabled:
+            view._command_buttons.append(
+                (rectangle, f"{operation}:" + json.dumps([item.entity_id for item in members]))
+            )
+        y += 40
+
+
 def draw_unit_details(
     view: SelectionView, screen: pygame.Surface, kind: EntityKind, x: int, y: int
 ) -> int:
@@ -250,14 +332,14 @@ def draw_unit_details(
         f"Speed {profile.movement_speed or 0} | Vision {profile.vision_range}",
     ]
     if profile.movable:
-        lines.insert(
-            1, f"Build time {Simulation.PRODUCTION_BUILD_TICKS * Simulation.TICK_SECONDS:g}s"
-        )
+        lines.insert(1, f"Build time {kind.profile.production_ticks * Simulation.TICK_SECONDS:g}s")
         lines.append(f"Mass {profile.mass:g} | Collision radius {profile.collision_radius:g}")
     if profile.attack_damage:
         lines.append(
             f"Fire interval {profile.attack_interval_ticks / Simulation.TICKS_PER_SECOND:g}s"
         )
+    if profile.splash_radius:
+        lines.append(f"Splash radius {profile.splash_radius:g}")
     if kind is EntityKind.BUILDER:
         lines.append(
             f"Build {profile.build_range:g} | Repair {profile.repair_range:g} | Work {profile.build_speed:g}/tick"

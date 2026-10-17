@@ -8,7 +8,7 @@ from enum import StrEnum
 from airts.contracts.spatial import Point
 from airts.world.map import Cell, footprint_cells
 from airts.world.units.catalog import EntityKind
-from airts.world.units.schema import EntityCategory
+from airts.world.units.schema import EntityCategory, EntityProfile, UpgradeDefinition
 
 
 class UnitState(StrEnum):
@@ -25,6 +25,14 @@ class UnitState(StrEnum):
     BUILDING = "building"
     ATTACKING = "attacking"
     RETREATING = "retreating"
+
+
+@dataclass(slots=True)
+class UpgradeState:
+    """Reusable per-entity upgrade progress; a running transition is already paid."""
+
+    tier: int = 1
+    remaining_ticks: int = 0
 
 
 @dataclass(slots=True)
@@ -62,6 +70,21 @@ class Entity:
     recovery_request_tick: int | None = None
     recovery_released: bool = False
     construction_progress: float | None = None
+    upgrade: UpgradeState = field(default_factory=UpgradeState)
+    income_ticks: int = 0
+
+    @property
+    def profile(self) -> EntityProfile:
+        return (
+            self.kind.profile
+            if self.upgrade.tier == 1
+            else self.kind.upgrades[self.upgrade.tier - 2].profile
+        )
+
+    @property
+    def next_upgrade(self) -> UpgradeDefinition | None:
+        index = self.upgrade.tier - 1
+        return self.kind.upgrades[index] if index < len(self.kind.upgrades) else None
 
     @property
     def is_complete(self) -> bool:
@@ -108,6 +131,11 @@ class Entity:
             "position": [self.position.x, self.position.y],
             "health": self.health,
             "construction_progress": self.construction_progress,
+            "upgrade": {
+                "tier": self.upgrade.tier,
+                "remaining_ticks": self.upgrade.remaining_ticks,
+            },
+            "income_ticks": self.income_ticks,
             "state": self.state.value,
             "move_target": (
                 None if self.move_target is None else [self.move_target.x, self.move_target.y]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
@@ -26,6 +27,7 @@ from airts.contracts.automations import (
 from airts.contracts.commands import (
     AttackCommand,
     CancelAutomationCommand,
+    CancelUpgradeCommand,
     CreateConstructionCommand,
     CreateDefendCommand,
     CreatePatrolCommand,
@@ -46,6 +48,7 @@ from airts.contracts.commands import (
     SetDeveloperModeCommand,
     SetSelectionCommand,
     StopCommand,
+    UpgradeEntityCommand,
 )
 from airts.contracts.spatial import (
     Point,
@@ -1557,6 +1560,25 @@ class AirtsApp:
                 self._clear_draft()
                 self.placement_kind = EntityKind(action.partition(":")[2])
                 self.notice = "Click a clear grid location to place the building."
+                return
+            if action.startswith(("upgrade:", "cancel_upgrade:")):
+                operation, _, ids = action.partition(":")
+                selected = {entity.entity_id for entity in self._selected_entities_for_draw()}
+                results = [
+                    self.simulation.execute(
+                        UpgradeEntityCommand(entity_id)
+                        if operation == "upgrade"
+                        else CancelUpgradeCommand(entity_id)
+                    )
+                    for entity_id in json.loads(ids)
+                    if entity_id in selected
+                ]
+                accepted = sum(result.accepted for result in results)
+                self.notice = f"{'Upgrade started' if operation == 'upgrade' else 'Upgrade canceled; refunded'}: {accepted}."
+                if any(not result.accepted for result in results):
+                    self.notice += " " + next(
+                        result.reason for result in results if not result.accepted
+                    )
                 return
             if action.startswith(("queue:", "reduce:", "loop:")):
                 factories = self._selected_producer_ids()

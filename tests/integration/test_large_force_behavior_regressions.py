@@ -374,6 +374,7 @@ def test_multiple_factories_share_one_collision_safe_defense_formation() -> None
     assert max(x_span, y_span) / min(x_span, y_span) <= 2.5
 
 
+@pytest.mark.usefixtures("dense_production")
 def test_continuous_factory_reinforcements_preserve_existing_defend_stations() -> None:
     """A newly produced unit must not turn the whole existing defense around."""
 
@@ -607,6 +608,7 @@ def test_large_force_passes_held_group_with_bounded_motion_and_anchor_recovery()
 
 
 @pytest.mark.parametrize("enemies", (False, True), ids=("peaceful", "mixed_army_under_fire"))
+@pytest.mark.usefixtures("dense_production")
 def test_growing_factory_army_keeps_crossing_and_accepts_a_new_move(enemies: bool) -> None:
     simulation, production_ids = growing_factory_simulation(enemies=enemies)
     simulation.advance(200)

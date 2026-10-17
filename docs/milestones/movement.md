@@ -91,8 +91,21 @@ These are current execution details, subject to the [engineering change policy](
   casualties immediately in projectile-ID order; references, affected defense stations and builder
   queue restarts are coordinated before the phase ends. Direct removal completes before returning.
   No partial removal batch enters a save. Dead attack-memory references are cleared as well.
-- A projectile retains its last destination after target removal, remains visible until arrival,
-  and cannot damage bystanders. Projectile and trace definitions belong to world entity owners.
+- Ordinary projectiles track their target, retain their last destination after target removal,
+  remain visible until arrival, and cannot damage bystanders. Scout, light/heavy tank and turret
+  projectile speeds are doubled from their original profiles; damage and cadence are unchanged.
+- Both light and heavy artillery shells lock the target's center at launch and never track or predict movement. Arrival
+  always explodes there, including after source/target removal or an empty impact. Within a three-cell
+  radius, hostile units and buildings take `ceil(40 * (1 - distance / 3))` damage, measured between
+  their current selection center and the impact. The boundary and beyond take zero; allies are spared.
+  Victims resolve in stable entity order using shared damage attribution and casualty cleanup.
+  Artillery travels at 10 cells/second, half the ordinary light tank shell's 20 cells/second;
+  Light artillery uses the same fixed-impact falloff with damage 20, radius 1.5, speed 14 and
+  a 1.6-second firing interval; its range is 9 and movement speed 3. Tank destroyers use ordinary
+  tracking, single-target shots: damage 45, range 9, speed 26 and a 2.5-second firing interval,
+  with 85 health and movement speed 3. They have no hidden armor bonus or splash damage.
+  Other ordinary weapon speeds still differ by kind. Projectile and trace definitions belong to world
+  entity owners. [Appearance](../architecture/appearance.md#shared-style) owns visual feedback.
 
 ## Contact, yielding and Hold anchors
 
@@ -225,10 +238,12 @@ cancels it, and queued construction waits. Repairs cost no resources.
 Armed completed buildings use the shared projectile combat pass but never pursue or move. Unfinished
 turrets cannot fire. Weapon cadence is an immutable profile interval in fixed ticks (existing units
 retain one second); artillery has longer range, slower travel and a 2.5-second firing interval.
-It uses the existing single-target projectile rules.
+Its fixed-impact splash rules are defined above.
 
 ## Verification owners
 
+- [Combat](../../tests/integration/test_economy_combat.py) and [artillery](../../tests/integration/test_artillery_combat.py): ordinary projectile speed, fixed impacts, splash falloff, source/target removal, casualties and save/replay continuation.
+- [Artillery presentation](../../tests/integration/test_artillery_presentation.py): matching software/GPU shell arcs, size, blast radius, animation and expiry without domain mutation.
 - [Movement](../../tests/integration/test_movement.py), [large-force behavior](../../tests/integration/test_large_force_behavior_regressions.py), and [overlap recovery](../../tests/integration/test_overlap_recovery.py): orders, speed, clearance, identity, extraction and progress.
 - [Hold/defense return](../../tests/integration/test_hold_recovery_capacity.py) and [continuation](../../tests/integration/test_hold_recovery_continuation.py): interrupted pressure, independent regions, original anchors, every-tick safety and settling.
 - [Projection geometry](../../tests/unit/test_collision_recovery.py): singular rows, coupled rays and total displacement caps.

@@ -10,8 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v24"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v18"
+REPLAY_SCHEMA = "airts-replay-v27"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v24"
 
 
 class ReplayError(ValueError):

@@ -40,7 +40,7 @@ from airts.contracts.spatial import (
 from airts.navigation.collision.geometry import collision_radius
 from airts.simulation import Simulation
 from airts.systems.movement import CONTACT_WAIT_TICKS
-from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState
+from airts.world.entities import Entity, Projectile, ProjectileTrace, UnitState, UpgradeState
 from airts.world.map import (
     GameMap,
     MapValidationError,
@@ -53,8 +53,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v18"
-MATCH_SAVE_SCHEMA = "airts-match-save-v11"
+SAVE_SCHEMA = "airts-save-v21"
+MATCH_SAVE_SCHEMA = "airts-match-save-v14"
 
 
 class PersistenceError(ValueError):
@@ -491,6 +491,24 @@ def _load_entities(
             or state is not UnitState.IDLE
         ):
             raise PersistenceError("invalid unfinished building state")
+        upgrade_data = _mapping(entity.get("upgrade"), "entity.upgrade")
+        tier = _integer(upgrade_data.get("tier"), "entity.upgrade.tier", minimum=1)
+        remaining = _integer(
+            upgrade_data.get("remaining_ticks"), "entity.upgrade.remaining_ticks", minimum=0
+        )
+        if tier > 1 + len(kind.upgrades):
+            raise PersistenceError("entity.upgrade.tier exceeds the configured tiers")
+        next_upgrade = kind.upgrades[tier - 1] if tier <= len(kind.upgrades) else None
+        if remaining and (next_upgrade is None or remaining > next_upgrade.duration_ticks):
+            raise PersistenceError("entity.upgrade.remaining_ticks has no valid paid transition")
+        income_ticks = _integer(entity.get("income_ticks"), "entity.income_ticks", minimum=0)
+        profile = kind.profile if tier == 1 else kind.upgrades[tier - 2].profile
+        if income_ticks >= Simulation.INCOME_INTERVAL_TICKS or (
+            income_ticks and not profile.income_per_second
+        ):
+            raise PersistenceError("entity.income_ticks is inconsistent with its income cycle")
+        if construction_progress is not None and (tier != 1 or remaining or income_ticks):
+            raise PersistenceError("unfinished entity cannot have upgrade or income progress")
         if "recovery_request_tick" not in entity or "recovery_released" not in entity:
             raise PersistenceError("entity recovery request fields are required in v11")
         request_raw = entity["recovery_request_tick"]
@@ -730,6 +748,8 @@ def _load_entities(
             recovery_request_tick=recovery_request_tick,
             recovery_released=recovery_released,
             construction_progress=construction_progress,
+            upgrade=UpgradeState(tier=tier, remaining_ticks=remaining),
+            income_ticks=income_ticks,
         )
     for loaded_entity in entities.values():
         if loaded_entity.reclaim_target_id is not None:
@@ -1149,16 +1169,25 @@ def _load_automation_parameters(
         )
         if sequence and sequence_index >= len(sequence) and produced_count < target_count:
             raise PersistenceError("production sequence index is out of range")
+        if sequence and sequence_index > len(sequence):
+            raise PersistenceError("production sequence index is out of range")
+        timing_kind = sequence[min(sequence_index, len(sequence) - 1)][0] if sequence else unit_kind
+        build_ticks = _integer(data.get("build_ticks"), "production.build_ticks", minimum=1)
+        if build_ticks != timing_kind.profile.production_ticks:
+            raise PersistenceError("production build_ticks differs from its unit profile")
+        progress_ticks = _integer(
+            data.get("progress_ticks"), "production.progress_ticks", minimum=0
+        )
+        if progress_ticks > build_ticks:
+            raise PersistenceError("production progress exceeds its build time")
         return ProductionParameters(
             factory_id=factory_id,
             unit_kind=unit_kind,
             target_count=target_count,
-            build_ticks=_integer(data.get("build_ticks"), "production.build_ticks", minimum=1),
+            build_ticks=build_ticks,
             rally_point=None if rally_data is None else _point(rally_data, "rally_point"),
             produced_count=produced_count,
-            progress_ticks=_integer(
-                data.get("progress_ticks"), "production.progress_ticks", minimum=0
-            ),
+            progress_ticks=progress_ticks,
             produced_entity_ids=_string_list(
                 data.get("produced_entity_ids"), "production.produced_entity_ids"
             ),

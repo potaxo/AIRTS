@@ -6,6 +6,7 @@ from statistics import median
 from time import perf_counter
 
 import pygame
+import pytest
 from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 
 from airts.contracts.automations import AutomationStatus, DefendParameters, patrol_parameters
@@ -96,6 +97,7 @@ def _crowd_simulation(
     return simulation, entity_ids
 
 
+@pytest.mark.usefixtures("dense_production")
 def test_four_continuous_factories_defend_without_stutter_or_deep_overlap(
     check_timing: bool,
 ) -> None:

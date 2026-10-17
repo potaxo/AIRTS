@@ -372,7 +372,7 @@ def test_factory_produces_artillery_and_turret_is_stationary_armed_only_when_com
     gun = simulation.entities["gun"]
     gun.construction_progress = 0.5
     assert simulation.execute(CreateProductionCommand("factory", EntityKind.ARTILLERY, 1)).accepted
-    simulation.advance(20)
+    simulation.advance(EntityKind.ARTILLERY.profile.production_ticks)
     assert not any(
         e.subject_id == "gun" and e.event_type.value == "projectile_launched"
         for e in simulation.events.events

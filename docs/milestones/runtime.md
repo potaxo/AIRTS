@@ -62,18 +62,50 @@ In the default skirmish, resource generators are replaced by resource extractors
 Maps with `resource_sites` restrict extractor placement to an exact site's grid origin through
 the shared construction validator. One real building, including unfinished construction, occupies a site; a
 destroyed extractor frees it for either side. Income is unlimited and equal across sites.
-The original example and custom maps without sites retain sandbox placement and income behavior.
+The original example and custom maps without sites retain unrestricted sandbox placement.
 [skirmish.py](../../src/airts/world/skirmish.py) owns the new fixed map geometry.
 
-Each owner has an integer resource balance. Generators add periodic income even without an
-automation; [economy.py](../../src/airts/systems/economy.py) owns the interval and sandbox extractor
-override, while [units/catalog.py](../../src/airts/world/units/catalog.py) owns profile income and prices.
+Each owner has one integer resource balance. Completed income buildings produce every two seconds
+even without an automation. Each building retains its own partial cycle; construction must finish
+before that cycle starts. [economy.py](../../src/airts/systems/economy.py) owns income execution;
+[units/buildings.py](../../src/airts/world/units/buildings.py) owns profile income and upgrade prices.
+Sandbox and match maps use the same production amounts, without a sandbox income override.
 Matter Synthesizers can be built on ordinary valid terrain without a resource site. Their high
-price and low output make them a supplementary economy when sites are exhausted: six times the
-extractor price for one fifth of its match income, with a four-minute payback after completion.
+construction price and lower output make them a supplementary economy when sites are exhausted.
 Only completed income buildings earn resources. There is no resource-production action or economy hotkey
 in the UI. The historical economy command remains a balance-target tracker for existing callers
 and supported saves; it does not enable or accelerate income.
+### Entity upgrades
+
+Extractors and Matter Synthesizers start at T1 and upgrade sequentially to T3. Other kinds have
+no upgrades configured. Costs use the existing single resource; no second currency is introduced.
+
+| Kind | T1 output / 2s | T2 output / 2s | T1 -> T2 cost / time | T3 output / 2s | T2 -> T3 cost / time |
+| --- | --- | --- | --- | --- | --- |
+| Extractor | 4 | 8 | 120 / 30s | 16 | 360 / 60s |
+| Matter Synthesizer | 2 | 4 | 200 / 45s | 8 | 600 / 90s |
+
+`UpgradeEntityCommand` validates ownership, completion, capability, available resources and idle
+upgrade state before charging once. One upgrade can run per entity. Ordinary production continues
+at the current tier; completion switches the absolute target profile before that tick's income
+settlement without resetting the production cycle. `CancelUpgradeCommand` returns the full paid
+cost once and discards progress. Destruction/reclamation removes progress without an upgrade refund.
+Stop and ordinary assignments do not cancel upgrades. Paused games advance neither timer.
+
+The reusable `UpgradeState` belongs to each entity; immutable `UpgradeDefinition` transitions and
+catalog bindings supply costs, durations and target profiles. The shared
+[upgrades.py](../../src/airts/systems/upgrades.py) executes timing and transactions without kind-specific
+branches. `Entity.profile` resolves the current tier. Current transitions change only income;
+future stat upgrades must route the affected subsystem through the effective profile. Physical
+footprint/collision changes are outside this implementation.
+Saves retain tier, paid remaining time and partial income cycles; loading neither charges nor pays
+again. [Persistence](persistence.md) owns format rejection and replay diagnostic support.
+The selection panel shows tier, output, next cost/duration, remaining time and a progress bar.
+Same-type selections group by tier and running/unfinished state; each button applies to its group.
+Insufficient aggregate resources disable that group's upgrade action. Enemy inspection is read-only.
+
+### Developer income and unit production
+
 Developer mode is a player-only setting submitted through `SetDeveloperModeCommand`, defaulting
 to off for new simulations. Economy credits an additional 2,000 resources after each ten enabled
 ticks (one game second), independently of building income. A changed toggle resets the partial
@@ -82,10 +114,15 @@ Resource events identify the bonus as `DEVELOPER_MODE_INCOME`.
 Configuration and seed govern reproducible enemy spawning. Direct `Simulation` construction
 disables ambient spawning by default; [README](../../README.md#run) owns CLI defaults and controls.
 
-Factories produce scouts, light/heavy tanks, artillery, and builders; completed command centers produce
+Factories produce scouts, light/heavy tanks, light/heavy artillery, tank destroyers, and builders; completed command centers produce
 only builders through the same paid production path. The existing `factory_id` field identifies
-either production source, preserving command and parameter tags;
-[simulation.py](../../src/airts/simulation.py) owns default build timing and construction progress.
+either production source, preserving command and parameter tags. Immutable
+[unit profiles](../../src/airts/world/units/catalog.py) own per-unit production ticks: scouts take
+2 seconds, builders 2.5, light tanks 4, light artillery 5.5, tank destroyers 6, heavy tanks 6.5
+and heavy artillery 8.5 at the fixed 10 Hz tick.
+Player and AI sources share these timings. Each mixed-batch item uses its own kind's time,
+including after reducing the current item; pause/preemption preserves paid progress.
+[simulation.py](../../src/airts/simulation.py) owns construction progress constants.
 Finite requests run FIFO; finite work preempts the continuous loop, which resumes afterward.
 `ReduceProductionCommand` removes one unfinished unit of the requested kind from the newest
 matching finite request, including saved batch sequences. It preserves other items and their

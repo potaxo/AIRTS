@@ -88,8 +88,8 @@ def test_extractors_produce_without_an_economy_button_or_hotkey() -> None:
     app._handle_key(pygame.K_g)
     assert not app.simulation.automations
     before = app.simulation.resources["player"]
-    app.simulation.advance(10)
-    assert app.simulation.resources["player"] == before + 2000
+    app.simulation.advance(20)
+    assert app.simulation.resources["player"] == before + 8
 
 
 def test_automation_panel_backfills_rows_after_canceling_at_bottom() -> None:
@@ -225,6 +225,11 @@ def test_compact_production_rows_inspect_cost_without_starting_production(
             app._draw_interface(surface)
         assert any(
             f"Cost {inspected_kind.profile.production_cost}" in call.args[1]
+            for call in text.call_args_list
+        )
+        assert any(
+            call.args[1]
+            == f"Build time {inspected_kind.profile.production_ticks * Simulation.TICK_SECONDS:g}s"
             for call in text.call_args_list
         )
         plus = next(
@@ -478,7 +483,7 @@ def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -
         app._draw_opengl_overlay(surface)
         uploaded = surface.copy()
         previous = app._opengl_overlay_key()
-        app.simulation.advance(Simulation.PRODUCTION_BUILD_TICKS)
+        app.simulation.advance(EntityKind.SCOUT.profile.production_ticks)
         regions = app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key())
         assert regions is not None
         app._draw_opengl_partial_overlay(surface, regions)

@@ -1,6 +1,8 @@
 """Static building definitions sharing the entity profile schema."""
 
-from airts.world.units.schema import EntityCategory, EntityProfile
+from dataclasses import replace
+
+from airts.world.units.schema import EntityCategory, EntityProfile, UpgradeDefinition
 
 FACTORY = EntityProfile(
     category=EntityCategory.BUILDING,
@@ -37,7 +39,7 @@ RESOURCE_GENERATOR = EntityProfile(
     footprint=(2, 2),
     collision_radius=0.5,
     construction_cost=200,
-    income_per_second=25,
+    income_per_second=2,
 )
 
 MATTER_SYNTHESIZER = EntityProfile(
@@ -47,5 +49,23 @@ MATTER_SYNTHESIZER = EntityProfile(
     footprint=(3, 3),
     collision_radius=0.5,
     construction_cost=1200,
-    income_per_second=5,
+    income_per_second=1,
+)
+
+RESOURCE_GENERATOR_UPGRADES = (
+    UpgradeDefinition(
+        cost=120, duration_ticks=300, profile=replace(RESOURCE_GENERATOR, income_per_second=4)
+    ),
+    UpgradeDefinition(
+        cost=360, duration_ticks=600, profile=replace(RESOURCE_GENERATOR, income_per_second=8)
+    ),
+)
+
+MATTER_SYNTHESIZER_UPGRADES = (
+    UpgradeDefinition(
+        cost=200, duration_ticks=450, profile=replace(MATTER_SYNTHESIZER, income_per_second=2)
+    ),
+    UpgradeDefinition(
+        cost=600, duration_ticks=900, profile=replace(MATTER_SYNTHESIZER, income_per_second=4)
+    ),
 )

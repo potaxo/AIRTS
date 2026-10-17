@@ -26,6 +26,12 @@ from airts.presentation.palette import (
     Color,
     match_color,
 )
+from airts.presentation.projectile_effects import (
+    SHELL_CORE_RADIUS,
+    SHELL_RIM_RADIUS,
+    blast_circles,
+    shell_visual_position,
+)
 from airts.presentation.visuals.assets import SpriteCache
 from airts.presentation.visuals.catalog import APPEARANCES, COMPOSITE_PATHS
 from airts.presentation.visuals.facing import FacingHistory
@@ -489,11 +495,29 @@ class SoftwareRenderer:
     def draw_projectiles(self, view: SceneView, screen: pygame.Surface) -> None:
         colors = PROJECTILE_COLORS
         for trace in view.simulation.projectile_traces:
+            if trace.weapon_kind.profile.splash_radius > 0:
+                for point, radius, color, width in blast_circles(
+                    trace, view.simulation.tick, view.simulation.TICKS_PER_SECOND
+                ):
+                    pygame.draw.circle(
+                        screen,
+                        color,
+                        view.screen_point(point),
+                        max(1, round(radius * view.tile_size)),
+                        width,
+                    )
+                continue
             points = [view.screen_point(point) for point in trace.points]
             if len(points) > 1:
                 pygame.draw.lines(screen, colors[trace.weapon_kind], False, points, 1)
         for projectile in view.simulation.projectiles.values():
             color = colors[projectile.weapon_kind]
+            if projectile.weapon_kind.profile.splash_radius > 0:
+                pygame.draw.circle(screen, (45, 39, 32), view.screen_point(projectile.position), 3)
+                center = view.screen_point(shell_visual_position(projectile, projectile.position))
+                pygame.draw.circle(screen, (255, 226, 150), center, SHELL_RIM_RADIUS)
+                pygame.draw.circle(screen, color, center, SHELL_CORE_RADIUS)
+                continue
             points = [view.screen_point(point) for point in projectile.trajectory]
             if len(points) > 1:
                 pygame.draw.lines(screen, color, False, points, 1)

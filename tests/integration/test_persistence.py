@@ -599,6 +599,29 @@ def test_modified_automation_round_trips_without_a_new_lifecycle_transition(
     assert replayed.export_state() == simulation.export_state()
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "diagnostic"),
+    [
+        ("build_ticks", 5, "build_ticks differs from its unit profile"),
+        ("progress_ticks", 21, "progress exceeds its build time"),
+    ],
+)
+def test_load_rejects_inconsistent_production_timing(
+    field: str,
+    value: int,
+    diagnostic: str,
+) -> None:
+    simulation = builder_factory_simulation()
+    result = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    simulation.advance(3)
+    state = simulation.export_state()
+    state["automations"][result.automation_id]["parameters"][field] = value
+    with pytest.raises(PersistenceError, match=diagnostic):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
+        )
+
+
 def test_load_rejects_modified_tick_before_the_last_transition(
     make_map: Callable[[int], GameMap],
 ) -> None:
@@ -731,7 +754,10 @@ def test_construction_and_batch_progress_round_trip(tmp_path: Path) -> None:
     _assert_continues_identically(
         simulation,
         restored,
-        max(Simulation.CONSTRUCTION_BUILD_TICKS, Simulation.PRODUCTION_BUILD_TICKS * 2),
+        max(
+            Simulation.CONSTRUCTION_BUILD_TICKS,
+            EntityKind.SCOUT.profile.production_ticks + EntityKind.BUILDER.profile.production_ticks,
+        ),
     )
 
     assert (
@@ -897,7 +923,11 @@ def test_factory_production_queue_round_trip_continues_fifo(tmp_path: Path) -> N
     assert restored.export_state() == simulation.export_state()
     assert restored.automations[second.automation_id or ""].reason_code == "FACTORY_QUEUED"
 
-    _assert_continues_identically(simulation, restored, 30)
+    _assert_continues_identically(
+        simulation,
+        restored,
+        EntityKind.SCOUT.profile.production_ticks + EntityKind.LIGHT_TANK.profile.production_ticks,
+    )
     assert simulation.automations[first.automation_id or ""].status.value == "completed"
     assert simulation.automations[second.automation_id or ""].status.value == "completed"
 
@@ -939,7 +969,7 @@ def test_continuous_production_compact_defense_link_round_trips(
             defend_target=rectangle_region(Point(32, 38), Point(43, 48)),
         )
     )
-    simulation.advance(11)
+    simulation.advance(EntityKind.LIGHT_TANK.profile.production_ticks * 2 + 1)
     destination = tmp_path / "continuous-defense.json"
 
     save_simulation(simulation, destination)
@@ -1032,6 +1062,7 @@ def _assert_continues_identically(original: Simulation, restored: Simulation, ti
 
 
 @pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
+@pytest.mark.usefixtures("dense_production")
 def test_growing_army_save_preserves_shared_cells_and_movement_continuation(
     gathering: bool,
 ) -> None:

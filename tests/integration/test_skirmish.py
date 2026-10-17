@@ -267,7 +267,12 @@ def test_ai_replaces_builder_even_when_factory_has_continuous_army_loop() -> Non
     assert simulation.continuous_production("enemy_factory") is not None
     simulation.remove_entity("enemy_builder")
     simulation.remove_entity("enemy_command_01")
-    simulation.advance(25)
+    # Allow the existing finite scout order, the AI decision interval and the replacement.
+    simulation.advance(
+        EntityKind.SCOUT.profile.production_ticks
+        + EntityKind.BUILDER.profile.production_ticks
+        + Simulation.TICKS_PER_SECOND
+    )
     assert any(
         entity.owner_id == "ai_b" and entity.kind is EntityKind.BUILDER
         for entity in simulation.entities.values()
@@ -395,7 +400,7 @@ def test_command_center_production_survives_current_save() -> None:
     assert restored.match_result is None
     assert restored.opponents == simulation.opponents
     assert restored.execute(CreateProductionCommand("command_01", EntityKind.BUILDER, 1)).accepted
-    restored.advance(Simulation.PRODUCTION_BUILD_TICKS)
+    restored.advance(EntityKind.BUILDER.profile.production_ticks)
     assert any(
         entity.kind is EntityKind.BUILDER and entity.owner_id == "player"
         for entity in restored.entities.values()

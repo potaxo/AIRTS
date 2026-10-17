@@ -333,6 +333,7 @@ def _join_nearby_combat(
 def drive_projectiles(simulation: Simulation) -> None:
     """Advance live projectiles and retain bounded visual traces."""
 
+    splash_index: SpatialIndex | None = None
     with simulation._batch_entity_removals():
         simulation.projectile_traces = [
             trace for trace in simulation.projectile_traces if trace.expires_tick > simulation.tick
@@ -342,7 +343,12 @@ def drive_projectiles(simulation: Simulation) -> None:
             if projectile is None:
                 continue
             target = simulation.entities.get(projectile.target_entity_id)
-            if target is not None and simulation.are_hostile(target.owner_id, projectile.owner_id):
+            splash_radius = projectile.weapon_kind.profile.splash_radius
+            if (
+                splash_radius == 0
+                and target is not None
+                and simulation.are_hostile(target.owner_id, projectile.owner_id)
+            ):
                 projectile.destination = target.selection_position
             destination = projectile.destination
             distance = projectile.position.distance_to(destination)
@@ -350,7 +356,16 @@ def drive_projectiles(simulation: Simulation) -> None:
             if distance <= maximum_step or isclose(distance, maximum_step):
                 projectile.position = destination
                 projectile.trajectory.append(destination)
-                if target is None or not simulation.are_hostile(
+                if splash_radius > 0:
+                    if splash_index is None:
+                        splash_index = SpatialIndex(
+                            {
+                                key: entity.selection_position
+                                for key, entity in simulation.entities.items()
+                            }
+                        )
+                    impact_shell(simulation, projectile, splash_index)
+                elif target is None or not simulation.are_hostile(
                     target.owner_id, projectile.owner_id
                 ):
                     finish_projectile(simulation, projectile)
@@ -368,9 +383,6 @@ def drive_projectiles(simulation: Simulation) -> None:
 def impact_projectile(simulation: Simulation, projectile: Projectile, target: Entity) -> None:
     """Apply one authoritative impact and remove a destroyed target."""
 
-    target.health = max(0, target.health - projectile.damage)
-    target.last_attacker_id = projectile.source_entity_id
-    target.last_attacked_tick = simulation.tick
     simulation.events.record(
         simulation.tick,
         EventType.PROJECTILE_IMPACT,
@@ -378,19 +390,56 @@ def impact_projectile(simulation: Simulation, projectile: Projectile, target: En
         source_id=projectile.source_entity_id,
         target_id=target.entity_id,
         damage=projectile.damage,
-        target_health=target.health,
+        target_health=max(0, target.health - projectile.damage),
         position=[projectile.position.x, projectile.position.y],
     )
+    damage_projectile_target(simulation, projectile, target, projectile.damage)
+    finish_projectile(simulation, projectile)
+
+
+def impact_shell(simulation: Simulation, projectile: Projectile, index: SpatialIndex) -> None:
+    """Explode at the launch-time destination, even if the original target is gone."""
+
+    radius = projectile.weapon_kind.profile.splash_radius
+    simulation.events.record(
+        simulation.tick,
+        EventType.PROJECTILE_IMPACT,
+        projectile.projectile_id,
+        source_id=projectile.source_entity_id,
+        damage=projectile.damage,
+        splash_radius=radius,
+        position=[projectile.position.x, projectile.position.y],
+    )
+    for entity_id in index.nearby(projectile.destination, radius):
+        target = simulation.entities.get(entity_id)
+        if target is None or not simulation.are_hostile(target.owner_id, projectile.owner_id):
+            continue
+        distance = target.selection_position.distance_to(projectile.destination)
+        if distance >= radius:
+            continue
+        damage = ceil(projectile.damage * (1 - distance / radius))
+        damage_projectile_target(simulation, projectile, target, damage)
+    finish_projectile(simulation, projectile)
+
+
+def damage_projectile_target(
+    simulation: Simulation, projectile: Projectile, target: Entity, damage: int
+) -> None:
+    """Share damage attribution, casualty removal and control cleanup for every victim."""
+
+    target.health = max(0, target.health - damage)
+    source_alive = projectile.source_entity_id in simulation.entities
+    target.last_attacker_id = projectile.source_entity_id if source_alive else None
+    target.last_attacked_tick = simulation.tick if source_alive else None
     simulation.events.record(
         simulation.tick,
         EventType.COMBAT_ATTACK,
         projectile.source_entity_id,
         projectile_id=projectile.projectile_id,
         target_id=target.entity_id,
-        damage=projectile.damage,
+        damage=damage,
         target_health=target.health,
     )
-    finish_projectile(simulation, projectile)
     if target.health == 0:
         simulation.events.record(
             simulation.tick,
