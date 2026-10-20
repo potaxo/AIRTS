@@ -292,10 +292,15 @@ def test_automation_categories_keep_controls_on_one_line_and_show_details_on_dem
             assert flyout.left > app.left_panel_rect.right
             with patch.object(app.ui, "text", wraps=app.ui.text) as text:
                 selection.draw_selection(app, surface)
-            assert text.call_args_list[0].args[1:3] == (
-                "Selection",
-                (app.right_panel_rect.x + 16, 16),
-            )
+            titles = [call for call in text.call_args_list if call.args[1] == "Selection"]
+            assert len(titles) == 1
+            assert app.ui.font is not None
+            title = pygame.Rect(titles[0].args[2], app.ui.font.size("Selection"))
+            assert app.right_panel_rect.contains(app.selection_panel_rect)
+            assert app.selection_panel_rect.top > app.minimap.panel.bottom
+            assert app.selection_panel_rect.contains(title)
+            assert not title.colliderect(app.minimap.panel)
+            assert title.bottom <= selection.content_rect(app).top
             command_count = simulation.command_count
             app._handle_mouse_down(3, flyout.center)
             app._handle_mouse_down(1, flyout.center)
@@ -473,8 +478,12 @@ def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup(spee
     assert app.simulation.developer_income_ticks == ticks[2] % 10
 
 
-def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -> None:
+@pytest.mark.parametrize("size", [(1280, 720), AirtsApp.WINDOW_SIZE, (3840, 2160)])
+def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection(
+    size: tuple[int, int],
+) -> None:
     app = AirtsApp(builder_factory_simulation())
+    app.resize_layout(size)
     app.selected_entities = {"factory"}
     app._selection_changed()
     assert app.simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1)).accepted
@@ -489,6 +498,8 @@ def test_partial_overlay_erases_completed_rows_and_refreshes_right_selection() -
         app.simulation.advance(EntityKind.SCOUT.profile.production_ticks)
         regions = app._opengl_partial_overlay_regions(previous, app._opengl_overlay_key())
         assert regions is not None
+        context = next(region for region in regions if region.colliderect(app.selection_panel_rect))
+        assert context.height < app.selection_panel_rect.height
         app._draw_opengl_partial_overlay(surface, regions)
         for region in regions:
             uploaded.blit(surface, region, region)

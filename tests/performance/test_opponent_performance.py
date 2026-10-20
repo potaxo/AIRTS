@@ -7,23 +7,25 @@ from math import ceil
 from time import perf_counter
 
 import pytest
-from tests.integration.opponent_scenarios import opponent_scenario
+from tests.integration.opponent_scenarios import established_empire, opponent_scenario
 
 from airts.simulation import Simulation
+from airts.systems import economy
 from airts.systems.opponent_ai import MAX_ORDERS, MAX_SQUAD_SIZE, MAX_TARGET_CANDIDATES
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize(
-    "funds,size,builders",
-    [(1000, 80, 1), (100000, 320, 32)],
-    ids=["opening-budget", "surplus-budget"],
+    "funds,size,builders,developed",
+    [(1000, 80, 1, False), (100000, 320, 32, False), (100000, 320, 32, True)],
+    ids=["opening-budget", "surplus-budget", "developed-budget"],
 )
 def test_thousand_unit_opponent_workload(
     funds: int,
     size: int,
     builders: int,
+    developed: bool,
     check_timing: bool,
     record_property: Callable[[str, object], None],
 ) -> None:
@@ -49,7 +51,24 @@ def test_thousand_unit_opponent_workload(
             {"id": f"worker_{i}", "kind": "builder", "owner": "ai", "position": [90.5 + i, 90.5]}
             for i in range(builders - 1)
         )
+        if developed:
+            data["entities"].extend(
+                {
+                    "id": unit.entity_id,
+                    "kind": unit.kind.value,
+                    "owner": unit.owner_id,
+                    "position": [unit.position.x, unit.position.y],
+                }
+                for unit in established_empire().entities.values()
+                if unit.owner_id == "ai" and not unit.is_movable
+            )
+            data["resource_sites"].append([244, 212])
         simulation = Simulation(load_map_data(data))
+        if developed:
+            for unit in simulation.entities.values():
+                if unit.owner_id == "ai" and unit.kind.upgrades:
+                    unit.upgrade.tier = 3
+            economy.rebuild_income(simulation)
     simulation.resources["ai"] = funds
     samples: list[float] = []
     decisions = 0
@@ -78,6 +97,7 @@ def test_thousand_unit_opponent_workload(
     record_property("opening_funds", funds)
     record_property("map_size", size)
     record_property("builders", builders)
+    record_property("developed", developed)
     record_property("opponent_decisions", decisions)
     record_property("opponent_commands", commands)
     if check_timing:

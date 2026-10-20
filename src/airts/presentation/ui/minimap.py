@@ -59,7 +59,7 @@ class Minimap:
         self.map_rect = pygame.Rect(
             0, 0, max(1, round(game_map.width * fit)), max(1, round(game_map.height * fit))
         )
-        self.map_rect.topright = (viewport.right - 13, viewport.top + 13)
+        self.map_rect.midtop = (viewport.centerx, viewport.top + 13)
         self.panel = self.map_rect.inflate(2, 2)
 
     def world_point(self, position: tuple[int, int], game_map: GameMap) -> Point:

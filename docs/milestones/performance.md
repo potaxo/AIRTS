@@ -42,6 +42,8 @@ whole canvas. Status refreshes in three-tick buckets; explicit interaction remai
 The minimap caches one terrain texel per cell and its scaled overview; contacts refresh with the
 status bucket or explicit commands/selection. Camera changes update only its small overlay rectangle,
 reusing terrain and contact surfaces and all world GPU buffers. Map replacement releases its sources.
+Sidebar status updates upload the populated selection area rather than its empty lower portion;
+selection replacement, scrolling and changing upgrade groups refresh the full selection viewport.
 
 Artillery prediction reads original positions by binary search of the existing sorted movement
 workspace rows, allocating no per-army velocity/index table. It solves one scalar intercept per actual
@@ -80,7 +82,7 @@ use a declared 25/s established-economy fixture; upgrade and opening-income cove
 | [4K OpenGL](../../tests/performance/test_opengl_thousand_scout_100fps.py) | Same scout fixture; CPU submission plus hardware end-to-end 100-frame/ten-tick gates; real collision, >=750 moving scouts, pixel readback, per-frame GPU completion, >=100 Real FPS |
 | [Sustained battle](../../tests/performance/test_sustained_complex_battle_performance.py) | 500 vs 500, each 70/20/10 scout/light/heavy, 80 x 60 mixed terrain; friendly line defense plus enemy move; 30 ticks/300 native-4K hardware frames, ten interpolation samples/tick, six inspection changes; real projectiles, damage, collision, pixel readback, >=80 Real FPS required, 100 Real FPS optimization goal |
 | [Continuous production](../../tests/performance/test_crowd_congestion_performance.py) | 296 defenders + four factories ->304 defenders; 100 software frames at 1920 x 1080/ten ticks; stable unique stations, separation >=90% contact distance, no building intrusion, >=100 Real FPS |
-| [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 60 ticks; original 80 x 80 opening-budget case plus a 320 x 320, 32-builder, 100,000-resource surplus case; unique bounded squads and per-decision command/candidate/forecast limits; timing requires complete tick p95 <100 ms and reports AI decisions/commands, starting funds, map size and builders |
+| [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 60 ticks; original 80 x 80 opening-budget case, a 320 x 320, 32-builder, 100,000-resource surplus case, and the same large-map army/budget with 50 extra factories, 40 synthesizers, 36 turrets, seven repair hubs, a command center and extractor; unique bounded squads and per-decision command/candidate/forecast limits; timing requires complete tick p95 <100 ms and reports AI decisions/commands, starting funds, map size, builders and developed holdings |
 
 The native-4K large-map camera case in the OpenGL test above retains all 320 x 320 terrain colors,
 checks cell-center readback at three zoom levels, and requires 100 synchronized frames at >=100

@@ -37,15 +37,21 @@ following the army, rather than being appended to a distant marching cohort.
 New arrivals join only nearby gathering/retreating cohorts, so geographically separate factories
 do not share one scattered assembly queue. With no active wave, the largest cohort supplies the
 next leader rather than allowing a small distant group to hold all larger forces behind it.
-Marching cohorts share the target and regroup when stretched out. A depleted offensive force of fewer than twelve
+Marching cohorts share the target and regroup when stretched out. Common orders combine up to four
+nearby cohorts per command; this dispatch chunk is not a total army-size limit. Mission opportunities
+and least-recently-ordered cohorts prevent changing front orders from permanently starving rear
+reinforcements. A depleted offensive force of fewer than twelve
 regroups; forces unable to rebuild, or clearing enemies unable to develop, can finish with survivors.
 
 Army contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
-engage together or regroup near a friendly production anchor. Estimates include only physically
-nearby support, capped at 96 units, not distant queued reinforcements. Small home garrisons handle
+engage together or regroup near a friendly production anchor. Estimates include physically
+nearby field cohorts without a fixed 96-unit prefix, not distant queued reinforcements. Small home garrisons handle
 weak raids independently. Otherwise threats to owned infrastructure recall the nearest required
 cohorts; a negative individual combat forecast never vetoes base rescue. Recent attacks on
 production and income buildings take priority over proximity alone.
+Garrisons count as sufficient cover only when they are also near the raid. The nearest required
+defenders respond while unneeded field cohorts continue their offensive objective; a persistent
+minor border raid does not suspend the entire army. An overwhelming attack can still require all cohorts.
 Defenders first assemble around the threatened asset and nearby turret cover; they engage when
 the enemy reaches that coverage, threatens firing range, or owned units/assets are already hit.
 They do not chase a merely approaching force away from their own supporting defenses. Turret
@@ -72,8 +78,10 @@ freeze all army production or enqueue unaffordable buildings. Recovering lost pr
 and emergency defense can use the shared balance. Manual production pauses remain untouched;
 AI budget pauses on existing continuous loops remain tracked until actual resume.
 
-Under ordinary budgets, builders scale from three toward eight with resource holdings and factories;
-up to six separate builders can construct concurrently. Close,
+There is no fixed cumulative building, army, builder or resource ceiling in the AI policy. Available
+space, funds and losses constrain real growth. Under ordinary budgets, builder demand scales with
+both extractor/synthesizer holdings and factories; up to six separate builders can construct
+concurrently. Close,
 connected resource sites rank ahead of distant speculative holdings, while enemy-controlled and
 unreachable sites are rejected. Production buildings first support remote income sites without
 a nearby factory, then extend the frontier in bounded steps toward unclaimed resources or enemies.
@@ -82,30 +90,61 @@ every factory to run continuously. After establishing a second factory, exposed 
 holdings receive turrets before further factory expansion. Repair hubs support damaged armies.
 Visible enemy army buildup that substantially outmatches the current force prioritizes a home
 turret before further expansion, so early economic growth does not leave the core undefended.
-Placement preserves resource footprints and producer exit rings. Obstructed production and
-construction trigger bounded clearance orders.
+Placement preserves resource footprints and producer exit rings. AI infill avoids road/bridge
+terrain and reserves two-cell-wide streets every twelve cells, allowing denser blocks without
+sealing their through routes. Fixed extractor sites are exempt from the lattice and terrain
+preference: the default river map deliberately places strategic resources on wide bridges.
+Existing opening buildings are not relocated to fit that lattice. Ordinary
+and surplus construction use the same layout rules. Obstructed production and construction
+trigger bounded clearance orders.
 
 After protecting finite production and unpaid construction, cash of at least eight factory prices
 enables surplus expansion. This is a spending policy, not an income bonus. The worker target then
-scales with cash up to 32, with at most 24 simultaneous funded sites. Command centers preferentially
+scales with cash and the size of developed holdings, with at most 24 simultaneous funded sites.
+This parallel-work budget does not limit completed buildings or lifetime construction. Command centers preferentially
 produce workers in batches of up to six; without a command center, worker demand is limited relative
 to the existing/queued army so factories also keep supplying soldiers. Combat at a remote holding
 does not stop worker production at safe rear sources or locally safe construction/upgrades.
 
-Surplus growth considers coarse sectors across the whole map, not just the nearest-enemy frontier.
-Each sector seeks a factory, income and turret coverage before being considered developed; free
-resource sites remain desirable. Site-constrained maps use synthesizers on ordinary land, while
-unrestricted maps can use cheaper extractors. Completed buildings, scaffolds and pending jobs count
-toward each sector's needs. Distance and existing holdings rank choices, but a rotating four-region
-window also visits empty rear/flank land and moves past contested or unreachable candidates.
-Placement still rejects enemy fire coverage, nearby enemy producers, occupied/resource footprints,
-blocked exits and unreachable builder approaches. Surplus mode has no ten-factory or ten-synthesizer
-stop condition; available safe space, actual funds, workers and bounded planning work constrain it.
+Surplus growth ranks factory, income, turret and repair-hub deficits together instead of treating
+one of each building in a large sector as a completed base. Factory demand combines effective income
+with excess available cash spread over a sixty-second spending horizon, using configured production
+costs/times. Existing finite/continuous queues estimate spending capacity from their remaining mix;
+idle factories use the light-tank rate. Pending factories/income count before completion, without
+double-counting scaffolds. Income demand responds to both the production-rate shortfall and the
+developing factory count, with continuing reinvestment even when a current ratio is satisfied;
+cheaper extraction gets a bounded cost preference. Ordinary budgets likewise retain synthesis as
+an investment without the retired ten-factory/ten-synthesizer cutoffs. Turret and repair
+demand grow with holdings rather than stopping at one structure. These are planning preferences,
+not a guarantee that cash reaches zero in sixty seconds.
+
+Coarse sectors remain eligible while physical build space exists. Footprint density adds a soft
+distance penalty rather than excluding developed regions. Nearby builders, existing holdings and the home base
+rank regions. Each kind checks the nearest three regions plus a rotating fallback, so local
+construction remains stable while blocked shores and contested approaches do not hide all other
+land. Every third rich growth period favors vacant regions adjacent to current holdings for new
+income/production, rather than waiting until the home area is physically full; fixed extraction
+sites retain their own value-based ranking. Remote income holdings without nearby production or defense generate their own factory/turret
+demand even when home-base ratios are already satisfied. Support placement prioritizes those gaps
+and penalizes already-covered areas. Wide-bridge resources generate defense needs on reachable land
+approaches. Free resource sites remain desirable;
+site-constrained maps use synthesizers on ordinary land, while unrestricted maps use extractors.
+Production/defense coverage uses local spatial queries rather than all building pairs. Strategic
+gaps use a bounded nearby/rotating window before regional scoring, so that growing holdings do not
+create an unbounded cross-product of candidate sites and supporting buildings.
+Placement rejects enemy fire coverage, nearby enemy producers, occupied/resource footprints,
+blocked exits and unreachable builder approaches, including other planned footprints. Surplus mode
+has no ten-factory or ten-synthesizer stop condition; safe space, actual funds, workers, demand and
+bounded planning work constrain it. New factories enter the ordinary production rotation as soon
+as they complete.
 
 Income upgrades compete with expansion using completion time plus cost per additional income;
 expansion adds straight-line builder travel and construction time, not a routed arrival forecast.
 Only healthy, completed, unthreatened, unreclaimed sources qualify. Next configured income-increasing
-upgrades supply their own prices, durations and target profiles; one runs at a time. Non-income
+upgrades supply their own prices, durations and target profiles; separate buildings can upgrade
+concurrently, without a second upgrade on the same entity. Rich reinvestment alternates preference
+for a better-payback upgrade with construction, keeping either activity from monopolizing growth.
+Idle construction capacity can still upgrade. Non-income
 benefits are not evaluated. Existing paid work continues during threats. Synthesizers remain
 supplementary income when safe extraction and cheaper upgrades are unavailable.
 
@@ -118,12 +157,16 @@ demand. These are composition preferences, not nonexistent armor-damage bonuses.
 units and the prepaid current item of continuous production count toward composition, preventing
 separate factories from all filling the same gap.
 
-With surplus cash, batches scale with the number of factories and configured production time,
-up to eight units per order, so rotating sources can stay productive without constant singleton
+With surplus cash, fully funded batches scale with the number of factories and configured production
+time, without the old eight-unit batch ceiling, so rotating sources can stay productive without singleton
 requeueing. Small factory counts retain short batches for timely mixed-army composition; scouts
-retain their small quota. A surplus economy turn first allows one production command, then growth,
-then uses any remaining command budget for production. This prevents construction from indefinitely
-starving the factories while keeping the same global per-decision command cap.
+retain their small quota. Every economy turn allows at most one immediate reserve/army command
+before offering production and growth opportunities; ordinary budgets keep growth before production,
+while rich budgets first offer a production command. Remaining opportunities handle clearance,
+repairs and production, then further growth if production is already supplied. Other decisions
+retain normal tactical response budgets. Thus repeated rescue,
+clearance and repair orders cannot consume every funded macro opportunity. Unused opportunities
+remain available to other work, with no increase to the global per-decision command cap.
 
 A missing expensive role can save up to its next unit's cost within military funds instead of
 repeatedly buying another light tank; existing continuous loops respect that reserve. This can idle
@@ -136,11 +179,13 @@ without forcing every funded purchase back to light tanks. No prices, production
 multipliers are secretly changed, and no free resources or discounts are granted.
 
 Owners decide every ten ticks with staggered slots; budgets, construction and production run every
-twenty. A decision attempts at most three commands and updates at most two combat cohorts, with one
-normally reserved on economy turns. Target selection checks at most four candidates and placement
+twenty. A decision attempts at most three commands and normally issues at most two main-army dispatches,
+with one on economy turns. Dispatches process bounded chunks of cohorts, not a fixed total force.
+Target selection checks at most four candidates and placement
 at most 64 candidates per building kind across the complete decision, including surplus searches.
-The global sector grid is at most twelve cells per axis; its window checks at most four regions
-with at most sixteen placement candidates each. Production queues rotate factories and retain ordinary
+The global sector grid is at most twelve cells per axis; each building kind's window checks at most
+four regions with at most sixteen detailed placement candidates each, after filtering known blocked
+footprints and the street lattice. Production queues rotate factories and retain ordinary
 shared validation, routing and collision budgets. Saved cohort phases, objectives, command/retry
 ticks, budget pauses, growth credit and its update tick resume through current-format persistence;
 AI commands are regenerated internally during replay.
@@ -161,6 +206,10 @@ provides a second resource-scheduling reference, and its
 considers arriving reinforcements and linking clusters before attacking. Earlier resource-centered
 expansion references are [OpenRA](https://github.com/OpenRA/OpenRA/blob/bleed/mods/ra/rules/ai.yaml)
 and [Sharpy](https://github.com/DrInfy/sharpy-sc2/blob/master/sharpy/plans/acts/expand.py).
+[OpenRA's base builder](https://github.com/OpenRA/OpenRA/blob/bleed/OpenRA.Mods.Common/Traits/BotModules/BaseBuilderBotModule.cs)
+also separates excess-cash production expansion, building fractions and defensive placement.
+The surplus planner adapts resource-time scheduling and weighted deficits rather than copying
+a game-specific build order, tournament configuration or trained model.
 These are algorithm/design references, not ported bot code or runtime dependencies. The policy uses
 bounded heuristics and rolling forecasts, without training, neural inference, a terrain influence
 map or fog-of-war inference. Tournament standing does not establish AIRTS playing strength.
@@ -168,6 +217,11 @@ map or fog-of-war inference. Tournament standing does not establish AIRTS playin
 ## Verification owners
 
 [Opponent integration](../../tests/integration/test_opponent_ai.py) checks policy and control;
+[macro integration](../../tests/integration/test_opponent_macro.py) checks local infill, real combat
+spending, new-factory output, configured production time and retained routes;
+[scaling integration](../../tests/integration/test_opponent_scaling.py) checks continued ordinary/5x
+reinvestment, uncapped worker demand/batches, developed-region reuse, mass attacks, reinforcement
+fairness, remote support and concurrent upgrades;
 [skirmish integration](../../tests/integration/test_skirmish.py) checks teams/elimination/results;
 [opponent workload](../../tests/performance/test_opponent_performance.py) checks bounded decisions,
 with timing acceptance defined in [performance](performance.md#required-workloads).

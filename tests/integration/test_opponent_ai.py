@@ -1046,10 +1046,15 @@ def wealthy_empire_scenario() -> Simulation:
     )
 
 
-def test_large_cash_surplus_expands_multiple_regions_beyond_old_building_caps(
+def test_large_cash_surplus_densifies_and_expands_beyond_old_building_caps(
     record_property: Callable[[str, object], None],
 ) -> None:
     simulation = wealthy_empire_scenario()
+    opening_regions = {
+        (int(unit.position.x) // 32, int(unit.position.y) // 32)
+        for unit in simulation.entities.values()
+        if unit.owner_id == "ai" and not unit.is_movable
+    }
     simulation.resources["ai"] = 100000
     assert simulation.execute(SetAIIncomeMultiplierCommand(5)).accepted
     for unit in simulation.entities.values():
@@ -1086,8 +1091,9 @@ def test_large_cash_surplus_expands_multiple_regions_beyond_old_building_caps(
     record_property("cash", simulation.resources["ai"])
     assert workers >= 16
     assert soldiers >= 64
-    assert len(regions) >= 12
-    assert any(unit.position.y < 80 for unit in complete)
+    assert len(regions) >= len(opening_regions) + 4
+    assert len(complete) >= 3 * len(regions)
+    assert any(unit.position.y <= 80 for unit in complete)
     assert any(unit.position.x < 180 for unit in complete)
     assert simultaneous > 6
     supplied = {
@@ -1180,12 +1186,17 @@ def test_surplus_expansion_uses_extractors_when_the_map_has_unrestricted_resourc
     data.pop("resource_sites")
     simulation = Simulation(load_map_data(data))
     simulation.resources["ai"] = 100000
-    simulation.advance(20)
+    simulation.advance(200)
     assert any(
         isinstance(job.parameters, ConstructionParameters)
         and job.parameters.building_kind is EntityKind.RESOURCE_GENERATOR
         and job.parameters.position not in {Point(240, 196), Point(180, 168), Point(148, 80)}
-        for job in simulation.live_automations
+        for job in simulation.automations.values()
+    )
+    assert not any(
+        isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.building_kind is EntityKind.MATTER_SYNTHESIZER
+        for job in simulation.automations.values()
     )
 
 
@@ -1311,12 +1322,15 @@ def test_income_investments_compare_upgrade_payback_with_expansion(
     simulation = opponent_scenario()
     simulation.advance(20)
     assert bool(simulation.entities["ai_income"].upgrade.remaining_ticks) is upgrade_preferred
-    expanded = any(
-        isinstance(job.parameters, ConstructionParameters)
-        and job.parameters.building_kind is EntityKind.RESOURCE_GENERATOR
-        for job in simulation.live_automations
-    )
-    assert expanded is not upgrade_preferred
+    investments = [
+        event
+        for event in simulation.events.events
+        if event.event_type is EventType.UPGRADE_STARTED
+        or event.event_type is EventType.AUTOMATION_CREATED
+        and event.details.get("template") == "construction"
+    ]
+    assert investments
+    assert (investments[0].event_type is EventType.UPGRADE_STARTED) is upgrade_preferred
 
 
 def test_ai_saves_for_an_upgrade_without_spending_queued_unit_funds() -> None:

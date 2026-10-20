@@ -62,7 +62,7 @@ diagnostic, without automatic migration.
 | --- | --- |
 | Sandbox save v27 | Current write/read format |
 | Match save v21 | Current write/read format |
-| Sandbox replay v36 / match replay v36 | Current diagnostic formats and exact verification |
+| Sandbox replay v36 / match replay v38 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves validate cross-field invariants before publishing a world: ownership and references,
@@ -130,12 +130,17 @@ Changed purchasing, specialist savings and continuous-loop pauses regenerate dif
 so earlier match replay tags are rejected. Exact verification and
 current-format match save continuation remain active.
 
-Surplus expansion derives its sectors, rotating search window, worker demand and batch sizes from
-current entities/jobs, actual available cash, map geometry and the saved tick. Placement counters
-are decision-local scratch. No new save fields or migrations are introduced; existing current-format
-match saves restore and enter the new policy on their next decision. Changed internally regenerated
-AI orders invalidate earlier match replay expectations, so the match diagnostic tag advances to v36.
-Sandbox replay is unaffected, and current-format replay verification remains enabled.
+Surplus expansion derives its spending horizon, weighted construction deficits, nearby infill,
+rotating fallback, street lattice, worker demand and batch sizes from current entities/jobs, actual
+available cash, map geometry and the saved tick. Placement counters and macro command opportunities
+are decision-local scratch. This replaces the sparse one-factory/income/turret-per-sector policy and
+prevents repeated tactical orders from starving funded macro work. No new save fields or migrations
+are introduced; existing current-format match saves restore and enter the new policy on their next
+decision. Changed internally regenerated AI orders invalidate earlier match replay expectations, so
+the match diagnostic tag advances to v38. Continued reinvestment, concurrent upgrades, soft regional
+density, full nearby force estimates and fair multi-cohort dispatch derive from existing world and
+cohort memory; they add no authoritative fields or save migration. Sandbox replay is unaffected, and current-format replay
+verification remains enabled.
 
 ## Save execution and management
 

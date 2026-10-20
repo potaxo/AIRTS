@@ -10,9 +10,10 @@ from airts.contracts.spatial import Point, rectangle_region
 from airts.presentation.app import AirtsApp, InputMode
 from airts.presentation.opengl_renderer import OpenGLRenderer
 from airts.presentation.palette import TEAM_COLORS, TERRAIN_COLORS, match_color
-from airts.presentation.ui import automations, theme
+from airts.presentation.ui import automations, selection, theme
 from airts.simulation import Simulation
 from airts.world.map import Terrain, load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def overview_app() -> AirtsApp:
@@ -169,9 +170,11 @@ def test_minimap_resizes_and_replaces_map_sources_using_match_team_colors() -> N
     assert app.minimap.map_rect.width == app.minimap.map_rect.height
     for size in ((1280, 720), (3840, 2160), (760, 520)):
         app.resize_layout(size)
-        assert app.canvas_rect.contains(app.minimap.panel)
+        assert app.right_panel_rect.contains(app.minimap.panel)
         assert app.minimap.panel == app.minimap.map_rect.inflate(2, 2)
-        assert not app.minimap.panel.colliderect(app.right_panel_rect)
+        assert not app.minimap.panel.colliderect(app.canvas_rect)
+        assert app.selection_panel_rect.top > app.minimap.panel.bottom
+        assert app.right_panel_rect.contains(app.selection_panel_rect)
         screen = pygame.Surface(app.window_size)
         app.minimap.draw(app, screen)
         for entity in app.simulation.entities.values():
@@ -180,9 +183,7 @@ def test_minimap_resizes_and_replaces_map_sources_using_match_team_colors() -> N
     assert app.minimap._terrain is not previous_terrain
 
 
-def test_minimap_refresh_and_click_respect_overlapping_automation_details(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_minimap_navigation_stays_separate_from_automation_details() -> None:
     app = overview_app()
     app.resize_layout((760, 520))
     assert app.simulation.execute(
@@ -191,17 +192,18 @@ def test_minimap_refresh_and_click_respect_overlapping_automation_details(
     app.automation_panel.selected_id = next(iter(app.simulation.automations))
     app.automation_panel.group = None
     app.automation_panel.details_open = True
-    # Exercise overlapping chrome independently of the automation list's row position.
-    details = app.minimap.panel.move(-20, 15)
-    monkeypatch.setattr(automations, "details_rect", lambda _view: details)
+    app.zoom_camera(4, app.canvas_rect.center)
     surface = pygame.Surface(app.window_size, pygame.SRCALPHA)
     app._draw_opengl_overlay(surface)
-    overlap = details.clip(app.minimap.map_rect)
-    assert overlap.width and overlap.height
-    app._handle_mouse_down(1, overlap.center)
-    assert not app._minimap_dragging
+    details = automations.details_rect(app)
+    assert details is not None and not details.colliderect(app.minimap.panel)
     old_key = app._opengl_overlay_key()
-    app.zoom_camera(4, app.canvas_rect.center)
+    before = app.simulation.command_count
+    target = app.minimap.map_rect.topleft
+    app._handle_mouse_down(1, target)
+    assert app._minimap_dragging
+    app._handle_mouse_up(1, target)
+    assert app.simulation.command_count == before
     regions = app._opengl_partial_overlay_regions(old_key, app._opengl_overlay_key())
     assert regions == (app.minimap.panel,)
     buttons = app._command_buttons.copy()
@@ -210,6 +212,41 @@ def test_minimap_refresh_and_click_respect_overlapping_automation_details(
     full = pygame.Surface(app.window_size, pygame.SRCALPHA)
     app._draw_opengl_overlay(full)
     assert pygame.image.tobytes(surface, "RGBA") == pygame.image.tobytes(full, "RGBA")
+
+
+def test_short_sidebar_scrolls_details_without_covering_minimap_or_leaking_click_targets() -> None:
+    app = overview_app()
+    app.resize_layout((760, 520))
+    app.selected_entities = {"base"}
+    app._selection_changed()
+    app.production_detail_kind = EntityKind.ARTILLERY
+    surface = pygame.Surface(app.window_size, pygame.SRCALPHA)
+    app._draw_opengl_overlay(surface)
+    minimap_pixels = pygame.image.tobytes(surface.subsurface(app.minimap.panel), "RGBA")
+    old_key = app._opengl_overlay_key()
+    with patch("pygame.mouse.get_pos", return_value=app.selection_panel_rect.center):
+        app._handle_event(pygame.event.Event(pygame.MOUSEWHEEL, y=-20))
+    assert app.selection_scroll > 0
+    regions = app._opengl_partial_overlay_regions(old_key, app._opengl_overlay_key())
+    assert regions == (app.selection_panel_rect,)
+    app._draw_opengl_partial_overlay(surface, regions)
+    assert pygame.image.tobytes(surface.subsurface(app.minimap.panel), "RGBA") == minimap_pixels
+    assert all(
+        selection.content_rect(app).contains(rectangle)
+        for rectangle, _ in app._command_buttons
+        if rectangle.x >= app.right_panel_rect.x
+    )
+    full = pygame.Surface(app.window_size, pygame.SRCALPHA)
+    app._draw_opengl_overlay(full)
+    assert pygame.image.tobytes(surface, "RGBA") == pygame.image.tobytes(full, "RGBA")
+    before = (app.selection_scroll, app.camera.zoom, app.simulation.command_count)
+    with patch("pygame.mouse.get_pos", return_value=app.minimap.map_rect.center):
+        app._handle_event(pygame.event.Event(pygame.MOUSEWHEEL, y=1))
+    assert (app.selection_scroll, app.camera.zoom, app.simulation.command_count) == before
+    app.selected_entities = {"scout"}
+    app._selection_changed()
+    app._draw_opengl_overlay(surface)
+    assert app.selection_scroll == 0
 
 
 @pytest.mark.performance

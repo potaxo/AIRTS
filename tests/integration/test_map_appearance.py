@@ -117,8 +117,6 @@ def test_native_terrain_detail_matches_software_through_zoom_without_reupload() 
                         for px in range(8) if tile == 16 else (4,):
                             sx = int(origin_x + (x + (px + 0.5) / 8) * tile)
                             sy = int(origin_y + (y + (py + 0.5) / 8) * tile)
-                            if app.minimap.panel.collidepoint((sx, sy)):
-                                continue  # The tactical overview intentionally covers this terrain.
                             # Eight-cell grid primitives intentionally overlay detail.
                             if (
                                 min(

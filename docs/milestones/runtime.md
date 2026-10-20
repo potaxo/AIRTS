@@ -229,8 +229,11 @@ Unit details expose relative mass and collision radius alongside existing attrib
 [README controls](../../README.md#controls) owns keys, menu/rail layout and user actions;
 [performance](performance.md#fps-and-rendering) owns rendering, interpolation and frame metrics.
 Automation panels, linked grouping, inspection and scrolling show only the human owner's work.
-Input uses valid actions for the selected kind/count; building hit tests use visible footprints,
-and friendly hits take precedence over generous enemy click areas. Accepted actions use commands.
+Input uses valid actions for the selected kind/count. Selection, context orders and reclaim use one
+zoom-aware hit test: buildings use their visible footprints and units their displayed body area.
+Direct hits precede assisted candidates. Assistance is full at <=16 pixels/cell, fades linearly,
+and is absent at >=24 pixels/cell; close-view empty ground cannot snap to a neighboring building.
+Accepted actions use commands.
 Enemy box/double-click selections are presentation-only inspections; domain grounding retains only
 owned entities. Player entities take precedence in mixed boxes and combined selections. Hostility
 uses team relationships, and enemy inspection never grants command authority.

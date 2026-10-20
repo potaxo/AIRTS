@@ -29,7 +29,9 @@ class SelectionView(Protocol):
     production_detail_kind: EntityKind | None
     placement_kind: EntityKind | None
     reclaim_mode: bool
-    right_panel_rect: pygame.Rect
+    selection_panel_rect: pygame.Rect
+    selection_scroll: int
+    selection_content_height: int
     simulation: Simulation
     ui: UiPainter
     ui_scale: float
@@ -38,14 +40,63 @@ class SelectionView(Protocol):
     def _selected_producer_ids(self) -> tuple[str, ...]: ...
 
 
+def content_rect(view: SelectionView) -> pygame.Rect:
+    panel = view.selection_panel_rect
+    return pygame.Rect(panel.x + 4, panel.y + 40, panel.width - 8, max(1, panel.height - 44))
+
+
+def scroll(view: SelectionView, steps: int) -> None:
+    maximum = max(0, view.selection_content_height - content_rect(view).height)
+    view.selection_scroll = max(
+        0, min(maximum, view.selection_scroll + steps * round(64 * view.ui_scale))
+    )
+
+
 def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
-    panel = view.right_panel_rect
-    x = panel.x
+    panel = view.selection_panel_rect
     theme.panel(screen, panel)
-    x += 16
-    y = 16
-    view.ui.text(screen, "Selection", (x, y), theme.TEXT)
-    y += 28
+    view.ui.text(screen, "Selection", (panel.x + 12, panel.y + 10), theme.TEXT)
+    visible = content_rect(view)
+    previous_clip = screen.get_clip()
+    screen.set_clip(previous_clip.clip(visible))
+    start = len(view._command_buttons)
+    try:
+        for _ in range(2):
+            bottom = _draw_contents(view, screen)
+            view.selection_content_height = bottom - visible.top + view.selection_scroll + 8
+            old_scroll = view.selection_scroll
+            scroll(view, 0)
+            if old_scroll == view.selection_scroll:
+                break
+            screen.fill(theme.PANEL, visible)
+            del view._command_buttons[start:]
+    finally:
+        screen.set_clip(previous_clip)
+    view._command_buttons[start:] = [
+        (clipped, action)
+        for rectangle, action in view._command_buttons[start:]
+        if (clipped := rectangle.clip(visible)).width and clipped.height
+    ]
+    view._type_buttons[:] = [
+        (clipped, kind)
+        for rectangle, kind in view._type_buttons
+        if (clipped := rectangle.clip(visible)).width and clipped.height
+    ]
+    if view.selection_content_height > visible.height:
+        track = pygame.Rect(panel.right - 6, visible.y, 3, visible.height)
+        pygame.draw.rect(screen, theme.TRACK, track)
+        height = max(20, round(visible.height**2 / view.selection_content_height))
+        maximum = view.selection_content_height - visible.height
+        y = track.y + round((track.height - height) * view.selection_scroll / maximum)
+        pygame.draw.rect(screen, theme.MUTED, (track.x, y, track.width, height))
+
+
+def _draw_contents(view: SelectionView, screen: pygame.Surface) -> int:
+    panel = view.selection_panel_rect
+    x = panel.x + 12
+    y = content_rect(view).top - view.selection_scroll
+    row_height = max(24, round(26 * view.ui_scale))
+    row_gap = max(4, round(5 * view.ui_scale))
     selected = view._selected_entities_for_draw()
     read_only = any(entity.owner_id != "player" for entity in selected)
     inspected = view.simulation.entities.get(view.inspected_entity_id or "")
@@ -80,19 +131,19 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         )
         y = draw_unit_details(view, screen, inspected.kind, x, y + 28)
         if inspected.kind.upgrades:
-            draw_upgrade_controls(view, screen, (inspected,), x, y, read_only=True)
+            y = draw_upgrade_controls(view, screen, (inspected,), x, y, read_only=True)
         view._type_buttons.clear()
-        return
+        return y
     kinds: dict[EntityKind, int] = {}
     for entity in view._selected_entities_for_draw():
         kinds[entity.kind] = kinds.get(entity.kind, 0) + 1
     view._type_buttons.clear()
     if not kinds:
         view.ui.small_text(screen, "Select a unit or building.", (x, y), theme.MUTED)
-        return
+        return y + 24
     if len(kinds) > 1:
         for kind, count in sorted(kinds.items(), key=lambda item: item[0].value):
-            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            rectangle = pygame.Rect(x, y, panel.width - 24, row_height)
             view.ui.button(
                 screen,
                 rectangle,
@@ -100,7 +151,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
                 active=view.inspected_kind is kind,
             )
             view._type_buttons.append((rectangle, kind))
-            y += 38
+            y += row_height + row_gap
     else:
         view.inspected_kind = next(iter(kinds))
     detail_kind = view.inspected_kind if view.inspected_kind in kinds else None
@@ -111,11 +162,11 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             (x, y + 4),
             theme.MUTED,
         )
-        return
+        return y + 28
     if read_only:
         y = draw_unit_details(view, screen, detail_kind, x, y + 12)
         if detail_kind.upgrades:
-            draw_upgrade_controls(
+            y = draw_upgrade_controls(
                 view,
                 screen,
                 tuple(e for e in selected if e.kind is detail_kind),
@@ -123,8 +174,8 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
                 y,
                 read_only=True,
             )
-        return
-    y += 12
+        return y
+    y += 8
     profile = detail_kind.profile
     count = kinds[detail_kind]
     detail_title = (
@@ -135,7 +186,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
     if count > 1:
         detail_title += f" x{count}"
     view.ui.text(screen, detail_title, (x, y), theme.ACCENT)
-    y += 34
+    y += 28
     if detail_kind.profile.category is EntityCategory.BUILDING:
         price = (
             f"Cost {profile.construction_cost}"
@@ -143,7 +194,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             else "Starting building"
         )
         view.ui.small_text(screen, price, (x, y), theme.MUTED)
-        y += 28
+        y += 24
     if profile.movable and not profile.can_build:
         view.ui.small_text(
             screen,
@@ -161,7 +212,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         )
         y += 22
         for kind in BUILDABLE_KINDS if profile.can_build else ():
-            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            rectangle = pygame.Rect(x, y, panel.width - 24, row_height)
             label = (
                 "Resource Extractor"
                 if kind is EntityKind.RESOURCE_GENERATOR
@@ -176,11 +227,12 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
                 active=view.placement_kind is kind,
             )
             view._command_buttons.append((rectangle, f"build:{kind.value}"))
-            y += 38
+            y += row_height + row_gap
         if profile.can_reclaim:
-            rectangle = pygame.Rect(x, y, panel.width - 32, 30)
+            rectangle = pygame.Rect(x, y, panel.width - 24, row_height)
             view.ui.button(screen, rectangle, "Reclaim building (70%)", active=view.reclaim_mode)
             view._command_buttons.append((rectangle, "reclaim"))
+            y += row_height
     elif detail_kind.production_kinds:
         factories = view._selected_producer_ids()
         current_jobs = tuple(
@@ -189,8 +241,8 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             if (current_job := current_production(view.simulation, factory_id)) is not None
         )
         for kind in detail_kind.production_kinds:
-            row_width = panel.width - 32
-            height = round(30 * view.ui_scale)
+            row_width = panel.width - 24
+            height = row_height
             gap = round(4 * view.ui_scale)
             loop_width = round(52 * view.ui_scale)
             loop = pygame.Rect(x + row_width - loop_width, y, loop_width, height)
@@ -241,11 +293,11 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
                     PROGRESS_COLOR,
                     (bar.x, bar.y, round(bar.width * min(progress)), bar.height),
                 )
-            y += height + round(8 * view.ui_scale)
+            y += height + row_gap
         if view.production_detail_kind in detail_kind.production_kinds:
             y = draw_unit_details(view, screen, view.production_detail_kind, x, y + 12)
     elif profile.income_per_second:
-        draw_upgrade_controls(
+        y = draw_upgrade_controls(
             view, screen, tuple(entity for entity in selected if entity.kind is detail_kind), x, y
         )
     elif detail_kind is EntityKind.REPAIR_HUB:
@@ -258,6 +310,7 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
         view.ui.small_text(
             screen, "Repairs units and completed buildings", (x, y + 20), theme.MUTED
         )
+        y += 40
     elif profile.attack_damage:
         view.ui.small_text(
             screen,
@@ -265,6 +318,8 @@ def draw_selection(view: SelectionView, screen: pygame.Surface) -> None:
             (x, y),
             theme.MUTED,
         )
+        y += 24
+    return y
 
 
 def draw_upgrade_controls(
@@ -275,7 +330,7 @@ def draw_upgrade_controls(
     y: int,
     *,
     read_only: bool = False,
-) -> None:
+) -> int:
     """One row per selected tier/progress group, with independent building commands."""
     groups: dict[tuple[int, bool, bool], list[Entity]] = {}
     for entity in entities:
@@ -317,7 +372,7 @@ def draw_upgrade_controls(
             operation = "cancel_upgrade"
             enabled = True
             progress = 1 - remaining / definition.duration_ticks
-            bar = pygame.Rect(x, y, view.right_panel_rect.width - 32, 6)
+            bar = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 6)
             pygame.draw.rect(screen, PROGRESS_TRACK, bar)
             pygame.draw.rect(
                 screen, PROGRESS_COLOR, (bar.x, bar.y, round(bar.width * progress), bar.height)
@@ -332,13 +387,14 @@ def draw_upgrade_controls(
                 label += " (need resources)"
         if read_only:
             continue
-        rectangle = pygame.Rect(x, y, view.right_panel_rect.width - 32, 32)
+        rectangle = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 28)
         view.ui.button(screen, rectangle, label, enabled=enabled)
         if enabled:
             view._command_buttons.append(
                 (rectangle, f"{operation}:" + json.dumps([item.entity_id for item in members]))
             )
-        y += 40
+        y += 34
+    return y
 
 
 def draw_unit_details(

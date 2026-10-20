@@ -511,24 +511,127 @@ def test_factory_can_produce_every_mobile_unit_kind_through_shared_logic(
     assert simulation.resources["player"] == before - kind.profile.production_cost
 
 
-def test_factory_loop_button_broadcasts_to_same_type_selection() -> None:
-    app = AirtsApp(builder_factory_simulation())
+@pytest.mark.parametrize(
+    ("producer_kind", "unit_kind", "source_label"),
+    [
+        (EntityKind.FACTORY, EntityKind.HEAVY_TANK, "factories"),
+        (EntityKind.COMMAND_CENTER, EntityKind.BUILDER, "command centers"),
+    ],
+)
+def test_loop_button_toggles_same_type_selection_without_replacing_canceled_jobs(
+    producer_kind: EntityKind, unit_kind: EntityKind, source_label: str
+) -> None:
+    data = builder_factory_simulation().game_map.to_dict()
+    entities = data["entities"]
+    assert isinstance(entities, list)
+    for entity in entities:
+        if entity["id"] in {"factory", "factory_2"}:
+            entity["kind"] = producer_kind.value
+    app = AirtsApp(Simulation(load_map_data(data)))
     app.selected_entities = {"factory", "factory_2"}
     app._selection_changed()
     button = pygame.Rect(10, 10, 80, 30)
-    app._command_buttons = [(button, "loop:heavy_tank")]
+    app._command_buttons = [(button, f"loop:{unit_kind.value}")]
 
     app._handle_command_click(button.center)
 
     loops = [app.simulation.continuous_production(item) for item in ("factory", "factory_2")]
     assert all(loop is not None for loop in loops)
     assert all(
-        isinstance(loop.parameters, ProductionParameters)
-        and loop.parameters.unit_kind is EntityKind.HEAVY_TANK
+        isinstance(loop.parameters, ProductionParameters) and loop.parameters.unit_kind is unit_kind
         for loop in loops
         if loop is not None
     )
-    assert "2 factories" in app.notice
+    assert f"2 {source_label}" in app.notice
+    app.simulation.advance(10)
+    balance = app.simulation.resources["player"]
+    entities = frozenset(app.simulation.entities)
+
+    app._handle_command_click(button.center)
+
+    assert all(
+        app.simulation.continuous_production(item) is None for item in ("factory", "factory_2")
+    )
+    assert all(loop is not None and loop.status is AutomationStatus.CANCELED for loop in loops)
+    assert len(app.simulation.automations) == 2
+    assert f"canceled for 2 {source_label}" in app.notice
+    assert app.automation_panel.selected_id is None
+    assert app.simulation.resources["player"] == balance  # Canceling paid work does not refund it.
+    app.simulation.advance(unit_kind.profile.production_ticks)
+    assert frozenset(app.simulation.entities) == entities
+
+    app._handle_command_click(button.center)
+    assert all(
+        app.simulation.continuous_production(item) is not None for item in ("factory", "factory_2")
+    )
+    assert len(app.simulation.automations) == 4
+
+
+@pytest.mark.parametrize("state", ["paused", "queued"])
+def test_loop_button_cancels_suspended_loops_and_preserves_finite_orders(state: str) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    app.selected_entities = {"factory", "factory_2"}
+    app._selection_changed()
+    button = pygame.Rect(10, 10, 80, 30)
+    app._command_buttons = [(button, "loop:scout")]
+    app._handle_command_click(button.center)
+    finite_ids = {}
+    for factory in ("factory", "factory_2"):
+        loop = app.simulation.continuous_production(factory)
+        assert loop is not None
+        if state == "paused":
+            assert app.simulation.execute(PauseAutomationCommand(loop.automation_id)).accepted
+        else:
+            result = app.simulation.execute(CreateProductionCommand(factory, EntityKind.BUILDER, 2))
+            assert result.accepted
+            finite_ids[factory] = result.automation_id
+        assert loop.status is (
+            AutomationStatus.PAUSED if state == "paused" else AutomationStatus.WAITING
+        )
+    app._handle_command_click(button.center)
+    for factory in ("factory", "factory_2"):
+        assert app.simulation.continuous_production(factory) is None
+        queue = app.simulation.production_queue(factory)
+        if state == "queued":
+            assert [job.automation_id for job in queue] == [finite_ids[factory]]
+            assert app.simulation.assignments[factory] == finite_ids[factory]
+        else:
+            assert not queue
+            assert factory not in app.simulation.assignments
+
+
+@pytest.mark.parametrize("other_kind", [None, EntityKind.SCOUT, EntityKind.HEAVY_TANK])
+@pytest.mark.parametrize("select_second", [False, True], ids=["unselected", "selected"])
+def test_lit_loop_only_cancels_selected_matching_sources_and_unlit_loop_starts_selection(
+    other_kind: EntityKind | None, select_second: bool
+) -> None:
+    app = AirtsApp(builder_factory_simulation())
+    assert app.simulation.execute(
+        CreateProductionCommand("factory", EntityKind.SCOUT, 1, continuous=True)
+    ).accepted
+    if other_kind is not None:
+        assert app.simulation.execute(
+            CreateProductionCommand("factory_2", other_kind, 1, continuous=True)
+        ).accepted
+    app.selected_entities = {"factory", "factory_2"} if select_second else {"factory"}
+    app._selection_changed()
+    button = pygame.Rect(10, 10, 80, 30)
+    app._command_buttons = [(button, "loop:scout")]
+    previous = app.simulation.continuous_production("factory_2")
+    app._handle_command_click(button.center)
+    assert app.simulation.continuous_production("factory") is None
+    if select_second and other_kind is EntityKind.SCOUT:
+        assert app.simulation.continuous_production("factory_2") is None
+    else:
+        assert app.simulation.continuous_production("factory_2") is previous
+    assert len(app.simulation.automations) == (1 if other_kind is None else 2)
+    app._handle_command_click(button.center)
+    for factory in app.selected_entities:
+        loop = app.simulation.continuous_production(factory)
+        assert loop is not None and isinstance(loop.parameters, ProductionParameters)
+        assert loop.parameters.unit_kind is EntityKind.SCOUT
+    if not select_second:
+        assert app.simulation.continuous_production("factory_2") is previous
 
 
 def test_factory_plus_starts_immediately_and_minus_removes_newest_request() -> None:

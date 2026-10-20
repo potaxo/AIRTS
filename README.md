@@ -55,9 +55,11 @@ each selected faction's owner, team (in matches), and unit count. With a mixed s
 a type row to narrow the selection to that type and reveal its controls; right-click
 a type row in a mixed selection of your units to remove that type from the selection. The bottom
 command bar shows actions available for the current selection and spatial target, plus **Settings**.
-The battlefield's upper-right minimap shows terrain, gold resource sites, and every army in team
+The minimap at the top of the right sidebar shows terrain, gold resource sites, and every army in team
 colors (green friendly/red enemy in the sandbox). Squares mark buildings; small dots mark units,
 with pale outlines for selected entities. The pale rectangle shows the camera's current view.
+Selection details and compact action rows sit below the minimap; scroll there to reach content
+that does not fit a short window. The minimap stays fixed while those details scroll.
 
 ## Controls
 
@@ -89,6 +91,11 @@ Box selection selects your units when any are inside the box; otherwise it can i
 units and their counts. Your entities also take precedence in combined selections. Enemy
 inspection exposes attributes without granting orders, construction, or production controls.
 A selection drag can end over the command bar, but only units inside the canvas are selected.
+Click assistance applies to selection, context orders, and reclaim targeting. At distant zoom,
+nearby small targets are easier to hit and direct hits take precedence over assisted hits.
+As you zoom in, assistance fades: close views require a click inside the building footprint,
+so nearby ground remains a movement destination. Units retain their
+displayed body hit area. Shift queues use the same target rules.
 
 ### Spatial targets and automations
 
@@ -136,9 +143,11 @@ produce builders. Select one or more sources of the same type and use the right 
 | Unit name | Show that unit's attributes and production cost |
 | `+` | Add one unit to each selected source's finite production queue |
 | `-` | Remove one unfinished unit of that kind from the newest matching finite order on each source |
-| `Loop` | Set continuous production of that kind on each selected source |
+| `Loop` | Start continuous production of that kind on each selected source; click the lit button again to cancel that kind's loops on the selected sources |
 
 Finite orders run in queue order before the loop resumes. A new Loop replaces the previous loop.
+With mixed selections, clicking a lit Loop cancels matching loops and leaves other sources alone;
+clicking an unlit Loop starts that kind on all selected sources. Finite orders remain queued.
 Production waits when funds or exit space are unavailable. Canceling a paid unit discards its
 progress without a refund.
 
