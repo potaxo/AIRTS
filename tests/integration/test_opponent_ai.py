@@ -23,6 +23,7 @@ from airts.contracts.commands import (
     CreateProductionCommand,
     MoveCommand,
     PauseAutomationCommand,
+    SetAIIncomeMultiplierCommand,
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
@@ -355,7 +356,11 @@ def test_available_military_budget_changes_the_next_composition_investment(
             (EntityKind.TANK_DESTROYER, 56.5, 54.5),
             (EntityKind.ARTILLERY, 58.5, 54.5),
         ),
-        outposts=((EntityKind.BUILDER, 68.5, 64.5), (EntityKind.BUILDER, 70.5, 64.5)),
+        outposts=(
+            (EntityKind.BUILDER, 68.5, 64.5),
+            (EntityKind.BUILDER, 70.5, 64.5),
+            (EntityKind.BUILDER, 72.5, 64.5),
+        ),
     )
     simulation.resources["ai"] = funds
     simulation.advance(20)
@@ -710,7 +715,8 @@ def test_factory_capacity_planning_reads_the_current_unit_production_time(
             (EntityKind.TURRET, 62, 66),
         ),
     )
-    simulation.resources["ai"] = 4000
+    # Isolate ordinary income/capacity planning from the surplus land-grab policy.
+    simulation.resources["ai"] = 3000
     simulation.entities["ai_income"].upgrade.tier = 3
     economy.rebuild_income(simulation)
     simulation.advance(20)
@@ -772,6 +778,26 @@ def test_new_units_wait_as_a_reinforcement_batch_instead_of_trickling_into_the_a
                 simulation.entities[key].position.distance_to(Point(62, 62)) < 24
                 for key in squad.entity_ids
             )
+
+
+def test_distant_factory_recruits_form_local_cohorts_without_blocking_the_larger_main_wave() -> (
+    None
+):
+    simulation = opponent_scenario(
+        opening_army(24)
+        + tuple((EntityKind.LIGHT_TANK, 12.5 + i % 3, 43.5 + i // 3) for i in range(6)),
+        outposts=((EntityKind.FACTORY, 12, 34),),
+    )
+    simulation.advance(10)
+    groups = simulation.opponents["ai"].squads
+    main = next(squad for squad in groups if "army_0000" in squad.entity_ids)
+    distant = next(squad for squad in groups if "army_0024" in squad.entity_ids)
+    assert main is not distant
+    assert len(main.entity_ids) == 24
+    assert len(distant.entity_ids) == 6
+    assert main.phase is SquadPhase.ADVANCING
+    assert main.target_id == "player_factory"
+    assert distant.phase is SquadPhase.GATHERING
 
 
 def test_budget_pause_survives_queued_orders_and_resumes_when_funded(
@@ -962,6 +988,205 @@ def test_funded_ai_spends_on_workers_territory_and_an_army_together() -> None:
     assert sum(unit.is_movable and unit.profile.attack_damage > 0 for unit in own) >= 8
     assert simultaneous >= 2
     assert simulation.resources["ai"] < 2500
+
+
+def wealthy_empire_scenario() -> Simulation:
+    entities: list[dict[str, object]] = [
+        {"id": "player_factory", "kind": "factory", "position": [4, 4], "owner": "player"},
+        {"id": "center", "kind": "command_center", "position": [228, 196], "owner": "ai"},
+        {"id": "income", "kind": "resource_generator", "position": [240, 196], "owner": "ai"},
+    ]
+    for i in range(10):
+        x = 188 + i % 5 * 12
+        entities.extend(
+            (
+                {
+                    "id": f"factory_{i}",
+                    "kind": "factory",
+                    "position": [x, 164 + i // 5 * 12],
+                    "owner": "ai",
+                },
+                {
+                    "id": f"synth_{i}",
+                    "kind": "matter_synthesizer",
+                    "position": [x, 144 + i // 5 * 10],
+                    "owner": "ai",
+                },
+            )
+        )
+    entities.extend(
+        {"id": f"worker_{i}", "kind": "builder", "position": [185.5 + 2 * i, 190.5], "owner": "ai"}
+        for i in range(8)
+    )
+    entities.extend(
+        {
+            "id": f"army_{i}",
+            "kind": "light_tank",
+            "position": [200.5 + i % 6 * 2, 194.5 + i // 6 * 2],
+            "owner": "ai",
+        }
+        for i in range(24)
+    )
+    return Simulation(
+        load_map_data(
+            {
+                "id": "wealthy-empire",
+                "name": "Wealthy empire",
+                "width": 256,
+                "height": 224,
+                "terrain": {"default": "grass", "rectangles": [[127, 0, 1, 224, "rock"]]},
+                "resource_sites": [[240, 196], [180, 168], [148, 80]],
+                "entities": entities,
+                "match_slots": [
+                    {"owner": "player", "controller": "player", "team": 1},
+                    {"owner": "ai", "controller": "ai", "team": 2},
+                ],
+            }
+        )
+    )
+
+
+def test_large_cash_surplus_expands_multiple_regions_beyond_old_building_caps(
+    record_property: Callable[[str, object], None],
+) -> None:
+    simulation = wealthy_empire_scenario()
+    simulation.resources["ai"] = 100000
+    assert simulation.execute(SetAIIncomeMultiplierCommand(5)).accepted
+    for unit in simulation.entities.values():
+        if unit.owner_id == "ai" and unit.kind.upgrades:
+            unit.upgrade.tier = 3
+    economy.rebuild_income(simulation)
+    simultaneous = 0
+    for _ in range(180):
+        simulation.advance(10)
+        assert simulation._opponent_command_count <= opponent_ai.MAX_ORDERS
+        jobs = [
+            job.parameters
+            for job in simulation.live_automations
+            if isinstance(job.parameters, ConstructionParameters)
+        ]
+        simultaneous = max(simultaneous, len(jobs))
+        assert len(jobs) <= opponent_ai.MAX_CONSTRUCTION_SITES
+        assert len({key for job in jobs for key in job.builder_ids}) == len(jobs)
+        assert all(job.position.x >= 128 for job in jobs)
+        assert simulation.resources["ai"] >= 0
+    own = [unit for unit in simulation.entities.values() if unit.owner_id == "ai"]
+    complete = [unit for unit in own if not unit.is_movable and unit.is_complete]
+    for kind in (EntityKind.FACTORY, EntityKind.MATTER_SYNTHESIZER, EntityKind.TURRET):
+        count = sum(unit.kind is kind for unit in complete)
+        record_property(kind.value, count)
+        assert count >= (6 if kind is EntityKind.TURRET else 12)
+    workers = sum(unit.profile.can_build for unit in own)
+    soldiers = sum(unit.profile.combat_support and unit.is_movable for unit in own)
+    regions = {(int(unit.position.x) // 32, int(unit.position.y) // 32) for unit in complete}
+    record_property("builders", workers)
+    record_property("soldiers", soldiers)
+    record_property("regions", len(regions))
+    record_property("parallel_construction", simultaneous)
+    record_property("cash", simulation.resources["ai"])
+    assert workers >= 16
+    assert soldiers >= 64
+    assert len(regions) >= 12
+    assert any(unit.position.y < 80 for unit in complete)
+    assert any(unit.position.x < 180 for unit in complete)
+    assert simultaneous > 6
+    supplied = {
+        job.parameters.factory_id
+        for job in simulation.automations.values()
+        if isinstance(job.parameters, ProductionParameters) and job.parameters.produced_count
+    }
+    assert len(supplied) >= 8
+    document = {
+        "schema": MATCH_SAVE_SCHEMA,
+        "map": simulation.game_map.to_dict(),
+        "state": simulation.export_state(),
+    }
+    restored = load_simulation_data(document)
+    assert restored.export_state() == simulation.export_state()
+    restored.advance(60)
+    assert restored.resources["ai"] >= 0
+    assert any(
+        isinstance(job.parameters, ConstructionParameters) and job.modified_tick >= simulation.tick
+        for job in restored.automations.values()
+    )
+
+
+@pytest.mark.usefixtures("established_economy")
+def test_income_funded_surplus_expansion_replays_without_extra_saved_memory() -> None:
+    simulation = opponent_scenario(
+        resource_sites=((66, 66), (52, 66), (32, 66), (10, 12), (52, 42), (68, 36)),
+        outposts=(
+            (EntityKind.RESOURCE_GENERATOR, 52, 66),
+            (EntityKind.RESOURCE_GENERATOR, 32, 66),
+            (EntityKind.COMMAND_CENTER, 68, 52),
+            (EntityKind.RESOURCE_GENERATOR, 52, 42),
+            (EntityKind.RESOURCE_GENERATOR, 68, 36),
+        ),
+    )
+    data = simulation.game_map.to_dict()
+    data["terrain"] = {"default": "grass", "rectangles": [[40, 0, 1, 80, "rock"]]}
+    simulation = Simulation(load_map_data(data))
+    assert simulation.execute(SetAIIncomeMultiplierCommand(5)).accepted
+    simulation.advance(600)
+    assert (
+        sum(
+            unit.profile.can_build for unit in simulation.entities.values() if unit.owner_id == "ai"
+        )
+        > 8
+    )
+    assert any(
+        isinstance(job.parameters, ProductionParameters) and job.parameters.target_count > 3
+        for job in simulation.automations.values()
+    )
+    run_replay(capture_replay(simulation))
+
+
+def test_frontier_raid_does_not_stop_funded_workers_and_safe_rear_expansion() -> None:
+    data = wealthy_empire_scenario().game_map.to_dict()
+    data["entities"].extend(
+        (
+            {
+                "id": "frontier_income",
+                "kind": "resource_generator",
+                "position": [148, 80],
+                "owner": "ai",
+            },
+            {"id": "raider", "kind": "heavy_tank", "position": [139.5, 84.5], "owner": "player"},
+        )
+    )
+    simulation = Simulation(load_map_data(data))
+    simulation.resources["ai"] = 100000
+    simulation.advance(40)
+    assert any(
+        isinstance(job.parameters, ProductionParameters)
+        and job.parameters.factory_id == "center"
+        and job.parameters.unit_kind is EntityKind.BUILDER
+        for job in simulation.live_automations
+    )
+    plans = [
+        job.parameters
+        for job in simulation.automations.values()
+        if isinstance(job.parameters, ConstructionParameters)
+    ]
+    assert plans
+    assert all(
+        plan.position.x >= 128 and plan.position.distance_to(Point(139.5, 84.5)) >= 12
+        for plan in plans
+    )
+
+
+def test_surplus_expansion_uses_extractors_when_the_map_has_unrestricted_resources() -> None:
+    data = wealthy_empire_scenario().game_map.to_dict()
+    data.pop("resource_sites")
+    simulation = Simulation(load_map_data(data))
+    simulation.resources["ai"] = 100000
+    simulation.advance(20)
+    assert any(
+        isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.building_kind is EntityKind.RESOURCE_GENERATOR
+        and job.parameters.position not in {Point(240, 196), Point(180, 168), Point(148, 80)}
+        for job in simulation.live_automations
+    )
 
 
 def test_visible_enemy_buildup_prompts_a_core_turret_before_more_expansion() -> None:

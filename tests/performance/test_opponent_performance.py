@@ -6,14 +6,26 @@ from collections.abc import Callable
 from math import ceil
 from time import perf_counter
 
+import pytest
 from tests.integration.opponent_scenarios import opponent_scenario
 
+from airts.simulation import Simulation
 from airts.systems.opponent_ai import MAX_ORDERS, MAX_SQUAD_SIZE, MAX_TARGET_CANDIDATES
+from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
 
+@pytest.mark.parametrize(
+    "funds,size,builders",
+    [(1000, 80, 1), (100000, 320, 32)],
+    ids=["opening-budget", "surplus-budget"],
+)
 def test_thousand_unit_opponent_workload(
-    check_timing: bool, record_property: Callable[[str, object], None]
+    funds: int,
+    size: int,
+    builders: int,
+    check_timing: bool,
+    record_property: Callable[[str, object], None],
 ) -> None:
     kinds = (EntityKind.LIGHT_TANK, EntityKind.LIGHT_TANK, EntityKind.HEAVY_TANK, EntityKind.SCOUT)
     own = tuple(
@@ -29,6 +41,16 @@ def test_thousand_unit_opponent_workload(
         (kinds[index % len(kinds)], 12.5 + index % 25, 12.5 + index // 25) for index in range(500)
     )
     simulation = opponent_scenario(own, enemy)
+    if size != simulation.game_map.width:
+        data = simulation.game_map.to_dict()
+        data["width"] = data["height"] = size
+        data["terrain"] = {"default": "grass"}
+        data["entities"].extend(
+            {"id": f"worker_{i}", "kind": "builder", "owner": "ai", "position": [90.5 + i, 90.5]}
+            for i in range(builders - 1)
+        )
+        simulation = Simulation(load_map_data(data))
+    simulation.resources["ai"] = funds
     samples: list[float] = []
     decisions = 0
     commands = 0
@@ -53,6 +75,9 @@ def test_thousand_unit_opponent_workload(
     assert not simulation.command_history
     p95_ms = sorted(samples)[ceil(len(samples) * 0.95) - 1] * 1000
     record_property("opponent_tick_p95_ms", p95_ms)
+    record_property("opening_funds", funds)
+    record_property("map_size", size)
+    record_property("builders", builders)
     record_property("opponent_decisions", decisions)
     record_property("opponent_commands", commands)
     if check_timing:

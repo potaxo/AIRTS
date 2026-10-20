@@ -13,9 +13,14 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.collision.solver import advance_positions
-from airts.navigation.pathfinding import PathfindingError, PathResult, passable_segment_cells
+from airts.navigation.pathfinding import (
+    PathfindingError,
+    PathResult,
+    RouteAllowance,
+    passable_segment_cells,
+)
 from airts.systems.assignment_state import state_for_assignment
-from airts.world._numeric import BoolArray, FloatArray, IntArray
+from airts.world._numeric import BoolArray, FloatArray, IntArray, compile_numeric
 from airts.world.entities import Entity, OrderKind, UnitState
 from airts.world.map import Cell, footprint_cells
 from airts.world.units.catalog import EntityKind
@@ -66,6 +71,8 @@ class MovementWorkspace:
         self.keys = sorted(key for key, entity in entities.items() if entity.is_movable)
         self.tick: int | None = None
         self.ensure(len(self.keys))
+        empty = np.empty((0, 2), dtype=np.float64)
+        _motion_geometry(empty, empty, empty, np.empty(0, dtype=np.bool_), empty, np.empty(0))
 
     def ensure(self, count: int) -> None:
         if count <= self.capacity:
@@ -74,7 +81,7 @@ class MovementWorkspace:
         self.floats = {
             key: np.empty(
                 (self.capacity, 2)
-                if key in {"positions", "targets", "goals", "recovery_targets"}
+                if key in {"positions", "targets", "goals", "recovery_targets", "headings"}
                 else self.capacity,
                 dtype=np.float64,
             )
@@ -87,6 +94,8 @@ class MovementWorkspace:
                 "masses",
                 "recovery_targets",
                 "tolerances",
+                "headings",
+                "fronts",
             )
         }
         self.booleans = {
@@ -97,6 +106,28 @@ class MovementWorkspace:
             key: np.empty(self.capacity, dtype=np.int64) for key in ("ticks", "status")
         }
         self.integers["work"] = np.empty(4, dtype=np.int64)
+
+
+@compile_numeric
+def _motion_geometry(
+    positions: FloatArray,
+    targets: FloatArray,
+    goals: FloatArray,
+    routed: BoolArray,
+    headings: FloatArray,
+    fronts: FloatArray,
+) -> None:
+    """Pack ordering geometry in reusable arrays without per-unit Python temporaries."""
+    for index in range(len(positions)):
+        if routed[index]:
+            px, py = positions[index]
+            gx, gy = goals[index, 0] - px, goals[index, 1] - py
+            length = max(hypot(gx, gy), 1e-9)
+            headings[index, 0], headings[index, 1] = gx / length, gy / length
+            dx, dy = targets[index, 0] - px, targets[index, 1] - py
+            fronts[index] = -(px * dx + py * dy) / max(hypot(dx, dy), 1e-9)
+        else:
+            headings[index, 0] = headings[index, 1] = fronts[index] = 0.0
 
 
 def observed_velocity(simulation: Simulation, entity: Entity) -> tuple[float, float]:
@@ -349,12 +380,8 @@ def move_entities(simulation: Simulation) -> None:
         planned.add(key)
     records = []
     recovery_goals: list[Point | None] = []
-    recovery_targets: list[tuple[float, float]] = []
-    recovering: list[bool] = []
     recovery_ticks: list[int] = []
-    recovery_released: list[bool] = []
     recovery_tolerances: list[float] = []
-    stalled: list[bool] = []
     for entity in entities:
         target = entity.path[0] if entity.path else _hold_target(simulation, entity)
         point = entity.position
@@ -398,34 +425,14 @@ def move_entities(simulation: Simulation) -> None:
             else:
                 reset_movement_liveness(entity)
         recovery_goals.append(recovery_goal)
-        recovery_targets.append((recovery_target.x, recovery_target.y))
-        recovering.append(pending_recovery)
         recovery_ticks.append(
             entity.recovery_request_tick if entity.recovery_request_tick is not None else -1
         )
-        recovery_released.append(entity.recovery_released)
         recovery_tolerances.append(recovery_tolerance)
-        stalled.append(
-            (strong_intent or pending_recovery)
-            and entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS
-        )
         if not strong_intent and entity.contact_wait_ticks:
             target = point
         profile = entity.kind.profile
         assert profile.movement_speed is not None
-        # Compute ordering geometry while the authoritative points are already in hand.
-        # Keep scalar hypot and Python's ordered sums, including their rounding behavior.
-        has_route = bool(entity.path)
-        if has_route:
-            px, py = float(point.x), float(point.y)
-            gx, gy = float(goal.x) - px, float(goal.y) - py
-            length = max(hypot(gx, gy), 1e-9)
-            heading_x, heading_y = gx / length, gy / length
-            dx, dy = float(target.x) - px, float(target.y) - py
-            front = -(px * dx + py * dy) / max(hypot(dx, dy), 1e-9)
-        else:
-            # Pathless bodies use the common axis/sign below, never route geometry.
-            heading_x = heading_y = front = 0.0
         records.append(
             (
                 point.x,
@@ -434,14 +441,18 @@ def move_entities(simulation: Simulation) -> None:
                 target.y,
                 goal.x,
                 goal.y,
-                collision_radius(entity.kind),
+                profile.collision_radius,
                 profile.movement_speed * simulation.TICK_SECONDS,
                 strong_intent,
-                has_route,
-                heading_x,
-                heading_y,
-                front,
+                bool(entity.path),
                 profile.mass,
+                recovery_target.x,
+                recovery_target.y,
+                pending_recovery,
+                entity.recovery_released,
+                recovery_tolerance,
+                (strong_intent or pending_recovery)
+                and entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS,
             )
         )
     data = np.asarray(records, dtype=np.float64)
@@ -457,7 +468,7 @@ def move_entities(simulation: Simulation) -> None:
     # Sample original centers in one batch; the solver shares this cap for all motion.
     speeds /= simulation._routes.movement_costs_at(positions)
     masses = floats["masses"]
-    masses[:] = data[:, 13]
+    masses[:] = data[:, 10]
     moving, stationary = booleans["moving"], booleans["stationary"]
     moving[:] = data[:, 8]
     np.logical_not(moving, out=stationary)
@@ -465,7 +476,9 @@ def move_entities(simulation: Simulation) -> None:
     # Batch the arithmetic; IDs are already sorted and provide the last tie break.
     routed = booleans["routed"]
     routed[:] = data[:, 9]
-    headings = data[:, 10:12]
+    headings = floats["headings"]
+    _motion_geometry(positions, target_data, goals, routed, headings, floats["fronts"])
+    # Preserve Python's ordered compensated sums and the existing axis/parity ties.
     totals = [sum(np.abs(headings[routed, axis]).tolist()) for axis in (0, 1)]
     axis = int(totals[1] > totals[0])
     sign = 1.0 if sum(headings[routed, axis].tolist()) >= 0 else -1.0
@@ -475,7 +488,7 @@ def move_entities(simulation: Simulation) -> None:
     # not a remote goal behind a wall. Keep group/parity/ID tie breaks unchanged.
     fronts = np.where(
         routed,
-        data[:, 12],
+        floats["fronts"],
         -sign * positions[:, axis],
     )
     order = np.asarray(np.lexsort((np.arange(len(keys)), fronts, priority)), dtype=np.int64)
@@ -484,12 +497,12 @@ def move_entities(simulation: Simulation) -> None:
     work.fill(0)
     recovery_status = integers["status"]
     recovery_status.fill(0)
-    booleans["stalled"][:] = stalled
-    booleans["recovering"][:] = recovering
-    booleans["released"][:] = recovery_released
+    booleans["stalled"][:] = data[:, 16]
+    booleans["recovering"][:] = data[:, 13]
+    booleans["released"][:] = data[:, 14]
     integers["ticks"][:] = recovery_ticks
-    floats["recovery_targets"][:] = recovery_targets
-    floats["tolerances"][:] = recovery_tolerances
+    floats["recovery_targets"][:] = data[:, 11:13]
+    floats["tolerances"][:] = data[:, 15]
     updated, pressure, checks = advance_positions(
         positions,
         target_data,
@@ -656,6 +669,7 @@ def plan_group_paths(
     *,
     shared_goal: Point | None = None,
     compact_approach: bool = False,
+    allowance: RouteAllowance | None = None,
 ) -> dict[str, PathResult]:
     blocked = simulation._building_cells()
     center = Point(
@@ -673,42 +687,18 @@ def plan_group_paths(
         if compact_approach
         else float("inf")
     )
-    result: dict[str, PathResult] = {}
-    for key in entity_ids:
-        start, target = simulation.entities[key].position, destinations[key]
-        direct = simulation._routes.segment_path(start, target, blocked)
-        if direct is not None:
-            result[key] = direct
-            continue
-        shared = simulation._routes.shared_path(start, anchor, blocked)
-        if compact_approach and target == anchor:
-            result[key] = shared
-            continue
-        index = simulation._routes.branch_index(
-            shared, target, blocked, maximum_distance=branch_distance
+    return {
+        key: simulation._routes.group_path(
+            simulation.entities[key].position,
+            anchor,
+            destinations[key],
+            blocked,
+            maximum_distance=branch_distance,
+            compact_approach=compact_approach,
+            allowance=allowance,
         )
-        if index >= 0:
-            point = shared.waypoints[index]
-            # A distinct anchor in the start cell has a waypoint but no cell transition.
-            last = min(index + 1, len(shared.cells) - 1)
-            assert shared.prefix_costs is not None
-            branch = simulation._routes.segment_path(
-                point,
-                target,
-                blocked,
-                maximum_cost=float("inf"),
-                initial_cost=float(shared.prefix_costs[last, 0]),
-                initial_correction=float(shared.prefix_costs[last, 1]),
-            )
-            assert branch is not None
-            result[key] = PathResult(
-                shared.cells[: last + 1] + branch.cells[1:],
-                shared.waypoints[: index + 1] + (target,),
-                branch.cost,
-            )
-        else:
-            result[key] = simulation._routes.shared_path(start, target, blocked)
-    return result
+        for key in entity_ids
+    }
 
 
 def validate_paths(

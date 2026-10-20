@@ -48,7 +48,7 @@ from airts.simulation import Simulation
 from airts.systems.construction import construction_distance
 from airts.systems.repair import building_distance
 from airts.systems.repair_positions import in_service_range
-from airts.world.entities import Entity, UnitState
+from airts.world.entities import Entity, OrderKind, UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
@@ -91,12 +91,31 @@ class SceneView(Protocol):
     def screen_point(self, point: Point) -> tuple[int, int]: ...
 
 
-def order_feedback(view: SceneView, entity: Entity) -> tuple[tuple[Point, ...], Color]:
+def order_feedback(view: SceneView, entity: Entity) -> Iterator[tuple[tuple[Point, ...], Color]]:
     """Use current authoritative endpoints; no targeting or routing work in rendering."""
     target = view.simulation.entities.get(entity.attack_target_id or "")
     if entity.pursue_target and target is not None:
-        return (entity.selection_position, target.selection_position), (155, 92, 92)
-    return view.simplified_path(entity), (225, 225, 225)
+        anchor = target.selection_position
+        yield (entity.selection_position, anchor), (155, 92, 92)
+    else:
+        points = view.simplified_path(entity)
+        anchor = points[-1]
+        if len(points) >= 2:
+            yield points, (225, 225, 225)
+    for order in entity.order_queue:
+        target = view.simulation.entities.get(order.target_entity_id or "")
+        if order.target_entity_id is not None and target is None:
+            continue
+        destination = target.selection_position if target is not None else order.position
+        color = (
+            (155, 92, 92)
+            if order.kind is OrderKind.ATTACK
+            else REPAIR_COLOR
+            if order.kind is OrderKind.REPAIR
+            else (225, 225, 225)
+        )
+        yield (anchor, destination), color
+        anchor = destination
 
 
 def interaction_range(entity: Entity) -> tuple[float, bool]:
@@ -494,16 +513,16 @@ class SoftwareRenderer:
             paths: list[tuple[Color, tuple[tuple[int, int], ...]]] = []
             for entity_id in view.representative_path_entity_ids():
                 entity = view.simulation.entities[entity_id]
-                world_points, color = order_feedback(view, entity)
-                points = tuple(
-                    (
-                        origin_x + round(point.x * tile_size),
-                        origin_y + round(point.y * tile_size),
+                for world_points, color in order_feedback(view, entity):
+                    points = tuple(
+                        (
+                            origin_x + round(point.x * tile_size),
+                            origin_y + round(point.y * tile_size),
+                        )
+                        for point in world_points
                     )
-                    for point in world_points
-                )
-                if len(points) >= 2:
-                    paths.append((color, points))
+                    if len(points) >= 2:
+                        paths.append((color, points))
             paths.extend(
                 (REPAIR_COLOR, (view.screen_point(source), view.screen_point(target)))
                 for source, target in work_links(view.simulation)

@@ -30,11 +30,12 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
     failure = validate_entities(simulation, command.entity_ids, command.owner_id)
     if failure is not None:
         return simulation._reject_validation("repair_building", failure)
-    if any(
-        not simulation.entities[key].profile.movable
-        or not simulation.entities[key].profile.can_repair
+    builders = tuple(
+        key
         for key in command.entity_ids
-    ):
+        if simulation.entities[key].profile.movable and simulation.entities[key].profile.can_repair
+    )
+    if not builders:
         return simulation._reject_validation(
             "repair_building",
             ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_BUILDER", "entity_ids"),
@@ -59,12 +60,12 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
         assert target is not None
         unit_orders.append_target_order(
             simulation,
-            command.entity_ids,
+            builders,
             UnitOrder(OrderKind.REPAIR, target.selection_position, target.entity_id),
         )
         return simulation._accept("repair_building")
-    automation_assignments.manual_override_many(simulation, command.entity_ids)
-    for key in command.entity_ids:
+    automation_assignments.manual_override_many(simulation, builders)
+    for key in builders:
         builder = simulation.entities[key]
         builder.path.clear()
         builder.move_target = None

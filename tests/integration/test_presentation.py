@@ -818,7 +818,7 @@ def test_right_click_records_automatic_move_and_double_click_requests_gathering(
         assert second["target"] == first["target"]
 
 
-def test_double_right_click_on_enemy_gathers_instead_of_attacking() -> None:
+def test_double_right_click_on_enemy_keeps_tracking_attack() -> None:
     app = AirtsApp(interaction_simulation())
     app.selected_entities = {"unit", "tank"}
     screen = app.screen_point(app.simulation.entities["enemy"].position)
@@ -833,8 +833,28 @@ def test_double_right_click_on_enemy_gathers_instead_of_attacking() -> None:
         app._handle_mouse_down(3, local)
     command = app.simulation.command_history[-1]["command"]
     assert isinstance(command, dict)
-    assert command["type"] == "move" and command["gathering"] is True
-    assert all(not app.simulation.entities[key].pursue_target for key in app.selected_entities)
+    assert command["type"] == "attack" and command["target_entity_id"] == "enemy"
+    assert all(app.simulation.entities[key].pursue_target for key in app.selected_entities)
+
+
+@pytest.mark.parametrize("shift_key", [pygame.K_LSHIFT, pygame.K_RSHIFT])
+def test_shift_event_release_and_focus_loss_do_not_leave_queued_input(shift_key: int) -> None:
+    app = AirtsApp(interaction_simulation())
+    app.selected_entities = {"unit", "tank"}
+    origin_x, origin_y = app.map_origin
+    screen = app.screen_point(app.simulation.entities["enemy"].position)
+    local = (screen[0] - origin_x, screen[1] - origin_y)
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=0):
+        app._handle_event(pygame.event.Event(pygame.KEYDOWN, key=shift_key, mod=0))
+        app._handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=local))
+        assert app.simulation.command_history[-1]["command"].get("queued") is True
+        app._handle_event(pygame.event.Event(pygame.KEYUP, key=shift_key, mod=0))
+        app._handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=local))
+        assert not app.simulation.command_history[-1]["command"].get("queued", False)
+        app._handle_event(pygame.event.Event(pygame.KEYDOWN, key=shift_key, mod=0))
+        app._handle_event(pygame.event.Event(pygame.WINDOWFOCUSLOST))
+        app._handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=local))
+        assert not app.simulation.command_history[-1]["command"].get("queued", False)
 
 
 @pytest.mark.parametrize(

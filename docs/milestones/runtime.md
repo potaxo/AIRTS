@@ -34,8 +34,18 @@ Replacement also removes selected builders from waiting construction jobs while 
 builders' membership and progress. Rejected commands retain prior intent. Shift-right-click queues
 contextual direct movement, attack or builder repair. Finite direct movement, attack, repair and
 reclamation finish before pending orders start; persistent automation is replaced by the first
-queued direct order. New ordinary orders clear the selected units' entire direct-order queues.
+queued direct order. New ordinary orders clear the affected capable units' entire direct-order queues.
 Movement, attack and repair share one ordered queue rather than separate queues per activity.
+Modifier state follows keyboard-event order within each input batch, so releasing Shift later in
+the same frame cannot replace earlier queued clicks. Every Shift click appends a separate task,
+including nearby or repeated ground clicks. An enemy click always names a tracking attack target;
+rapid repeated enemy clicks cannot become a double-click gathering move. Only ground movement
+participates in the ordinary double-click gathering shortcut.
+Each unit independently executes supported orders: mixed selections ignore attack for unarmed
+members and repair for members without repair capability, preserving those members' existing work.
+Capability filtering belongs to the shared command boundary; ownership and reference validation
+still cover the entire selection. A command with no capable members is rejected without changing
+intent; contextual clicks never turn an unsupported attack or repair into movement.
 Empty ordinary work is canceled; valid future-unit sources may wait. Terminal work leaves live UI.
 Manual factory override pauses its controller; resume must reclaim the factory.
 

@@ -8,7 +8,7 @@ Spatial queries are shared within a decision; expensive orders have fixed budget
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil, sqrt
 from typing import TYPE_CHECKING
 
@@ -61,6 +61,10 @@ ATTACK_WAVE_SIZE = 20
 REINFORCEMENT_SIZE = 6
 ARMY_RADIUS = 14.0
 GROWTH_SHARE = 0.4
+MAX_EXPANSION_REGIONS = 4
+MAX_BUILDERS = 32
+MAX_CONSTRUCTION_SITES = 24
+MAX_PRODUCTION_BATCH = 8
 TARGET_VALUES = {
     EntityKind.COMMAND_CENTER: 550.0,
     EntityKind.FACTORY: 500.0,
@@ -153,6 +157,7 @@ class _Decision:
     rally: Point
     orders: int = 0
     production_lanes: frozenset[Cell] = frozenset()
+    placement_checks: dict[EntityKind, int] = field(default_factory=dict)
 
     def submit(self, command: Command) -> CommandResult | None:
         if self.orders >= MAX_ORDERS:
@@ -219,6 +224,10 @@ def drive_opponents(simulation: Simulation) -> None:
         _drive_army(decision, threat)
         if simulation.tick % ECONOMY_TICKS < DECISION_TICKS:
             _refresh_growth_credit(decision)
+            if _has_surplus(_available_cash(decision)):
+                _plan_production(
+                    decision, threatened=threat is not None, order_limit=decision.orders + 1
+                )
             _plan_growth(decision, threatened=threat is not None)
             _plan_production(decision, threatened=threat is not None)
 
@@ -431,6 +440,7 @@ def _assign_squads(decision: _Decision) -> None:
                 for squad in memory.squads
                 if squad.phase in {SquadPhase.GATHERING, SquadPhase.RETREATING}
                 and len(squad.entity_ids) < MAX_SQUAD_SIZE
+                and _center(_members(decision, squad)).distance_to(unit.position) <= 2 * ARMY_RADIUS
             ),
             None,
         )
@@ -686,7 +696,11 @@ def _drive_army(decision: _Decision, threat: Entity | None) -> None:
     active = [
         squad for squad in groups if squad.phase in {SquadPhase.ADVANCING, SquadPhase.ATTACKING}
     ]
-    leader = active[0] if active else groups[0]
+    leader = (
+        active[0]
+        if active
+        else max(groups, key=lambda squad: (len(squad.entity_ids), -squad.phase_tick))
+    )
     center = _center(_members(decision, leader))
     ordered = sorted(
         groups,
@@ -931,15 +945,34 @@ def _economy_forecast(decision: _Decision) -> tuple[float, float]:
     return float(income), capacity
 
 
-def _refresh_growth_credit(decision: _Decision) -> None:
-    simulation, memory = decision.simulation, decision.memory
-    _, committed = _production_demand(decision)
+def _available_cash(decision: _Decision, committed: int | None = None) -> int:
+    if committed is None:
+        _, committed = _production_demand(decision)
     committed += sum(
         job.building_kind.profile.construction_cost
         for job in _pending_construction(decision)
         if not job.cost_paid
     )
-    cash = max(0, simulation.resources.get(decision.owner_id, 0) - committed)
+    return max(0, decision.simulation.resources.get(decision.owner_id, 0) - committed)
+
+
+def _has_surplus(cash: int) -> bool:
+    return cash >= 8 * EntityKind.FACTORY.profile.construction_cost
+
+
+def _desired_builders(counts: dict[EntityKind, int], factories: int, cash: int) -> int:
+    normal = min(8, 3 + counts[EntityKind.RESOURCE_GENERATOR] // 2 + factories // 3)
+    if not _has_surplus(cash):
+        return normal
+    return min(
+        MAX_BUILDERS,
+        max(8, normal, 3 + cash // (16 * EntityKind.BUILDER.profile.production_cost)),
+    )
+
+
+def _refresh_growth_credit(decision: _Decision) -> None:
+    simulation, memory = decision.simulation, decision.memory
+    cash = _available_cash(decision)
     elapsed = max(0, simulation.tick - memory.budget_tick) / simulation.TICKS_PER_SECOND
     income, _ = _economy_forecast(decision)
     memory.growth_credit = min(
@@ -1056,9 +1089,124 @@ def _defense_point(decision: _Decision, anchor: Point) -> Point:
     return Point(anchor.x + 6 * dx / length, anchor.y + 6 * dy / length)
 
 
+def _expansion_regions(
+    decision: _Decision,
+    builders: list[Entity],
+    pending: list[ConstructionParameters],
+) -> list[tuple[EntityKind, Point]]:
+    game_map = decision.simulation.game_map
+    span = max(32, ceil(max(game_map.width, game_map.height) / 12))
+    sectors: dict[tuple[int, int], set[EntityKind]] = {}
+    occupied = set()
+    for unit in decision.owned:
+        if not unit.is_movable:
+            sectors.setdefault(
+                (int(unit.position.x) // span, int(unit.position.y) // span), set()
+            ).add(unit.kind)
+    for unit in decision.simulation.entities.values():
+        if not unit.is_movable:
+            occupied.add(unit.position)
+    for job in pending:
+        sectors.setdefault((int(job.position.x) // span, int(job.position.y) // span), set()).add(
+            job.building_kind
+        )
+        occupied.add(job.position)
+    options = [
+        (EntityKind.RESOURCE_GENERATOR, point)
+        for point in game_map.resource_sites or ()
+        if point not in occupied
+    ]
+    for y in range(0, game_map.height, span):
+        for x in range(0, game_map.width, span):
+            kinds = sectors.get((x // span, y // span), set())
+            if EntityKind.FACTORY not in kinds:
+                kind = EntityKind.FACTORY
+            elif not kinds.intersection(
+                {EntityKind.RESOURCE_GENERATOR, EntityKind.MATTER_SYNTHESIZER}
+            ):
+                kind = (
+                    EntityKind.RESOURCE_GENERATOR
+                    if game_map.resource_sites is None
+                    else EntityKind.MATTER_SYNTHESIZER
+                )
+            elif EntityKind.TURRET not in kinds:
+                kind = EntityKind.TURRET
+            else:
+                continue
+            point = Point(
+                (x + min(x + span, game_map.width)) / 2, (y + min(y + span, game_map.height)) / 2
+            )
+            options.append((kind, point))
+    options.sort(
+        key=lambda item: (
+            item[0] is not EntityKind.RESOURCE_GENERATOR,
+            not sectors.get((int(item[1].x) // span, int(item[1].y) // span)),
+            min(builder.position.distance_to(item[1]) for builder in builders)
+            + decision.home.distance_to(item[1]) * 0.15,
+            item[1].x,
+            item[1].y,
+        )
+    )
+    # Rotate the bounded window so blocked islands or a contested frontier cannot
+    # monopolize every future search. Empty rear/flank sectors remain eligible.
+    offset = ((decision.simulation.tick // ECONOMY_TICKS - 1) * MAX_EXPANSION_REGIONS) % max(
+        1, len(options)
+    )
+    return (options[offset:] + options[:offset])[:MAX_EXPANSION_REGIONS]
+
+
+def _plan_surplus_growth(decision: _Decision, pending: list[ConstructionParameters]) -> None:
+    simulation = decision.simulation
+    busy = {key for job in pending for key in job.builder_ids}
+    builders = [
+        unit
+        for unit in decision.owned
+        if unit.profile.can_build
+        and unit.entity_id not in busy
+        and unit.entity_id not in simulation.assignments
+    ]
+    limit = min(MAX_CONSTRUCTION_SITES, sum(unit.profile.can_build for unit in decision.owned))
+    ceiling = MAX_ORDERS - 1 if decision.orders == 0 else MAX_ORDERS
+    if builders and len(pending) < limit:
+        for kind, center in _expansion_regions(decision, builders, pending):
+            if not builders or len(pending) >= limit or decision.orders >= ceiling:
+                break
+            budget = min(_available_cash(decision), decision.memory.growth_credit)
+            if kind.profile.construction_cost > budget:
+                continue
+            site = _construction_site(
+                decision,
+                kind,
+                center,
+                builders,
+                pending,
+                candidate_limit=MAX_PLACEMENT_CANDIDATES // MAX_EXPANSION_REGIONS,
+                exact_resource_site=True,
+            )
+            if site is None:
+                continue
+            builder, point = site
+            result = decision.submit(
+                CreateConstructionCommand(
+                    builder.entity_id, kind, point, owner_id=decision.owner_id, title="AI expansion"
+                )
+            )
+            if result is not None and result.accepted:
+                decision.memory.growth_credit -= kind.profile.construction_cost
+                builders.remove(builder)
+                pending = _pending_construction(decision)
+    if decision.orders < ceiling:
+        # Front-line combat must not veto upgrades at safe rear income buildings.
+        _start_income_upgrade(decision, _income_upgrade_goal(decision, threatened=False))
+
+
 def _plan_growth(decision: _Decision, *, threatened: bool) -> None:
     simulation, memory = decision.simulation, decision.memory
     pending = _pending_construction(decision)
+    cash = _available_cash(decision)
+    if _has_surplus(cash):
+        _plan_surplus_growth(decision, pending)
+        return
     upgrade_goal = _income_upgrade_goal(decision, threatened=threatened)
     busy = {key for job in pending for key in job.builder_ids}
     builders = [
@@ -1077,12 +1225,6 @@ def _plan_growth(decision: _Decision, *, threatened: bool) -> None:
         + sum(job.building_kind is kind and job.site_entity_id is None for job in pending)
         for kind in EntityKind
     }
-    _, committed = _production_demand(decision)
-    cash = (
-        simulation.resources.get(decision.owner_id, 0)
-        - committed
-        - sum(job.building_kind.profile.construction_cost for job in pending if not job.cost_paid)
-    )
     budget = min(cash, memory.growth_credit)
     income, capacity = _economy_forecast(decision)
     frontier = _frontier(decision)
@@ -1220,6 +1362,9 @@ def _construction_site(
     center: Point,
     builders: list[Entity],
     pending: list[ConstructionParameters],
+    *,
+    candidate_limit: int = MAX_PLACEMENT_CANDIDATES,
+    exact_resource_site: bool = False,
 ) -> tuple[Entity, Point] | None:
     simulation = decision.simulation
     claimed = {
@@ -1236,7 +1381,9 @@ def _construction_site(
     )
     if kind is EntityKind.RESOURCE_GENERATOR:
         candidates = (
-            list(simulation.game_map.resource_sites or ())
+            [center]
+            if exact_resource_site
+            else list(simulation.game_map.resource_sites or ())
             if simulation.game_map.resource_sites is not None
             else [
                 Point(float(int(center.x) + dx), float(int(center.y) + dy))
@@ -1271,7 +1418,9 @@ def _construction_site(
             point.y,
         )
     )
-    for point in candidates[:MAX_PLACEMENT_CANDIDATES]:
+    remaining = MAX_PLACEMENT_CANDIDATES - decision.placement_checks.get(kind, 0)
+    for point in candidates[: min(candidate_limit, remaining)]:
+        decision.placement_checks[kind] = decision.placement_checks.get(kind, 0) + 1
         cells = footprint_cells(kind, point)
         if (
             point in claimed
@@ -1336,21 +1485,18 @@ def _production_demand(decision: _Decision) -> tuple[dict[EntityKind, int], int]
     return counts, committed
 
 
-def _plan_production(decision: _Decision, *, threatened: bool) -> None:
+def _plan_production(
+    decision: _Decision, *, threatened: bool, order_limit: int = MAX_ORDERS
+) -> None:
     simulation, memory = decision.simulation, decision.memory
     counts, committed = _production_demand(decision)
     income = building_income_per_second(simulation, decision.owner_id)
-    construction = sum(
-        job.building_kind.profile.construction_cost
-        for job in _pending_construction(decision)
-        if not job.cost_paid
-    )
+    cash = _available_cash(decision, committed)
+    surplus = _has_surplus(cash)
     free = max(
         0,
         int(
-            simulation.resources.get(decision.owner_id, 0)
-            - committed
-            - construction
+            cash
             - (
                 0
                 if threatened or not income or not counts[EntityKind.BUILDER]
@@ -1368,9 +1514,11 @@ def _plan_production(decision: _Decision, *, threatened: bool) -> None:
     factories = [unit for unit in sources if unit.kind is not EntityKind.COMMAND_CENTER]
     offset = (simulation.tick // ECONOMY_TICKS) % max(1, len(factories))
     sources = centers + factories[offset:] + factories[:offset]
-    desired_builders = min(8, 3 + counts[EntityKind.RESOURCE_GENERATOR] // 2 + len(factories) // 3)
+    desired_builders = _desired_builders(counts, len(factories), cash)
     military_funds = free
     for source in sources:
+        if decision.orders >= min(MAX_ORDERS, order_limit):
+            break
         loop = simulation.continuous_production(source.entity_id)
         if loop is not None:
             key = loop.automation_id
@@ -1401,8 +1549,19 @@ def _plan_production(decision: _Decision, *, threatened: bool) -> None:
             for job in jobs
         ):
             continue
-        need_builder = counts[EntityKind.BUILDER] < desired_builders and (
-            not threatened or not counts[EntityKind.BUILDER]
+        builder_target = desired_builders
+        if surplus and not centers:
+            combat_count = sum(
+                count
+                for kind, count in counts.items()
+                if kind.profile.combat_support and kind.profile.movable
+            )
+            builder_target = min(builder_target, max(3, combat_count // 4))
+        need_builder = counts[EntityKind.BUILDER] < builder_target and (
+            not threatened
+            or not counts[EntityKind.BUILDER]
+            or surplus
+            and not decision.threats(source.selection_position)
         )
         if need_builder and (
             not counts[EntityKind.BUILDER]
@@ -1427,8 +1586,26 @@ def _plan_production(decision: _Decision, *, threatened: bool) -> None:
         if loop is not None and kind is EntityKind.LIGHT_TANK:
             continue
         count = min(3 if kind is EntityKind.LIGHT_TANK else 1, free // kind.profile.production_cost)
+        if surplus:
+            batch = min(
+                MAX_PRODUCTION_BATCH,
+                max(
+                    3 if kind is EntityKind.LIGHT_TANK else 1,
+                    ceil(len(factories) * ECONOMY_TICKS / kind.profile.production_ticks),
+                ),
+            )
+            count = min(batch, free // kind.profile.production_cost)
+            front = counts[EntityKind.LIGHT_TANK] + counts[EntityKind.HEAVY_TANK]
+            if kind is EntityKind.LIGHT_TANK and front < 8:
+                count = min(count, 8 - front)
+            elif kind is EntityKind.SCOUT:
+                count = min(count, max(1, ceil(front / 24)) - counts[kind])
         if kind is EntityKind.BUILDER:
-            count = min(2, desired_builders - counts[kind], free // kind.profile.production_cost)
+            count = min(
+                6 if surplus else 2,
+                builder_target - counts[kind],
+                free // kind.profile.production_cost,
+            )
         if count <= 0:
             continue
         result = decision.submit(

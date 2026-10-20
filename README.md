@@ -71,12 +71,12 @@ Art locations, regeneration and replacement are documented in the
 | --- | --- |
 | `1` | Selection mode: click an entity, point, route, or region; drag to select units |
 | `Shift` + left-click or selection drag | Toggle additions to the selection |
-| `Shift` + right-click with selected units | Append an order: ground gathers and moves, enemies are attacked, damaged owned buildings are repaired by builders; finish each order before the next |
+| `Shift` + right-click with selected units | Append an order: ground gathers and moves, enemies are attacked, damaged owned buildings are repaired; each unit skips unsupported tasks and finishes its current task before the next |
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
 | Right-click ground or a friendly entity | Nearby: preserve formation; beyond 12 cells from the group center: gather and march along shared routes |
-| Double right-click at the same destination, including an enemy | Gather selected units around the destination; distant moves use the same march behavior |
-| Right-click an enemy | Order selected armed units to pursue and attack it; surviving attackers gather at its last location after destruction |
+| Double right-click ground at the same destination | Gather selected units around the destination; distant moves use the same march behavior |
+| Right-click an enemy, including rapid repeated clicks | Pursue and attack that entity; fire at enemies along the route, prioritize the ordered target in range, and continue queued work after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
 | Middle-drag | Pan the map |
@@ -192,8 +192,8 @@ Select the hub to see that radius. Thick green lines connect builders to buildin
 or repairing, and repair facilities to units or buildings while healing, even without selection. Builders work
 within the build/repair ranges shown in their details, without needing to touch the building.
 Units on repair orders stop at clear positions within range instead of all converging
-on the hub's center. Selected attackers show red target lines; large selections sample those lines
-and movement routes.
+on the hub's center. Selected orders show red tracking attacks and white movement segments,
+including queued tasks. Large selections sample these lines rather than drawing every unit's route.
 
 ## Saves and loading
 

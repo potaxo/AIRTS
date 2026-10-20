@@ -33,8 +33,11 @@ at most 32 members for bounded command/routing work; the first active cohort lea
 The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
 at least 12 can launch; there is no timeout that releases isolated units. Nearby waiting cohorts
 merge. Fresh units rally near their producer and wait for a six-unit reinforcement batch before
-following the army, rather than being appended to a distant marching cohort. Marching cohorts
-share the target and regroup when stretched out. A depleted offensive force of fewer than twelve
+following the army, rather than being appended to a distant marching cohort.
+New arrivals join only nearby gathering/retreating cohorts, so geographically separate factories
+do not share one scattered assembly queue. With no active wave, the largest cohort supplies the
+next leader rather than allowing a small distant group to hold all larger forces behind it.
+Marching cohorts share the target and regroup when stretched out. A depleted offensive force of fewer than twelve
 regroups; forces unable to rebuild, or clearing enemies unable to develop, can finish with survivors.
 
 Army contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
@@ -69,8 +72,8 @@ freeze all army production or enqueue unaffordable buildings. Recovering lost pr
 and emergency defense can use the shared balance. Manual production pauses remain untouched;
 AI budget pauses on existing continuous loops remain tracked until actual resume.
 
-Builders scale from three toward eight with resource holdings and factories; command centers
-supply them preferentially. Up to six separate builders can construct concurrently. Close,
+Under ordinary budgets, builders scale from three toward eight with resource holdings and factories;
+up to six separate builders can construct concurrently. Close,
 connected resource sites rank ahead of distant speculative holdings, while enemy-controlled and
 unreachable sites are rejected. Production buildings first support remote income sites without
 a nearby factory, then extend the frontier in bounded steps toward unclaimed resources or enemies.
@@ -81,6 +84,23 @@ Visible enemy army buildup that substantially outmatches the current force prior
 turret before further expansion, so early economic growth does not leave the core undefended.
 Placement preserves resource footprints and producer exit rings. Obstructed production and
 construction trigger bounded clearance orders.
+
+After protecting finite production and unpaid construction, cash of at least eight factory prices
+enables surplus expansion. This is a spending policy, not an income bonus. The worker target then
+scales with cash up to 32, with at most 24 simultaneous funded sites. Command centers preferentially
+produce workers in batches of up to six; without a command center, worker demand is limited relative
+to the existing/queued army so factories also keep supplying soldiers. Combat at a remote holding
+does not stop worker production at safe rear sources or locally safe construction/upgrades.
+
+Surplus growth considers coarse sectors across the whole map, not just the nearest-enemy frontier.
+Each sector seeks a factory, income and turret coverage before being considered developed; free
+resource sites remain desirable. Site-constrained maps use synthesizers on ordinary land, while
+unrestricted maps can use cheaper extractors. Completed buildings, scaffolds and pending jobs count
+toward each sector's needs. Distance and existing holdings rank choices, but a rotating four-region
+window also visits empty rear/flank land and moves past contested or unreachable candidates.
+Placement still rejects enemy fire coverage, nearby enemy producers, occupied/resource footprints,
+blocked exits and unreachable builder approaches. Surplus mode has no ten-factory or ten-synthesizer
+stop condition; available safe space, actual funds, workers and bounded planning work constrain it.
 
 Income upgrades compete with expansion using completion time plus cost per additional income;
 expansion adds straight-line builder travel and construction time, not a routed arrival forecast.
@@ -98,6 +118,13 @@ demand. These are composition preferences, not nonexistent armor-damage bonuses.
 units and the prepaid current item of continuous production count toward composition, preventing
 separate factories from all filling the same gap.
 
+With surplus cash, batches scale with the number of factories and configured production time,
+up to eight units per order, so rotating sources can stay productive without constant singleton
+requeueing. Small factory counts retain short batches for timely mixed-army composition; scouts
+retain their small quota. A surplus economy turn first allows one production command, then growth,
+then uses any remaining command budget for production. This prevents construction from indefinitely
+starving the factories while keeping the same global per-decision command cap.
+
 A missing expensive role can save up to its next unit's cost within military funds instead of
 repeatedly buying another light tank; existing continuous loops respect that reserve. This can idle
 production while income accumulates, but neither queues unaffordable units nor spends the separate
@@ -111,7 +138,9 @@ multipliers are secretly changed, and no free resources or discounts are granted
 Owners decide every ten ticks with staggered slots; budgets, construction and production run every
 twenty. A decision attempts at most three commands and updates at most two combat cohorts, with one
 normally reserved on economy turns. Target selection checks at most four candidates and placement
-at most 64 candidates per building kind. Production queues rotate factories and retain ordinary
+at most 64 candidates per building kind across the complete decision, including surplus searches.
+The global sector grid is at most twelve cells per axis; its window checks at most four regions
+with at most sixteen placement candidates each. Production queues rotate factories and retain ordinary
 shared validation, routing and collision budgets. Saved cohort phases, objectives, command/retry
 ticks, budget pauses, growth credit and its update tick resume through current-format persistence;
 AI commands are regenerated internally during replay.

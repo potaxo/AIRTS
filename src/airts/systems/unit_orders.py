@@ -6,12 +6,15 @@ from typing import TYPE_CHECKING
 
 from airts.contracts.commands import AttackCommand, RepairBuildingCommand
 from airts.contracts.events import EventType
-from airts.navigation.pathfinding import PathfindingError
+from airts.navigation.pathfinding import PathfindingError, RouteDeferred
 from airts.systems import automation_assignments, movement
 from airts.world.entities import OrderKind, UnitOrder, UnitState
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+QUEUED_SEARCH_CELL_BUDGET = 8_192
 
 
 def continuing_ids(simulation: Simulation, entity_ids: tuple[str, ...]) -> frozenset[str]:
@@ -60,13 +63,15 @@ def drive_order_queues(simulation: Simulation) -> None:
     if not pending:
         return
     offset = simulation.tick % len(pending)
-    allowance = simulation._routes.automation_allowance(simulation.GATHERING_PATH_BUDGET)
+    allowance = simulation._routes.automation_allowance(
+        simulation.GATHERING_PATH_BUDGET, search_limit=QUEUED_SEARCH_CELL_BUDGET
+    )
     ordered = pending[offset:] + pending[:offset]
     for key in ordered[: simulation.GATHERING_PATH_BUDGET]:
         entity = simulation.entities[key]
         order = entity.order_queue[0]
         if order.kind is OrderKind.MOVE:
-            if not allowance.claim():
+            if not allowance.available:
                 continue
             try:
                 route = movement.plan_group_paths(
@@ -75,7 +80,10 @@ def drive_order_queues(simulation: Simulation) -> None:
                     {key: order.position},
                     shared_goal=order.group_goal,
                     compact_approach=order.group_goal is not None,
+                    allowance=allowance,
                 )[key]
+            except RouteDeferred:
+                continue
             except PathfindingError as error:
                 if entity.state is not UnitState.WAITING:
                     simulation.events.record(
@@ -88,6 +96,9 @@ def drive_order_queues(simulation: Simulation) -> None:
                     )
                 entity.state = UnitState.WAITING
                 continue
+            # Planning does not claim routes. Charge only completed plans so a
+            # deferred search cannot consume another controller's route capacity.
+            allowance.claim()
             entity.order_queue.pop(0)
             movement.start_path(
                 simulation, entity, order.position, route, "human_queue", UnitState.MOVING

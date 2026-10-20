@@ -558,24 +558,26 @@ class OpenGLFrameBuilder:
         path_count = 0
         for entity_id in app.representative_path_entity_ids():
             entity = app.simulation.entities[entity_id]
-            points, rgb = order_feedback(app, entity)
-            color = _float_color(rgb)
-            if len(points) < 2:
-                continue
-            for first, second in zip(points, points[1:], strict=False):
-                _append_line_vertex(
-                    values,
-                    origin_x + first.x * tile_size,
-                    origin_y + first.y * tile_size,
-                    color,
-                )
-                _append_line_vertex(
-                    values,
-                    origin_x + second.x * tile_size,
-                    origin_y + second.y * tile_size,
-                    color,
-                )
-            path_count += 1
+            drawn = False
+            for points, rgb in order_feedback(app, entity):
+                color = _float_color(rgb)
+                if len(points) < 2:
+                    continue
+                for first, second in zip(points, points[1:], strict=False):
+                    _append_line_vertex(
+                        values,
+                        origin_x + first.x * tile_size,
+                        origin_y + first.y * tile_size,
+                        color,
+                    )
+                    _append_line_vertex(
+                        values,
+                        origin_x + second.x * tile_size,
+                        origin_y + second.y * tile_size,
+                        color,
+                    )
+                drawn = True
+            path_count += int(drawn)
         return values.tobytes(), len(values) // LINE_FLOATS, path_count
 
     def _build_projectiles(

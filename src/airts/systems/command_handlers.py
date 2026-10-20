@@ -536,29 +536,27 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
             "attack",
             ValidationFailure(ValidationPhase.OWNERSHIP, "TARGET_IS_FRIENDLY", "target_entity_id"),
         )
-    for entity_id in command.entity_ids:
-        entity = simulation.entities[entity_id]
-        if entity.kind.profile.attack_damage <= 0 or not entity.is_complete:
-            return simulation._reject_validation(
-                "attack",
-                ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
-            )
-        if command.queued and not entity.is_movable:
-            return simulation._reject_validation(
-                "attack",
-                ValidationFailure(
-                    ValidationPhase.CAPABILITY, "QUEUED_ATTACK_REQUIRES_MOBILE_UNIT", "entity_ids"
-                ),
-            )
+    attackers = tuple(
+        key
+        for key in command.entity_ids
+        if simulation.entities[key].profile.attack_damage > 0
+        and simulation.entities[key].is_complete
+        and (not command.queued or simulation.entities[key].is_movable)
+    )
+    if not attackers:
+        return simulation._reject_validation(
+            "attack",
+            ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_CANNOT_ATTACK", "entity_ids"),
+        )
     if command.queued:
         unit_orders.append_target_order(
             simulation,
-            command.entity_ids,
+            attackers,
             UnitOrder(OrderKind.ATTACK, target.selection_position, target.entity_id),
         )
         return simulation._accept("attack")
-    automation_assignments.manual_override_many(simulation, command.entity_ids)
-    for entity_id in command.entity_ids:
+    automation_assignments.manual_override_many(simulation, attackers)
+    for entity_id in attackers:
         entity = simulation.entities[entity_id]
         entity.path.clear()
         entity.move_target = None

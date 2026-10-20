@@ -9,7 +9,12 @@ import pytest
 
 from airts.contracts.spatial import Point
 from airts.navigation.collision.geometry import constrained_step
-from airts.navigation.pathfinding import PathfindingError, RoutingService, passable_segment_cells
+from airts.navigation.pathfinding import (
+    PathfindingError,
+    RouteDeferred,
+    RoutingService,
+    passable_segment_cells,
+)
 from airts.world.map import GameMap, load_map_data
 
 
@@ -164,6 +169,70 @@ def test_branch_cost_continues_python_compensated_sum_without_changing_rounding(
         assert branch is not None
         cells = path.cells[: index + 1] + branch.cells[1:]
         assert branch.cost == sum(game_map.terrain_at_cell(c).movement_cost for c in cells[1:])
+
+
+@pytest.mark.parametrize(
+    "start,anchor,target",
+    [
+        (Point(0.2, 0.2), Point(159.8, 0.8), Point(158.2, 3.2)),
+        (Point(0.2, 0.2), Point(0.8, 0.8), Point(138.2, 2.2)),
+        (Point(0.5, 0.5), Point(0.5, 0.5), Point(138.2, 2.2)),
+    ],
+)
+def test_numeric_group_branches_retain_endpoints_and_complete_weighted_cost(
+    start: Point, anchor: Point, target: Point
+) -> None:
+    game_map = load_map_data(
+        {
+            "id": "numeric_group_branch",
+            "name": "Numeric group branch",
+            "width": 160,
+            "height": 4,
+            "terrain": {"rows": [["forest", "grass", "bridge", "road"] * 40] * 4},
+            "entities": [{"id": "unit", "kind": "scout", "position": [0.2, 0.2]}],
+        }
+    )
+    router = RoutingService(game_map)
+    route = router.group_path(start, anchor, target, frozenset(), compact_approach=True)
+    assert route.cells[0] == game_map.cell_for(start)
+    assert route.cells[-1] == game_map.cell_for(target)
+    assert route.waypoints[-1] == target
+    assert all(game_map.is_cell_passable(cell) for cell in route.cells)
+    assert route.cost == pytest.approx(
+        sum(game_map.terrain_at_cell(cell).movement_cost for cell in route.cells[1:]),
+        rel=1e-14,
+        abs=1e-12,
+    )
+    if start != anchor and game_map.cell_for(start) == game_map.cell_for(anchor):
+        assert route.waypoints[0] == anchor
+
+
+def test_search_allowance_defers_cold_routes_but_admits_cached_and_direct_routes(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1))
+    start, goal = Point(0.5, 0.5), Point(10.5, 10.5)
+    blocked = frozenset({(5, 5)})
+    allowance = router.automation_allowance(8, search_limit=1)
+    route = router.group_path(
+        start, goal, goal, blocked, compact_approach=True, allowance=allowance
+    )
+    assert allowance.search_remaining == 0
+    assert router.field_build_count == 1
+    assert (
+        router.group_path(start, goal, goal, blocked, compact_approach=True, allowance=allowance)
+        == route
+    )
+    other = Point(10.5, 9.5)
+    with pytest.raises(RouteDeferred):
+        router.group_path(start, other, other, blocked, allowance=allowance)
+    assert router.field_build_count == 1
+    assert router.group_path(
+        start, other, Point(1.5, 0.5), blocked, allowance=allowance
+    ).waypoints == (Point(1.5, 0.5),)
+    router.begin_tick()
+    renewed = router.automation_allowance(8, search_limit=1)
+    assert router.group_path(start, other, other, blocked, allowance=renewed).waypoints[-1] == other
 
 
 def test_thousand_routes_share_one_field_and_cache_eviction_preserves_routes(

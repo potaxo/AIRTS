@@ -195,6 +195,15 @@ def drive_combat(simulation: Simulation) -> None:
             chase_target(simulation, attacker, ordered_target, approach_cache)
         firing_target: Entity | None
         if (
+            not attacker.pursue_target
+            and not attacker.path
+            and attacker.order_queue
+            and attacker.order_queue[0].kind is OrderKind.ATTACK
+        ):
+            # Bounded FIFO dispatch can leave part of a selection waiting for its
+            # attack to activate. Passive acquisition must not execute another job.
+            firing_target = None
+        elif (
             ordered_target is not None
             and ordered_target_distance_squared is not None
             and ordered_target_distance_squared <= attack_range_squared
@@ -279,6 +288,11 @@ def _join_nearby_combat(
                 and entity.kind.profile.combat_support
                 and entity.is_complete
                 and not entity.pursue_target
+                and (
+                    entity.path
+                    or not entity.order_queue
+                    or entity.order_queue[0].kind is not OrderKind.ATTACK
+                )
                 and entity.hold_anchor is None
                 and (
                     entity.last_player_control_tick is None

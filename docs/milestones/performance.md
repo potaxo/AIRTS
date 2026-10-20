@@ -80,7 +80,7 @@ use a declared 25/s established-economy fixture; upgrade and opening-income cove
 | [4K OpenGL](../../tests/performance/test_opengl_thousand_scout_100fps.py) | Same scout fixture; CPU submission plus hardware end-to-end 100-frame/ten-tick gates; real collision, >=750 moving scouts, pixel readback, per-frame GPU completion, >=100 Real FPS |
 | [Sustained battle](../../tests/performance/test_sustained_complex_battle_performance.py) | 500 vs 500, each 70/20/10 scout/light/heavy, 80 x 60 mixed terrain; friendly line defense plus enemy move; 30 ticks/300 native-4K hardware frames, ten interpolation samples/tick, six inspection changes; real projectiles, damage, collision, pixel readback, >=80 Real FPS required, 100 Real FPS optimization goal |
 | [Continuous production](../../tests/performance/test_crowd_congestion_performance.py) | 296 defenders + four factories ->304 defenders; 100 software frames at 1920 x 1080/ten ticks; stable unique stations, separation >=90% contact distance, no building intrusion, >=100 Real FPS |
-| [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 80 x 80 headless map, 60 ticks; unique bounded squads and per-decision command/candidate/forecast limits; timing variant requires complete tick p95 <100 ms and reports AI decisions/commands |
+| [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 60 ticks; original 80 x 80 opening-budget case plus a 320 x 320, 32-builder, 100,000-resource surplus case; unique bounded squads and per-decision command/candidate/forecast limits; timing requires complete tick p95 <100 ms and reports AI decisions/commands, starting funds, map size and builders |
 
 The native-4K large-map camera case in the OpenGL test above retains all 320 x 320 terrain colors,
 checks cell-center readback at three zoom levels, and requires 100 synchronized frames at >=100
@@ -137,6 +137,8 @@ Stable regions still pay for linear state packing/indexing and local overlap dis
 run displacement certificates without an intent/correction. Report tick timing separately from
 completed-frame p99 and Real FPS. Constructor/JIT warm-up stays outside both timing streams;
 specified simulation commands, passive submission, Hold/defense recovery and replanning stay inside.
+Movement ordering geometry uses reusable numeric scratch; recovery flags share its packed input
+while request ages retain integer precision. This does not omit stationary bodies or certification.
 
 Joint anchor projection's refinement allowance is `8 * (P + E + sum(degree_i ** 2))`, for P bodies,
 E retained edges and endpoint degrees. Each CG solve has dimension <=`min(active_edges, 2 * P)`

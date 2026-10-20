@@ -49,6 +49,11 @@ production, automation tabs, settings, help, saves and the lobby share these pri
 antialiasing remains enabled for reading small labels. Styling changes preserve button rectangles,
 command routing and the renderer's dirty-region cache; pointer hover adds no redraw work.
 
+Selected direct orders show a connected sequence: red attack segments, white gathering/movement
+segments and green repair segments. Active and queued target segments follow the referenced
+entity's current position. Both renderers share the same read-only geometry and retain the
+representative-unit limit for large selections; displaying a queue performs no pathfinding.
+
 Change terrain/entity/team colors in [palette.py](../../src/airts/presentation/palette.py), material
 patterns in `visuals/terrain.py` and panel/button/text roles in `ui/theme.py`. This separation keeps
 appearance out of gameplay profiles. Terrain and chrome use code-native drawing with existing

@@ -472,7 +472,7 @@ def test_right_click_dispatch_price_and_live_attack_feedback() -> None:
     attacker = simulation.entities["outside"]
     assert attacker.pursue_target
     assert simulation.entities["builder"].repair_target_id == "factory"
-    points, color = order_feedback(app, attacker)
+    ((points, color),) = order_feedback(app, attacker)
     assert points[-1] == simulation.entities["hostile"].selection_position
     assert color[0] > color[1]
     assert "outside" in app.representative_path_entity_ids()
@@ -485,7 +485,7 @@ def test_right_click_dispatch_price_and_live_attack_feedback() -> None:
         MoveCommand(("hostile",), Point(23.5, 22.5), owner_id="enemy")
     ).accepted
     simulation.advance(1)
-    points, _ = order_feedback(app, attacker)
+    ((points, _),) = order_feedback(app, attacker)
     assert points[-1] != old_endpoint
     assert points[-1] == simulation.entities["hostile"].selection_position
     pygame.font.init()

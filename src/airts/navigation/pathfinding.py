@@ -18,6 +18,10 @@ class PathfindingError(ValueError):
     """A requested endpoint or route is unavailable."""
 
 
+class RouteDeferred(Exception):
+    """Keep a queued order pending until more search work can be admitted."""
+
+
 @dataclass(frozen=True, slots=True)
 class PathResult:
     cells: tuple[Cell, ...]
@@ -40,12 +44,17 @@ class RouteAllowance:
     service: RoutingService
     limit: int
     used: int = 0
+    search_remaining: int | None = None
+
+    @property
+    def available(self) -> bool:
+        return (
+            self.used < self.limit
+            and self.service.automation_route_count < self.service.automation_budget
+        )
 
     def claim(self) -> bool:
-        if (
-            self.used >= self.limit
-            or self.service.automation_route_count >= self.service.automation_budget
-        ):
+        if not self.available:
             return False
         self.used += 1
         self.service.automation_route_count += 1
@@ -113,6 +122,7 @@ class RoutingService:
         _branch_index(
             self._cost_grid, self.obstacle_mask(frozenset()), np.zeros((0, 2)), 0.5, 0.5, inf
         )
+        _route_coordinates(np.zeros(1, dtype=np.int64), game_map.width, 0.5, 0.5, True)
         self._fields: OrderedDict[tuple[tuple[int, ...], frozenset[Cell]], _SearchField] = (
             OrderedDict()
         )
@@ -296,27 +306,66 @@ class RoutingService:
             radius,
         )
 
-    def branch_index(
+    def group_path(
         self,
-        path: PathResult,
+        start: Point,
+        anchor: Point,
         target: Point,
         blocked: frozenset[Cell],
         *,
         maximum_distance: float = inf,
-    ) -> int:
-        """Find the first safe exit in one numeric pass, materializing only its winner."""
-        return _branch_index(
+        compact_approach: bool = False,
+        allowance: RouteAllowance | None = None,
+    ) -> PathResult:
+        """Branch a numeric shared route before materializing its retained cells/points."""
+        direct = self.segment_path(start, target, blocked)
+        if direct is not None:
+            return direct
+        goal, indices, prefixes, cost = self._shared_path_data(start, (anchor,), blocked, allowance)
+        if compact_approach and target == anchor:
+            return self._materialize_path(start, goal, indices, prefixes, cost)
+        coordinates = _route_coordinates(
+            indices, self.game_map.width, float(goal.x), float(goal.y), start != goal
+        )
+        branch_index = _branch_index(
             self._cost_grid,
             self.obstacle_mask(blocked),
-            np.fromiter(
-                (coordinate for p in path.waypoints for coordinate in (p.x, p.y)),
-                dtype=np.float64,
-                count=2 * len(path.waypoints),
-            ).reshape((-1, 2)),
+            coordinates,
             float(target.x),
             float(target.y),
             maximum_distance,
         )
+        if branch_index < 0:
+            goal, indices, prefixes, cost = self._shared_path_data(
+                start, (target,), blocked, allowance
+            )
+            return self._materialize_path(start, goal, indices, prefixes, cost)
+        last = min(branch_index + 1, len(indices) - 1)
+        branch_cells, cost = _segment_path(
+            self._cost_grid,
+            self.obstacle_mask(blocked),
+            float(coordinates[branch_index, 0]),
+            float(coordinates[branch_index, 1]),
+            float(target.x),
+            float(target.y),
+            inf,
+            float(prefixes[last, 0]),
+            float(prefixes[last, 1]),
+        )
+        assert len(branch_cells), "certified group branch must remain passable"
+        cells = self._path_cells(indices[: last + 1].tolist() + branch_cells[1:].tolist())
+        centers = self._centers
+        center_count = min(branch_index + 1, max(0, len(indices) - 2))
+        waypoints = tuple(
+            centers[cell]
+            if cell in centers
+            else centers.setdefault(cell, Point(cell[0] + 0.5, cell[1] + 0.5))
+            for cell in cells[1 : center_count + 1]
+        )
+        if branch_index >= len(indices) - 2:
+            waypoints += (goal,)
+        waypoints += (target,)
+        return PathResult(cells, waypoints, cost)
 
     def visible_waypoints(
         self,
@@ -374,10 +423,12 @@ class RoutingService:
     def begin_tick(self) -> None:
         self.automation_route_count = self.combat_route_count = 0
 
-    def automation_allowance(self, limit: int) -> RouteAllowance:
-        if limit <= 0:
-            raise ValueError("route allowance must be positive")
-        return RouteAllowance(self, limit)
+    def automation_allowance(
+        self, limit: int, *, search_limit: int | None = None
+    ) -> RouteAllowance:
+        if limit <= 0 or (search_limit is not None and search_limit <= 0):
+            raise ValueError("route and search allowances must be positive")
+        return RouteAllowance(self, limit, search_remaining=search_limit)
 
     def claim_combat_route(self) -> bool:
         if self.combat_route_count >= self.combat_budget:
@@ -393,6 +444,16 @@ class RoutingService:
     def shared_path_to_any(
         self, start: Point, goals: tuple[Point, ...], blocked: frozenset[Cell] = frozenset()
     ) -> tuple[Point, PathResult]:
+        goal, indices, prefixes, cost = self._shared_path_data(start, goals, blocked)
+        return goal, self._materialize_path(start, goal, indices, prefixes, cost)
+
+    def _shared_path_data(
+        self,
+        start: Point,
+        goals: tuple[Point, ...],
+        blocked: frozenset[Cell],
+        allowance: RouteAllowance | None = None,
+    ) -> tuple[Point, IntArray, FloatArray, float]:
         game_map = self.game_map
         if not game_map.is_passable(start):
             raise PathfindingError("START_NOT_PASSABLE")
@@ -412,6 +473,13 @@ class RoutingService:
             raise PathfindingError("TARGET_NOT_PASSABLE")
         key = (tuple(sorted(points)), blocked)
         field = self._fields.get(key)
+        index = start_cell[1] * game_map.width + start_cell[0]
+        if (
+            allowance is not None
+            and allowance.search_remaining == 0
+            and (field is None or field.positions[index] != -2)
+        ):
+            raise RouteDeferred
         if field is None:
             field = self._build_field(key[0], blocked)
             self._fields[key] = field
@@ -419,9 +487,8 @@ class RoutingService:
                 self._fields.popitem(last=False)
         self._fields.move_to_end(key)
         costs, following = field.costs, field.following
-        index = start_cell[1] * game_map.width + start_cell[0]
         if field.positions[index] != -2:
-            field.size = _expand_field(
+            field.size, expanded = _expand_field(
                 self._cost_grid,
                 self.obstacle_mask(blocked),
                 costs,
@@ -431,11 +498,25 @@ class RoutingService:
                 field.size,
                 index,
             )
+            if allowance is not None and allowance.search_remaining is not None:
+                # Finish one admitted search atomically, then defer further cold work.
+                # Cached settled paths and cheap direct segments can still dispatch.
+                allowance.search_remaining = max(0, allowance.search_remaining - expanded)
         cost = float(costs[index])
         if cost == inf:
             raise PathfindingError("NO_PATH")
         indices, prefix_costs = _extract_path(self._cost_grid, following, index)
         goal = points[int(indices[-1])]
+        return goal, indices, prefix_costs, cost
+
+    def _materialize_path(
+        self,
+        start: Point,
+        goal: Point,
+        indices: IntArray,
+        prefix_costs: FloatArray,
+        cost: float,
+    ) -> PathResult:
         cells = self._path_cells(indices.tolist())
         # Cell centers keep every turn inside a passable cell. Continuous steering may
         # shorten these segments only after checking the intervening terrain.
@@ -448,7 +529,7 @@ class RoutingService:
         )
         if start != goal:
             waypoints += (goal,)
-        return goal, PathResult(cells, waypoints, cost, prefix_costs)
+        return PathResult(cells, waypoints, cost, prefix_costs)
 
     def _build_field(self, goals: tuple[int, ...], blocked: frozenset[Cell]) -> _SearchField:
         count = self.game_map.width * self.game_map.height
@@ -488,6 +569,21 @@ def _label_regions(blocked: BoolArray) -> IntArray:
                     queue[size] = ny * width + nx
                     size += 1
     return regions
+
+
+@compile_numeric
+def _route_coordinates(
+    indices: IntArray, width: int, goal_x: float, goal_y: float, has_goal: bool
+) -> FloatArray:
+    count = max(1, len(indices) - 1) if has_goal else 0
+    coordinates = np.empty((count, 2), dtype=np.float64)
+    for offset in range(count - 1):
+        cell = indices[offset + 1]
+        coordinates[offset, 0] = cell % width + 0.5
+        coordinates[offset, 1] = cell // width + 0.5
+    if count:
+        coordinates[-1, 0], coordinates[-1, 1] = goal_x, goal_y
+    return coordinates
 
 
 @compile_numeric
@@ -579,7 +675,7 @@ def _expand_field(
     positions: IntArray,
     size: int,
     stop: int,
-) -> int:
+) -> tuple[int, int]:
     """Resume exact Dijkstra until the requested start is settled, then retain its frontier.
 
     An indexed heap avoids tuple allocations and stale duplicate entries. Comparison
@@ -587,6 +683,7 @@ def _expand_field(
     suspension, so later requests and cache eviction cannot affect chosen routes.
     """
     height, width = terrain_costs.shape
+    expanded = 0
     while size:
         current = heap[0]
         size -= 1
@@ -609,6 +706,7 @@ def _expand_field(
                 offset = child
             heap[offset], positions[last] = last, offset
         positions[current] = -2
+        expanded += 1
         x, y = current % width, current // width
         candidate = costs[current] + terrain_costs[y, x]
         for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
@@ -634,7 +732,7 @@ def _expand_field(
                 heap[offset], positions[neighbor] = neighbor, offset
         if current == stop:
             break
-    return size
+    return size, expanded
 
 
 @compile_numeric

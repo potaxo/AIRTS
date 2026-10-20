@@ -151,6 +151,7 @@ class AirtsApp:
         self.freehand_points: list[Point] = []
         self.drag_start: Point | None = None
         self._camera_keys: set[int] = set()
+        self._event_modifiers: int | None = None
         self._camera_drag_position: tuple[int, int] | None = None
         self.production_detail_kind: EntityKind | None = None
         self.settings_open = False
@@ -521,14 +522,35 @@ class AirtsApp:
                 finally:
                     pygame.quit()
 
+    def _input_modifiers(self) -> int:
+        if self._event_modifiers is not None:
+            return self._event_modifiers
+        try:
+            return pygame.key.get_mods()
+        except pygame.error:
+            return 0
+
     def _handle_event(self, event: pygame.event.Event) -> None:
+        if event.type in {pygame.KEYDOWN, pygame.KEYUP}:
+            modifiers = int(event.mod) if hasattr(event, "mod") else self._input_modifiers()
+            shift_mask = {
+                pygame.K_LSHIFT: pygame.KMOD_LSHIFT,
+                pygame.K_RSHIFT: pygame.KMOD_RSHIFT,
+            }.get(event.key, 0)
+            self._event_modifiers = (
+                modifiers | shift_mask if event.type == pygame.KEYDOWN else modifiers & ~shift_mask
+            )
         if event.type == pygame.KEYUP:
             self._camera_keys.discard(event.key)
             return
         if event.type == pygame.WINDOWFOCUSLOST:
+            self._event_modifiers = 0
             self._camera_keys.clear()
             self._minimap_dragging = False
             self.building_line_draft = None
+            return
+        if event.type == pygame.WINDOWFOCUSGAINED:
+            self._event_modifiers = None
             return
         if self.save_panel.open and event.type not in {
             pygame.VIDEORESIZE,
@@ -722,10 +744,7 @@ class AirtsApp:
         if not self._in_canvas(position):
             return
         point = self._map_point(position)
-        try:
-            shift_down = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-        except pygame.error:
-            shift_down = False
+        shift_down = bool(self._input_modifiers() & pygame.KMOD_SHIFT)
         if button == 1 and self.reclaim_mode:
             targets = sorted(
                 (distance, entity.entity_id)
@@ -767,10 +786,7 @@ class AirtsApp:
             preview = self._construction_preview_at(point)
             assert preview is not None
             snapped = preview[0]
-            try:
-                queued = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-            except pygame.error:
-                queued = False
+            queued = shift_down
             if queued:
                 self.building_line_draft = BuildingLineDraft(
                     self.placement_kind, tuple(builders), snapped, snapped
@@ -832,6 +848,7 @@ class AirtsApp:
             click_tick = pygame.time.get_ticks()
             gathering = (
                 not shift_down
+                and enemy_id is None
                 and last_move_click is not None
                 and last_move_click[0] == entity_ids
                 and 0 <= click_tick - last_move_click[2] <= self.DOUBLE_CLICK_MS
@@ -839,41 +856,30 @@ class AirtsApp:
                 <= self.DOUBLE_CLICK_PIXELS
             )
             hit = self.simulation.entities[hits[0][1]] if hits else None
-            repair_builders = tuple(
-                key
-                for key in entity_ids
-                if self.simulation.entities[key].profile.movable
-                and self.simulation.entities[key].profile.can_repair
-            )
             command: AttackCommand | MoveCommand | RepairBuildingCommand
             if gathering:
                 assert last_move_click is not None
                 point = last_move_click[1]
                 command = MoveCommand(entity_ids, point, gathering=True)
             elif enemy_id is not None:
-                armed = tuple(
-                    key
-                    for key in entity_ids
-                    if self.simulation.entities[key].kind.profile.attack_damage > 0
-                )
-                command = (
-                    AttackCommand(armed or entity_ids, enemy_id, queued=shift_down)
-                    if armed or not shift_down
-                    else MoveCommand(entity_ids, point, gathering=True, queued=True)
-                )
+                command = AttackCommand(entity_ids, enemy_id, queued=shift_down)
             elif (
-                repair_builders
-                and hit is not None
+                hit is not None
                 and hit.owner_id == "player"
                 and hit.category is EntityCategory.BUILDING
                 and hit.is_complete
                 and hit.health < hit.kind.profile.max_health
             ):
-                command = RepairBuildingCommand(repair_builders, hit.entity_id, queued=shift_down)
+                command = RepairBuildingCommand(entity_ids, hit.entity_id, queued=shift_down)
             else:
                 command = MoveCommand(entity_ids, point, gathering=shift_down, queued=shift_down)
             result = self.simulation.execute(command)
-            if result.accepted and not gathering and not shift_down:
+            if (
+                result.accepted
+                and isinstance(command, MoveCommand)
+                and not gathering
+                and not shift_down
+            ):
                 self._last_move_click = (entity_ids, point, click_tick)
             self.notice = (
                 ("Command queued." if shift_down else "Command issued.")
@@ -973,7 +979,7 @@ class AirtsApp:
         start = self.drag_start
         self.drag_start = None
         if self.mode is InputMode.SELECT:
-            self._select_entities(start, point, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
+            self._select_entities(start, point, bool(self._input_modifiers() & pygame.KMOD_SHIFT))
         elif self.mode is InputMode.RECTANGLE:
             try:
                 self._finish_target(rectangle_region(start, point))
@@ -2286,7 +2292,7 @@ class AirtsApp:
 
     @staticmethod
     def simplified_path(entity: Entity) -> tuple[Point, ...]:
-        points = (entity.position, *entity.path, *(order.position for order in entity.order_queue))
+        points = (entity.position, *entity.path)
         if len(points) <= 2:
             return points
         simplified = [points[0]]

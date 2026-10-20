@@ -22,6 +22,11 @@ group planning; obstacles or slower terrain require the weighted field instead. 
 are local colliders, not whole-cell static walls; occupied destinations
 may wait. Groups share an approach route before branching.
 
+Queued movement also meters search work by expanded cells. An admitted search completes before
+further cold searches wait for the next tick; settled cached routes and direct segments remain
+eligible within the shared route allowance. Waiting keeps the complete FIFO and final destinations,
+including movement resumed after combat support. Admission rotates so deferred members make progress.
+
 Actual travel speed is the mobile profile's base speed divided by terrain movement cost.
 Grass retains base speed; forest uses two thirds, road four thirds and bridge five quarters.
 Each tick samples the terrain under the unit's original center once; entering another terrain
@@ -38,8 +43,9 @@ An unreachable firing ring remains queued in `WAITING`, with one failure diagnos
 target/obstacles change or the order is replaced; eviction/load must not preserve a stale failure.
 
 The current implementation shares cell centers and preserves compensated path-prefix sums and
-cost/index ties. Group branches scan the shared route in one compiled pass, materializing only
-the first valid branch. Normal navigation retains centerline shortcuts and the physical solver's
+cost/index ties. Group branches scan numeric shared coordinates in one compiled pass and materialize
+only the retained path, avoiding a full Point/cell expansion before choosing a branch. Normal
+navigation retains centerline shortcuts and the physical solver's
 certified wall sliding. Sustained stalled travel and Hold return use swept-disc lookahead against
 terrain, buildings and map edges, including rounded corners; recovery routes retain cell-center
 connectors for offset endpoints where needed. The existing blocked marker retains this clearance
@@ -99,8 +105,11 @@ These are current execution details, subject to the [engineering change policy](
   rotate by tick; defense admits front ranks first. Combat visits all members even after exhaustion.
 - Opportunistic firing preserves locomotion, including travel outside an assigned defense area.
   Actual pursuit can interrupt travel and explicit attack pursuit stops at weapon range. Ordered
-  targets persist until destruction or replacement; a stale firing destination can refresh after
-  one second of route travel, within the combat budget. Mixed selections attack with armed members.
+  targets persist until destruction or replacement. Pursuit may fire at enemies encountered along
+  its route without replacing that target or advancing the FIFO; the ordered target takes priority
+  whenever it is in range. Units awaiting bounded attack
+  dispatch cannot acquire an incidental target or join combat support before activation.
+  A stale firing destination can refresh after one second of route travel, within the combat budget.
 - Destroyed explicit attack targets turn surviving mobile attackers' orders into gathering at the
   target's last known position. Patrol/defense encounters instead resume their existing assignment.
 - Actual firing recruits nearby allied units whose profiles explicitly enable combat support.

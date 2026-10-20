@@ -42,6 +42,9 @@ rebuild after load. Formation geometry and arrival rules are owned by
 Spatial buckets, numeric scratch, contact graphs/directions/leaders, navigation fields, per-tick
 diagnostics and unfinished-automation query indexes rebuild from authoritative state. Presentation
 history is not saved. Mobile bodies may share occupancy cells; real buildings remain exclusive.
+Queued search-work allowances are also derived. A cold navigation cache after load can defer a
+queued leg to a later tick without losing its intent or FIFO tail. This scheduling optimization
+does not change authoritative fields or format tags; exact continuation remains diagnostic.
 Complete path events pack integer coordinates in memory and materialize `cells: [[x, y], ...]`
 for inspection/export. Loading compacts paths again without changing their payload.
 [events.py](../../src/airts/contracts/events.py) owns event queries and JSON Lines export.
@@ -59,7 +62,7 @@ diagnostic, without automatic migration.
 | --- | --- |
 | Sandbox save v27 | Current write/read format |
 | Match save v21 | Current write/read format |
-| Sandbox replay v34 / match replay v33 | Current diagnostic formats and exact verification |
+| Sandbox replay v36 / match replay v36 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
 Current saves validate cross-field invariants before publishing a world: ownership and references,
@@ -99,11 +102,14 @@ Direct Move selects compact marching for distant targets and formation micro for
 Shift movement always gathers, as owned by [movement](movement.md#orders-and-routing). The direct
 FIFO replaces the point-only movement queue with tagged move/attack/repair orders. It stores
 allocated destinations, shared movement goals, target IDs and click positions; current active
-work retains its path and attack/repair target. Target orders keep their positions for route
-display but execute against the referenced entity. Queues validate kind, finite coordinates,
+work retains its path and attack/repair target. Target orders retain their click positions but
+execute and display against the referenced live entity. Queues validate kind, finite coordinates,
 capabilities, references and assignment conflicts. Earlier save/replay tags are rejected without
 migration; they cannot represent mixed FIFO intent. Navigation fields remain derived, loading
 does not reclassify active legs, and current exact replay diagnostics remain enabled.
+Capability filtering and firing during persistent pursuit retain the same saved queue/active-intent layout.
+Replay tags cover these command and combat semantics too; earlier replay tags are rejected because
+their regenerated outcomes can differ. Current saves resume the retained tasks under the current rules.
 
 Current replays retain external commands and expectations. AI decisions and automatic repair commands
 are regenerated from authoritative state instead of being recorded as duplicate external inputs.
@@ -123,6 +129,13 @@ available military funds. It adds no authoritative memory or save fields.
 Changed purchasing, specialist savings and continuous-loop pauses regenerate different AI commands,
 so earlier match replay tags are rejected. Exact verification and
 current-format match save continuation remain active.
+
+Surplus expansion derives its sectors, rotating search window, worker demand and batch sizes from
+current entities/jobs, actual available cash, map geometry and the saved tick. Placement counters
+are decision-local scratch. No new save fields or migrations are introduced; existing current-format
+match saves restore and enter the new policy on their next decision. Changed internally regenerated
+AI orders invalidate earlier match replay expectations, so the match diagnostic tag advances to v36.
+Sandbox replay is unaffected, and current-format replay verification remains enabled.
 
 ## Save execution and management
 
