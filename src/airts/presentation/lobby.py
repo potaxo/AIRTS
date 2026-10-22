@@ -22,8 +22,8 @@ class Lobby:
     def draw(self, app: AirtsApp, screen: pygame.Surface) -> None:
         screen.fill(theme.BACKGROUND)
         center_x, center_y = screen.get_rect().center
-        x, y = center_x - 290, max(28, center_y - 220)
-        theme.panel(screen, pygame.Rect(x - 24, y - 24, 628, 456))
+        x, y = center_x - 290, max(28, center_y - 242)
+        theme.panel(screen, pygame.Rect(x - 24, y - 24, 628, 500))
         app.ui.text(screen, "AIRTS", (x, y), theme.ACCENT)
         app.ui.text(screen, "Four Corners River", (x, y + 40), theme.TEXT)
         self.buttons.clear()
@@ -37,6 +37,10 @@ class Lobby:
             rectangle = pygame.Rect(x, y + 212, 580, 40)
             app.ui.button(screen, rectangle, "Load saved game")
             self.buttons.append((rectangle, "saves", 0))
+            self._draw_debug_option(app, screen, x, y + 280)
+            app.ui.small_text(
+                screen, "Save/load works with either option.", (x, y + 320), theme.MUTED
+            )
             return
         app.ui.small_text(
             screen, "320 x 320 | Fixed symmetric map | No fog of war", (x, y + 78), theme.MUTED
@@ -61,19 +65,37 @@ class Lobby:
             app.ui.button(screen, controller, role.title())
             app.ui.button(screen, alliance, f"Team {team}")
             self.buttons.extend(((controller, "controller", index), (alliance, "team", index)))
+        self._draw_debug_option(app, screen, x, y + 330)
         for rectangle, action, label in (
-            (pygame.Rect(x, y + 340, 180, 38), "back", "Back"),
-            (pygame.Rect(x + 200, y + 340, 380, 38), "start", "Begin match"),
+            (pygame.Rect(x, y + 374, 180, 38), "back", "Back"),
+            (pygame.Rect(x + 200, y + 374, 380, 38), "start", "Begin match"),
         ):
             app.ui.button(screen, rectangle, label)
             self.buttons.append((rectangle, action, 0))
-        app.ui.small_text(screen, app.notice, (x, y + 392), theme.ACCENT)
+        app.ui.small_text(screen, app.notice, (x, y + 436), theme.ACCENT)
+
+    def _draw_debug_option(self, app: AirtsApp, screen: pygame.Surface, x: int, y: int) -> None:
+        rectangle = pygame.Rect(x, y, 580, 30)
+        box = pygame.Rect(x, y + 3, 24, 24)
+        theme.frame(screen, box, theme.BUTTON)
+        if app.debug_mode:
+            pygame.draw.lines(
+                screen,
+                theme.SUCCESS,
+                False,
+                [(x + 5, y + 14), (x + 10, y + 20), (x + 20, y + 7)],
+                3,
+            )
+        app.ui.small_text(screen, "Debug mode (record full history)", (x + 36, y + 7), theme.TEXT)
+        self.buttons.append((rectangle, "debug", 0))
 
     def click(self, app: AirtsApp, position: tuple[int, int]) -> None:
         for rectangle, action, index in self.buttons:
             if not rectangle.collidepoint(position):
                 continue
-            if action == "configure":
+            if action == "debug":
+                app.debug_mode = not app.debug_mode
+            elif action == "configure":
                 self.page = "setup"
                 app.notice = "Configure players and teams before starting."
             elif action == "back":

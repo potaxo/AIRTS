@@ -137,6 +137,7 @@ def initialize_runtime_entity(
     simulation: Simulation, automation: Automation, entity_id: str
 ) -> None:
     entity = simulation.entities[entity_id]
+    entity.formation_goal = entity.formation_leg = None
     entity.repair_target_id = None
     entity.reclaim_target_id = None
     entity.clear_recovery_request()

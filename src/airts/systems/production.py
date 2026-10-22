@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
@@ -75,6 +76,14 @@ def create_production(simulation: Simulation, command: CreateProductionCommand) 
                 "UNSUPPORTED_PRODUCTION_KIND",
                 "unit_kind",
             ),
+        )
+    deployment = factory.production_deployment
+    if deployment is not None and all(
+        target is None
+        for target in (command.rally_point, command.defend_target, command.patrol_target)
+    ):
+        command = replace(
+            command, defend_target=deployment.target, auto_repair=deployment.auto_repair
         )
     if command.rally_point is not None and not simulation.game_map.is_passable(command.rally_point):
         return simulation._reject_validation(
@@ -394,7 +403,8 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
             automation_id=automation.automation_id,
         )
     if automation.status is AutomationStatus.ACTIVE:
-        parameters.progress_ticks += 1
+        if parameters.progress_ticks < parameters.build_ticks:
+            parameters.progress_ticks += 1
         if parameters.progress_ticks < parameters.build_ticks:
             return
     spawn = find_spawn_point(simulation, simulation.entities[parameters.factory_id], unit_kind)
@@ -441,22 +451,7 @@ def drive_production(simulation: Simulation, automation: Automation) -> None:
 
 
 def factory_production_jobs(simulation: Simulation, factory_id: str) -> tuple[Automation, ...]:
-    return tuple(
-        sorted(
-            (
-                automation
-                for automation in simulation._live_automation_candidates
-                if automation.kind is AutomationKind.PRODUCTION
-                and not automation.status.terminal
-                and production_parameters(automation).factory_id == factory_id
-            ),
-            key=lambda automation: (
-                production_parameters(automation).continuous,
-                automation.created_tick,
-                automation.automation_id,
-            ),
-        )
-    )
+    return simulation._production_jobs.get(factory_id, ())
 
 
 def start_next_production(simulation: Simulation, factory_id: str) -> None:

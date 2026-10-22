@@ -72,6 +72,46 @@ def service_area(simulation: Simulation, building: Entity) -> tuple[Point, ...]:
     )
 
 
+def select_repair_destinations(
+    simulation: Simulation, entity_ids: tuple[str, ...]
+) -> dict[str, str]:
+    """Enroll a repair group without computing paths that dispatch would discard.
+
+    Prefer the nearest reachable hub, then factory/command center. Share source
+    geometry and connectivity across the whole command; space and actual routes
+    are handled by the ordinary budgeted travel phase, including full-source waits.
+    """
+    priorities = {EntityKind.REPAIR_HUB: 0, EntityKind.FACTORY: 1, EntityKind.COMMAND_CENTER: 2}
+    sources: dict[str, list[Entity]] = {}
+    for building in simulation.entities.values():
+        if building.is_complete and building.kind in priorities:
+            sources.setdefault(building.owner_id, []).append(building)
+    areas: dict[str, tuple[Point, ...]] = {}
+    blocked = simulation._building_cells()
+    result: dict[str, str] = {}
+    for key in entity_ids:
+        entity = simulation.entities[key]
+        ranked = sorted(
+            sources.get(entity.owner_id, ()),
+            key=lambda building: (
+                priorities[building.kind],
+                entity.position.distance_to(building.selection_position),
+                building.entity_id,
+            ),
+        )
+        for building in ranked:
+            if building.entity_id not in areas:
+                areas[building.entity_id] = service_area(simulation, building)
+            if simulation._routes.can_reach_any(
+                entity.position, areas[building.entity_id], blocked
+            ):
+                result[key] = building.entity_id
+                break
+        else:
+            raise PathfindingError("NO_REPAIR_DESTINATION")
+    return result
+
+
 def service_points(simulation: Simulation, entity: Entity, building: Entity) -> tuple[Point, ...]:
     """Free in-range cells and transient travel destinations form repair capacity."""
     reserved = [

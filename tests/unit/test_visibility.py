@@ -9,7 +9,25 @@ from airts.contracts.spatial import Point
 from airts.simulation import Simulation
 from airts.world import visibility as visibility_module
 from airts.world.map import load_map_data
-from airts.world.visibility import VisibilityState
+from airts.world.visibility import PlayerVisibility, VisibilityState
+
+
+def test_last_observation_survives_losing_regaining_and_restoring_sight() -> None:
+    player = PlayerVisibility(4, 1)
+    player.update_combined_masks([3], 7)
+    player.update_combined_masks([3], 20)
+    player.update_combined_masks([6], 21)
+    assert dict(player.last_observed_tick) == {(0, 0): 20, (1, 0): 21, (2, 0): 21}
+    saved = player.to_dict()
+    restored = PlayerVisibility(
+        4, 1, player.visible.copy(), player.explored.copy(), dict(player.last_observed_tick)
+    )
+    assert restored.to_dict() == saved
+    for current in (player, restored):
+        current.update_combined_masks([0], 22)
+        assert current.last_observed_tick[(1, 0)] == 21
+        current.update_combined_masks([1], 30)
+        assert dict(current.last_observed_tick) == {(0, 0): 30, (1, 0): 21, (2, 0): 21}
 
 
 def test_visibility_is_player_specific_and_exploration_persists() -> None:

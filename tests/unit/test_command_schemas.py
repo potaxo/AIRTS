@@ -31,6 +31,8 @@ from airts.contracts.commands import (
     ResumeAutomationCommand,
     SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
+    SetFormationCommand,
+    SetProductionDefenseCommand,
     SetSelectionCommand,
     StopCommand,
     command_from_dict,
@@ -48,7 +50,15 @@ from airts.world.units.catalog import EntityKind
         SetDeveloperModeCommand(True),
         SetDeveloperModeCommand(False),
         MoveCommand(("unit",), Point(3, 4)),
-        MoveCommand(("unit",), Point(3, 4), gathering=True),
+        SetFormationCommand(("unit",), True),
+        SetFormationCommand(("unit",), False),
+        SetProductionDefenseCommand(
+            ("factory", "second"), PolylineTarget((Point(1, 1), Point(8, 1)))
+        ),
+        SetProductionDefenseCommand(("factory",), None),
+        SetProductionDefenseCommand(
+            ("factory",), PolylineTarget((Point(1, 1), Point(8, 1))), auto_repair=True
+        ),
         StopCommand(("unit",)),
         HoldPositionCommand(("unit",)),
         RemoveEntityCommand("unit", "DESTROYED"),
@@ -116,9 +126,9 @@ def test_command_schemas_round_trip(command: Command) -> None:
             id="developer-mode-missing-enabled",
         ),
         pytest.param(
-            {"type": "move", "entity_ids": ["unit"], "target": [3, 4], "gathering": 1},
-            "gathering must be a boolean",
-            id="malformed-move-gathering",
+            {"type": "set_formation", "entity_ids": ["unit"], "enabled": 1},
+            "enabled must be a boolean",
+            id="malformed-formation-enabled",
         ),
         pytest.param(
             {"type": "unsupported", "automation_id": "x"},

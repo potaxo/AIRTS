@@ -265,6 +265,7 @@ def test_native_minimap_pixels_and_camera_refresh_preserve_world_gpu_buffers() -
             renderer.render(app, app.window_size, framebuffer=target.framebuffer)
             build.assert_not_called()
         renderer.finish()
+        assert app.minimap._contacts is contacts
         image = pygame.image.frombytes(
             target.framebuffer.read(components=3), app.window_size, "RGB", True
         )
@@ -276,7 +277,6 @@ def test_native_minimap_pixels_and_camera_refresh_preserve_world_gpu_buffers() -
         corner = app.minimap.viewport_rect(app).topleft
         assert image.get_at(corner)[:3] == theme.TEXT
         assert renderer._terrain_texture is terrain
-        assert app.minimap._contacts is contacts
     finally:
         target.release()
         renderer.release()

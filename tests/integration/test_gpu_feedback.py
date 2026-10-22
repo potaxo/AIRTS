@@ -16,9 +16,10 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, PolygonRegion
 from airts.presentation.app import AirtsApp
 from airts.presentation.build_placement import BuildingLineDraft
-from airts.presentation.gpu_feedback import GPUFeedback, _triangles
+from airts.presentation.gpu_feedback import SEGMENT_FLOATS, GPUFeedback, _triangles
 from airts.presentation.palette import RECLAIM_COLOR, REPAIR_COLOR, WORK_BEAM_WIDTH
-from airts.presentation.rendering import reclaim_links, work_links
+from airts.presentation.rendering import reclaim_links
+from airts.presentation.visuals.catalog import APPEARANCES
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -137,15 +138,29 @@ def test_gpu_packs_thick_builder_and_hub_work_beams_without_changing_state() -> 
         values = array("f")
         values.frombytes(feedback.lines.write.call_args.args[0])
         beams = [
-            tuple(values[i : i + 9])
-            for i in range(0, len(values), 9)
+            tuple(values[i : i + SEGMENT_FLOATS])
+            for i in range(0, len(values), SEGMENT_FLOATS)
             if tuple(values[i + 4 : i + 7]) == pytest.approx(tuple(c / 255 for c in REPAIR_COLOR))
         ]
         assert len(beams) == 3
-        expected = tuple(work_links(simulation))
+        expected = app.facing.work_links
         for beam, (source, target) in zip(beams, expected, strict=True):
-            assert beam[:4] == (source.x, source.y, target.x, target.y)
+            a, b = source.selection_position, target.selection_position
+            assert beam[:4] == (a.x, a.y, b.x, b.y)
             assert beam[8] == WORK_BEAM_WIDTH
+            art = APPEARANCES[source.kind]
+            if source.kind is EntityKind.BUILDER:
+                assert beam[11:13] == (0.125, -0.375)
+                assert beam[13:15] == pytest.approx(art.size)
+                assert beam[15:17] == pytest.approx(
+                    (
+                        app.facing.pose(source.entity_id).previous_body,
+                        app.facing.pose(source.entity_id).body,
+                    )
+                )
+            else:
+                assert source.entity_id == "hub"
+                assert beam[11:17] == (0, 0, 0, 0, 0, 0)
         assert simulation.export_state() == before
         simulation.entities["tank"].health = EntityKind.LIGHT_TANK.profile.max_health
         assert simulation.execute(ReclaimBuildingCommand(("repairer",), "factory")).accepted
@@ -155,8 +170,8 @@ def test_gpu_packs_thick_builder_and_hub_work_beams_without_changing_state() -> 
         values = array("f")
         values.frombytes(feedback.lines.write.call_args.args[0])
         beams = [
-            tuple(values[i : i + 9])
-            for i in range(0, len(values), 9)
+            tuple(values[i : i + SEGMENT_FLOATS])
+            for i in range(0, len(values), SEGMENT_FLOATS)
             if tuple(values[i + 4 : i + 7]) == pytest.approx(tuple(c / 255 for c in RECLAIM_COLOR))
         ]
         assert len(beams) == 1
@@ -183,13 +198,16 @@ def test_gpu_building_line_preview_tracks_draft_without_dirtying_ui_texture() ->
         preview = [
             tuple(values[i : i + 18]) for i in range(0, len(values), 18) if values[i + 13] == 3
         ]
-        assert [v[:4] for v in preview] == [(x + 1, 25, 1, 1) for x in (6, 8, 10, 12, 14)]
+        width, height = EntityKind.TURRET.profile.footprint
+        assert [v[:4] for v in preview] == [
+            (x + width / 2, 24 + height / 2, width / 2, height / 2) for x in range(6, 15, width)
+        ]
         app.building_line_draft.end = Point(10, 24)
         feedback.draw(app, app.window_size)
         assert app._opengl_overlay_key() == key
         values = array("f")
         values.frombytes(feedback.shapes.write.call_args.args[0])
-        assert sum(values[i + 13] == 3 for i in range(0, len(values), 18)) == 3
+        assert sum(values[i + 13] == 3 for i in range(0, len(values), 18)) == (10 - 6) // width + 1
     finally:
         feedback.release()
 

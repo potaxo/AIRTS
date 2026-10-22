@@ -55,6 +55,10 @@ advances tasks. `production.py` owns queues, payment and progress; `production_o
 new units. `unit_orders.py` owns direct FIFO admission and dispatch across movement, attack and repair;
 dispatch reuses the command boundary for target work. Shared leaves own validation (`validation.py`), IDs (`entity_registry.py`), spawn clearance
 (`spawning.py`) and firing approach geometry (`combat_geometry.py`).
+`formations.py` owns direct-move cohort enrollment, saved layout planning, speed/cohesion coordination
+and completion barriers. It supplies steering to movement, without writing positions or creating
+another command facade. Entity membership/offsets and active/queued leg identity are authoritative;
+cohort indexes and per-tick coordination arrays are derived.
 `repair_positions.py` owns service geometry/capacity without importing repair controllers;
 `reclamation.py` owns builder approach and the single removal/refund transaction. Building-line
 draft geometry belongs to `presentation/build_placement.py` and emits ordinary construction commands.
@@ -68,7 +72,8 @@ and text/button drawing, including the font handle read by the GPU text atlas.
 GPU resources/buffers belong to its backend; metrics has no Pygame/app dependency.
 Shared palette and independent backends retain separate owners.
 Battle appearance and facing are presentation concerns; GPU record packing has a shared leaf owner
-in `gpu_shapes.py`. The core never loads PNGs, stores camera state or advances visual headings.
+in `gpu_shapes.py`; `visuals/gpu.py` owns compact entity records and their GPU layer/minimap expansion.
+The core never loads PNGs, stores camera state or advances visual headings.
 Art sources and the offline authoring tool are owned by the appearance contract.
 
 Collision geometry and queries are shared leaves. Release and return algorithms import those

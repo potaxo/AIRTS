@@ -1071,7 +1071,9 @@ def test_large_cash_surplus_densifies_and_expands_beyond_old_building_caps(
             if isinstance(job.parameters, ConstructionParameters)
         ]
         simultaneous = max(simultaneous, len(jobs))
-        assert len(jobs) <= opponent_ai.MAX_CONSTRUCTION_SITES
+        assert len(jobs) <= sum(
+            unit.profile.can_build and unit.is_movable for unit in simulation.entities.values()
+        )
         assert len({key for job in jobs for key in job.builder_ids}) == len(jobs)
         assert all(job.position.x >= 128 for job in jobs)
         assert simulation.resources["ai"] >= 0
@@ -1141,7 +1143,7 @@ def test_income_funded_surplus_expansion_replays_without_extra_saved_memory() ->
         > 8
     )
     assert any(
-        isinstance(job.parameters, ProductionParameters) and job.parameters.target_count > 3
+        isinstance(job.parameters, ProductionParameters) and job.parameters.continuous
         for job in simulation.automations.values()
     )
     run_replay(capture_replay(simulation))

@@ -31,6 +31,16 @@ from airts.world.map import GameMap, load_example_map, load_map_data
 from airts.world.units.catalog import EntityKind
 
 
+def test_normal_play_cannot_export_an_incomplete_replay(tmp_path: Path) -> None:
+    simulation = Simulation(load_example_map(), record_history=False)
+    simulation.advance(2)
+    path = tmp_path / "replay.json"
+    path.write_text("previous replay", encoding="utf-8")
+    with pytest.raises(ReplayError, match="Debug mode"):
+        save_replay(simulation, path)
+    assert path.read_text(encoding="utf-8") == "previous replay"
+
+
 def test_internal_squad_exit_from_normal_hold_formation_replays(tmp_path: Path) -> None:
     """Legal initial discs and ordinary commands reproduce actual passage and final events."""
     entity_ids = tuple(f"scout_{index:03d}" for index in range(100))
@@ -134,14 +144,11 @@ def test_map_defined_overlapping_mobile_discs_recover_and_replay(tmp_path: Path)
     assert replayed.export_state() == simulation.export_state()
 
 
-@pytest.mark.parametrize("gathering", [False, True], ids=["preserve", "gather"])
 def test_recorded_commands_reproduce_state_and_events(
-    make_map: Callable[[int], GameMap], tmp_path: Path, gathering: bool
+    make_map: Callable[[int], GameMap], tmp_path: Path
 ) -> None:
     simulation = Simulation(make_map(2), random_seed=17)
-    assert simulation.execute(
-        MoveCommand(("unit_01", "unit_02"), Point(5.5, 3.5), gathering=gathering)
-    ).accepted
+    assert simulation.execute(MoveCommand(("unit_01", "unit_02"), Point(5.5, 3.5))).accepted
     simulation.advance(12)
     simulation.execute(CreatePatrolCommand(("unit_02",), PointTarget(Point(7.5, 7.5))))
     simulation.advance(30)

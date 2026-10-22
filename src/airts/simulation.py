@@ -51,6 +51,8 @@ from airts.contracts.commands import (
     ResumeAutomationCommand,
     SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
+    SetFormationCommand,
+    SetProductionDefenseCommand,
     SetSelectionCommand,
     StopCommand,
     UpgradeEntityCommand,
@@ -76,8 +78,11 @@ from airts.systems import (
     automation_execution,
     automation_lifecycle,
     automation_runtime,
+    combat_geometry,
     command_handlers,
+    formations,
     opponent_ai,
+    production_orders,
     spatial_commands,
     unit_orders,
 )
@@ -101,7 +106,7 @@ from airts.world.entities import (
     UnitOrder,
     UnitState,
 )
-from airts.world.map import Cell, GameMap, OccupancyGrid
+from airts.world.map import Cell, GameMap, OccupancyGrid, Terrain
 from airts.world.opponents import OpponentState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
@@ -149,6 +154,7 @@ class Simulation:
         ambient_enemy_spawns: bool = False,
         enemy_spawn_interval_ticks: int = DEFAULT_ENEMY_SPAWN_INTERVAL_TICKS,
         enemy_spawn_cap: int = DEFAULT_ENEMY_SPAWN_CAP,
+        record_history: bool = True,
     ) -> None:
         if enemy_spawn_interval_ticks <= 0:
             raise ValueError("enemy_spawn_interval_ticks must be positive")
@@ -196,9 +202,10 @@ class Simulation:
             self.occupancy.place(entity.entity_id, entity.occupied_cells)
         self.automations: dict[str, Automation] = {}
         self._live_automation_candidates: tuple[Automation, ...] = ()
+        self._production_jobs: dict[str, tuple[Automation, ...]] = {}
         self.assignments: dict[str, str] = {}
         self.suspended_assignments: dict[str, str] = {}
-        self.events = EventLog()
+        self.events = EventLog(enabled=record_history)
         self.visibility = VisibilitySystem(game_map)
         self.resources = {
             owner_id: (1000 if game_map.match_slots else 500)
@@ -214,6 +221,7 @@ class Simulation:
         self.projectiles: dict[str, Projectile] = {}
         self.projectile_traces: list[ProjectileTrace] = []
         self._command_history: list[dict[str, object]] = []
+        self._command_count = 0
         self._removal_batch: set[str] | None = None
         self._removal_formations: dict[tuple[str, SpatialTarget], None] = {}
         self._removal_restart_construction = False
@@ -238,6 +246,8 @@ class Simulation:
         self._gathering_reachable_cache: OrderedDict[SpatialTarget, BoolArray] = OrderedDict()
         warm_collision_kernel()
         warm_spatial_index()
+        combat_geometry.warm_firing_geometry()
+        opponent_ai.warm_opponent_queries()
         self._update_visibility()
         if (
             len(game_map.entities) >= self.LARGE_SCENE_GC_ENTITY_THRESHOLD
@@ -252,11 +262,18 @@ class Simulation:
     def command_history(self) -> tuple[dict[str, object], ...]:
         return tuple(self._command_history)
 
+    def set_history_recording(self, enabled: bool) -> None:
+        """Set local diagnostic recording without changing the authoritative world."""
+        self.events.enabled = enabled
+        if not enabled:
+            self.events.restore([])
+            self._command_history.clear()
+
     @property
     def command_count(self) -> int:
-        """Return the history size without copying the replayable command records."""
+        """Monotonic input revision for presentation and formation command identity."""
 
-        return len(self._command_history)
+        return self._command_count
 
     @property
     def live_automations(self) -> tuple[Automation, ...]:
@@ -278,6 +295,25 @@ class Simulation:
                 reverse=True,
             )
         )
+        jobs: dict[str, list[Automation]] = {}
+        for automation in self._live_automation_candidates:
+            if automation.kind is AutomationKind.PRODUCTION:
+                jobs.setdefault(_production_parameters(automation).factory_id, []).append(
+                    automation
+                )
+        self._production_jobs = {
+            factory: tuple(
+                sorted(
+                    items,
+                    key=lambda job: (
+                        _production_parameters(job).continuous,
+                        job.created_tick,
+                        job.automation_id,
+                    ),
+                )
+            )
+            for factory, items in jobs.items()
+        }
 
     def production_queue(self, factory_id: str) -> tuple[Automation, ...]:
         """Return one factory's unfinished production jobs in FIFO order."""
@@ -367,7 +403,11 @@ class Simulation:
 
     def _execute_command(self, command: Command, *, record: bool) -> CommandResult:
         if record:
-            self._command_history.append({"tick": self.tick, "command": command_to_dict(command)})
+            self._command_count += 1
+            if self.events.enabled:
+                self._command_history.append(
+                    {"tick": self.tick, "command": command_to_dict(command)}
+                )
         if isinstance(command, UpgradeEntityCommand):
             return upgrade_system.start_upgrade(self, command)
         if isinstance(command, CancelUpgradeCommand):
@@ -396,6 +436,8 @@ class Simulation:
             return repair_system.repair_building(self, command)
         if isinstance(command, MoveCommand):
             return command_handlers.move(self, command)
+        if isinstance(command, SetFormationCommand):
+            return formations.set_formation(self, command)
         if isinstance(command, StopCommand):
             return command_handlers.stop(self, command, hold=False)
         if isinstance(command, HoldPositionCommand):
@@ -408,6 +450,8 @@ class Simulation:
             return command_handlers.create_defend(self, command)
         if isinstance(command, CreateProductionCommand):
             return production_system.create_production(self, command)
+        if isinstance(command, SetProductionDefenseCommand):
+            return production_orders.set_production_defense(self, command)
         if isinstance(command, CreateProductionBatchCommand):
             return production_system.create_production_batch(self, command)
         if isinstance(command, ReduceProductionCommand):
@@ -497,7 +541,10 @@ class Simulation:
                 economy_system.drive_economy(self, automation)
             elif automation.kind is AutomationKind.CONSTRUCTION:
                 construction_system.drive_construction(self, automation)
-                queries = automation_execution.AutomationQueries()
+                # Enemy positions remain valid. Actual membership growth is
+                # detected before the next patrol/defense; health/completion
+                # changes alone only invalidate builder repair eligibility.
+                queries.invalidate_repair_targets()
             else:
                 automation_execution.drive_repair(self, automation)
 
@@ -673,7 +720,7 @@ class Simulation:
                 entity.last_attacked_tick = None
         for (_, point), ids in gatherings.items():
             try:
-                destinations = self._allocate_destinations(tuple(ids), point, gathering=True)
+                destinations = self._allocate_destinations(tuple(ids), point)
             except PathfindingError as error:
                 for key in ids:
                     self.entities[key].state = UnitState.WAITING
@@ -746,6 +793,7 @@ class Simulation:
                 else {}
             ),
             "command_history": list(self._command_history),
+            "command_count": self.command_count,
             "next_automation_number": self._next_automation_number,
             "next_entity_number": self._next_entity_number,
             "next_projectile_number": self._next_projectile_number,
@@ -763,7 +811,7 @@ class Simulation:
         entity_ids: tuple[str, ...],
         target: Point,
         *,
-        gathering: bool = False,
+        preserve_formation: bool = False,
         origins: dict[str, Point] | None = None,
     ) -> dict[str, Point]:
         blocked = self._building_cells()
@@ -771,7 +819,7 @@ class Simulation:
         members = [self.entities[key] for key in entity_ids]
         positions = origins if origins is not None else {e.entity_id: e.position for e in members}
         maximum_radius = max(collision_radius(entity.kind) for entity in members)
-        if not gathering:
+        if preserve_formation:
             center = Point(
                 sum(point.x for point in positions.values()) / len(entity_ids),
                 sum(point.y for point in positions.values()) / len(entity_ids),
@@ -815,9 +863,6 @@ class Simulation:
                         break
                 if not separated:
                     break
-            # Translation preserves physical compression as well as shape. Reuse the
-            # existing reachable slot allocator when an imported/recovering selection
-            # cannot all settle at those translated centers.
             if separated and all(
                 self.game_map.is_passable(point)
                 and self.game_map.cell_for(point) not in blocked
@@ -831,6 +876,7 @@ class Simulation:
                 for key, point in translated.items()
             ):
                 return translated
+            raise PathfindingError("FORMATION_DESTINATION_BLOCKED")
         slots = self._gathering_slots(
             PointTarget(target),
             len(entity_ids),
@@ -971,25 +1017,46 @@ class Simulation:
             EntityKind.FACTORY: 1,
             EntityKind.COMMAND_CENTER: 2,
         }
-        candidates: list[tuple[int, float, str, Point, PathResult]] = []
-        for building in self.entities.values():
+        candidates: list[tuple[int, float, str, Entity]] = []
+        minimum_cost = min(terrain.movement_cost for terrain in Terrain)
+        buildings = (
+            tuple(self.entities[key] for key in (required_id,) if key in self.entities)
+            if required_id is not None
+            else self.entities.values()
+        )
+        for building in buildings:
             if (
                 building.owner_id != entity.owner_id
                 or not building.is_complete
                 or building.kind not in order
-                or (required_id is not None and building.entity_id != required_id)
             ):
                 continue
+            width, height = building.kind.profile.footprint
+            extent_x, extent_y = width / 2 + 1, height / 2 + 1
+            if building.kind is EntityKind.REPAIR_HUB:
+                extent_x = extent_y = building.profile.repair_range
+            center = building.selection_position
+            # Cell routing can omit sub-cell endpoint distances. Subtract one
+            # extra cell per axis so this remains a lower bound, even on roads.
+            lower_bound = minimum_cost * (
+                max(0.0, abs(entity.position.x - center.x) - extent_x - 1)
+                + max(0.0, abs(entity.position.y - center.y) - extent_y - 1)
+            )
+            candidates.append((order[building.kind], lower_bound, building.entity_id, building))
+        best: tuple[int, float, str, Point, PathResult] | None = None
+        for priority, lower_bound, _, building in sorted(candidates):
+            if best is not None and (priority > best[0] or lower_bound > best[1] + 1e-9):
+                break
             try:
                 point, path = service_route(self, entity, building)
             except PathfindingError:
                 continue
-            candidates.append((order[building.kind], path.cost, building.entity_id, point, path))
-        if not candidates:
+            candidate = (priority, path.cost, building.entity_id, point, path)
+            if best is None or candidate[:3] < best[:3]:
+                best = candidate
+        if best is None:
             raise PathfindingError("NO_REPAIR_DESTINATION")
-        _, _, building_id, point, path = min(
-            candidates, key=lambda item: (item[0], item[1], item[2], item[3].y, item[3].x)
-        )
+        _, _, building_id, point, path = best
         return building_id, point, path
 
     def _interaction_points(self, building: Entity) -> tuple[Point, ...]:

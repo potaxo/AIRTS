@@ -17,7 +17,9 @@ from airts.contracts.commands import (
     ValidationFailure,
     ValidationPhase,
 )
+from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
+from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.pathfinding import PathfindingError
 from airts.systems import (
     automation_assignments,
@@ -28,6 +30,7 @@ from airts.systems import (
     movement,
 )
 from airts.systems.entity_registry import allocate_entity_id
+from airts.systems.spawning import spawn_cell_available
 from airts.systems.validation import validate_entities
 from airts.world.entities import Entity, UnitState
 from airts.world.map import Cell, footprint_cells
@@ -102,6 +105,7 @@ def create_construction(
         automation_lifecycle.transition(
             simulation, automation, AutomationStatus.WAITING, "BUILDERS_QUEUED"
         )
+        clear_idle_site(simulation, automation)
         return simulation._accept("create_construction", automation.automation_id)
     claim_failure = automation_lifecycle.validate_claims(
         simulation, automation, builder_ids, replace_existing=True
@@ -111,6 +115,7 @@ def create_construction(
     if not command.queued:
         construction_membership.cancel_queued_construction(simulation, builder_ids)
     automation_assignments.activate(simulation, automation, builder_ids)
+    clear_idle_site(simulation, automation)
     return simulation._accept("create_construction", automation.automation_id)
 
 
@@ -144,8 +149,9 @@ def validate_building_placement(
         assert isinstance(parameters, ConstructionParameters)
         ignored_site = parameters.site_entity_id
     if any(
-        entity.entity_id != ignored_site and not entity.is_movable and cells & entity.occupied_cells
-        for entity in simulation.entities.values()
+        entity_id != ignored_site and not simulation.entities[entity_id].is_movable
+        for cell in cells
+        for entity_id in simulation.occupancy.occupants(cell)
     ):
         return ValidationFailure(ValidationPhase.SPATIAL, "BUILDING_OVERLAP", "position")
     return None
@@ -208,6 +214,8 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         inside_footprint = bool(builder.occupied_cells & site_cells)
         if (
             not inside_footprint
+            and construction_distance(builder.position, parameters)
+            >= collision_radius(builder.kind) - 1e-9
             and construction_distance(builder.position, parameters) <= builder.profile.build_range
         ):
             builder.path.clear()
@@ -215,6 +223,9 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
             builder.state = UnitState.WAITING
             movement.reset_movement_liveness(builder)
             builders_in_range.append(builder_id)
+            route_available = True
+            continue
+        if not inside_footprint and (builder.path or builder.move_target is not None):
             route_available = True
             continue
         build_range = builder.profile.build_range
@@ -269,10 +280,9 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
             automation_assignments.release_automation(simulation, automation)
             start_next_construction(simulation)
             return
-        site_occupants = frozenset(
-            entity_id for cell in site_cells for entity_id in simulation.occupancy.occupants(cell)
-        )
+        site_occupants = blueprint_occupants(simulation, parameters)
         if site_occupants:
+            clear_idle_site(simulation, automation, site_occupants)
             wait_for_site(simulation, automation, "SITE_OCCUPIED")
             return
         if not parameters.cost_paid:
@@ -313,35 +323,157 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
     work = sum(
         simulation.entities[builder_id].profile.build_speed for builder_id in builders_in_range
     )
+    apply_construction_work(simulation, building, work)
+
+
+def apply_construction_work(simulation: Simulation, building: Entity, work: float) -> None:
+    """One progress/health/completion writer for builders and repair assistance."""
+    assert building.construction_progress is not None
+    jobs = [
+        job
+        for job in simulation._live_automation_candidates
+        if isinstance(job.parameters, ConstructionParameters)
+        and job.parameters.site_entity_id == building.entity_id
+    ]
+    parameters = jobs[0].parameters if jobs else None
+    assert parameters is None or isinstance(parameters, ConstructionParameters)
+    required = (
+        simulation.CONSTRUCTION_REQUIRED_VALUE if parameters is None else parameters.required_value
+    )
+    previous = (
+        building.construction_progress * required
+        if parameters is None
+        else parameters.construction_value
+    )
+    value = min(required, previous + work)
+    if required - value < 1e-9:
+        value = required
     previous_health = max(
-        1,
-        round(
-            building.kind.profile.max_health
-            * parameters.construction_value
-            / parameters.required_value
-        ),
+        1, round(building.kind.profile.max_health * building.construction_progress)
     )
-    parameters.construction_value = min(
-        parameters.required_value,
-        parameters.construction_value + work,
-    )
-    building.construction_progress = parameters.construction_value / parameters.required_value
+    building.construction_progress = value / required
     building.health = min(
         building.kind.profile.max_health,
         building.health
         + round(building.kind.profile.max_health * building.construction_progress)
         - previous_health,
     )
-    if parameters.construction_value < parameters.required_value:
+    for job in jobs:
+        assert isinstance(job.parameters, ConstructionParameters)
+        job.parameters.construction_value = value
+    if building.construction_progress < 1.0:
         return
     building.construction_progress = None
     economy.change_income(simulation, building.owner_id, building.profile.income_per_second)
-    parameters.constructed_entity_id = building.entity_id
-    automation_lifecycle.transition(
-        simulation, automation, AutomationStatus.COMPLETED, "CONSTRUCTION_COMPLETED"
-    )
-    automation_assignments.release_automation(simulation, automation)
+    for job in jobs:
+        assert isinstance(job.parameters, ConstructionParameters)
+        job.parameters.constructed_entity_id = building.entity_id
+        if job.status not in {AutomationStatus.ACTIVE, AutomationStatus.WAITING}:
+            automation_lifecycle.transition(
+                simulation, job, AutomationStatus.ACTIVE, "CONSTRUCTION_ASSISTED"
+            )
+        automation_lifecycle.transition(
+            simulation, job, AutomationStatus.COMPLETED, "CONSTRUCTION_COMPLETED"
+        )
+        automation_assignments.release_automation(simulation, job, clear_suspended=True)
     start_next_construction(simulation)
+
+
+def blueprint_occupants(
+    simulation: Simulation, parameters: ConstructionParameters
+) -> tuple[str, ...]:
+    """Include discs crossing an edge even when their center cell is outside the footprint."""
+    width, height = parameters.building_kind.profile.footprint
+    radius = max(collision_radius(kind) for kind in EntityKind if kind.profile.movable)
+    nearby = {
+        key
+        for y in range(
+            floor(parameters.position.y - radius), ceil(parameters.position.y + height + radius)
+        )
+        for x in range(
+            floor(parameters.position.x - radius), ceil(parameters.position.x + width + radius)
+        )
+        for key in simulation.occupancy.occupants((x, y))
+    }
+    cells = construction_cells(parameters)
+    return tuple(
+        key
+        for key in sorted(nearby)
+        if simulation.entities[key].is_movable
+        and (
+            simulation.entities[key].occupied_cells & cells
+            or construction_distance(simulation.entities[key].position, parameters)
+            < collision_radius(simulation.entities[key].kind) - 1e-9
+        )
+    )
+
+
+def clear_idle_site(
+    simulation: Simulation, automation: Automation, occupants: tuple[str, ...] | None = None
+) -> None:
+    """Give only uncommanded friendly idle units a real, collision-safe exit route."""
+    parameters = automation.parameters
+    assert isinstance(parameters, ConstructionParameters)
+    if parameters.site_entity_id is not None:
+        return
+    if occupants is None:
+        occupants = blueprint_occupants(simulation, parameters)
+    if not occupants:
+        return
+    allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
+    candidates = construction_interaction_points(simulation, parameters, 3.0)
+    blocked = simulation._building_cells()
+    reserved: list[tuple[Point, float]] = []
+    for key in occupants:
+        unit = simulation.entities[key]
+        if (
+            unit.owner_id != automation.owner_id
+            or unit.state is not UnitState.IDLE
+            or key in simulation.assignments
+            or key in simulation.suspended_assignments
+            or unit.path
+            or unit.order_queue
+            or unit.move_target is not None
+            or unit.hold_anchor is not None
+            or unit.attack_target_id is not None
+            or unit.pursue_target
+            or unit.repair_target_id is not None
+            or unit.reclaim_target_id is not None
+        ):
+            continue
+        if not allowance.claim():
+            break
+        radius = collision_radius(unit.kind)
+        goals = tuple(
+            point
+            for point in candidates
+            if construction_distance(point, parameters) >= radius
+            and all(
+                point.distance_to(other) >= radius + other_radius
+                for other, other_radius in reserved
+            )
+            and spawn_cell_available(simulation, simulation.game_map.cell_for(point), unit.kind)
+        )
+        try:
+            destination, path = simulation._routes.shared_path_to_any(unit.position, goals, blocked)
+        except PathfindingError as error:
+            if (
+                automation.status is not AutomationStatus.WAITING
+                or automation.reason_code != "SITE_OCCUPIED"
+            ):
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.PATHFINDING_FAILED,
+                    key,
+                    operation="clear_blueprint",
+                    reason=str(error),
+                    automation_id=automation.automation_id,
+                )
+            continue
+        reserved.append((destination, radius))
+        movement.start_path(
+            simulation, unit, destination, path, "clear_blueprint", UnitState.MOVING
+        )
 
 
 def wait_for_site(simulation: Simulation, automation: Automation, reason: str) -> None:

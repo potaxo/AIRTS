@@ -35,6 +35,7 @@ class EventType(StrEnum):
     MANUAL_OVERRIDE = "manual_override"
     PRODUCTION_STARTED = "production_started"
     PRODUCTION_COMPLETED = "production_completed"
+    PRODUCTION_DEPLOYMENT_CHANGED = "production_deployment_changed"
     ENEMY_REINFORCEMENT_SPAWNED = "enemy_reinforcement_spawned"
     REPAIR_STARTED = "repair_started"
     REPAIR_COMPLETED = "repair_completed"
@@ -128,7 +129,8 @@ class Event:
 
 
 class EventLog:
-    def __init__(self) -> None:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
         self._events: list[Event] = []
 
     @property
@@ -141,7 +143,9 @@ class EventLog:
         event_type: EventType,
         subject_id: str | None = None,
         **details: object,
-    ) -> Event:
+    ) -> Event | None:
+        if not self.enabled:
+            return None
         event = Event(len(self._events) + 1, tick, event_type, subject_id, details)
         self._events.append(event)
         return event
@@ -154,7 +158,9 @@ class EventLog:
         source: str,
         cost: float,
         cells: tuple[tuple[int, int], ...],
-    ) -> Event:
+    ) -> Event | None:
+        if not self.enabled:
+            return None
         return self.record(
             tick,
             EventType.PATH_COMPUTED,

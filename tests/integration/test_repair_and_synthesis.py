@@ -14,7 +14,7 @@ from airts.adapters.persistence import (
     save_simulation,
 )
 from airts.adapters.replay import capture_replay, run_replay
-from airts.contracts.automations import AutomationStatus, ConstructionParameters
+from airts.contracts.automations import AutomationStatus, ConstructionParameters, RepairParameters
 from airts.contracts.commands import (
     AttackCommand,
     CreateConstructionCommand,
@@ -27,15 +27,25 @@ from airts.contracts.commands import (
     StopCommand,
 )
 from airts.contracts.spatial import Point, PolylineTarget
+from airts.navigation.pathfinding import PathfindingError
 from airts.presentation.app import AirtsApp
 from airts.presentation.opengl_renderer import OpenGLFrameBuilder
 from airts.presentation.palette import REPAIR_COLOR, WORK_BEAM_WIDTH
-from airts.presentation.rendering import SoftwareRenderer, order_feedback, work_links
+from airts.presentation.rendering import SoftwareRenderer, order_feedback
 from airts.presentation.ui import selection
+from airts.presentation.visuals.work import work_sources
 from airts.simulation import Simulation
 from airts.systems.repair import building_distance
+from airts.systems.repair_positions import service_route
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+def work_centers(simulation: Simulation) -> tuple[tuple[Point, Point], ...]:
+    return tuple(
+        (source.selection_position, target.selection_position)
+        for source, target in work_sources(simulation)
+    )
 
 
 def repair_world() -> Simulation:
@@ -65,6 +75,78 @@ def repair_world() -> Simulation:
             }
         )
     )
+
+
+def test_repair_search_prunes_remote_and_lower_priority_buildings() -> None:
+    data = repair_world().game_map.to_dict()
+    data["width"] = data["height"] = 192
+    data["terrain"] = {"default": "grass"}
+    data["entities"].extend(
+        {
+            "id": f"remote_{i}",
+            "kind": "repair_hub" if i % 2 else "factory",
+            "position": [80 + i % 10 * 8, 80 + i // 10 * 8],
+        }
+        for i in range(50)
+    )
+    simulation = Simulation(load_map_data(data))
+    with patch("airts.simulation.service_route", wraps=service_route) as search:
+        destination, _, path = simulation._nearest_repair_destination(simulation.entities["a"])
+    assert destination == "hub" and path.cost == 0
+    assert search.call_count == 1
+
+
+def test_repair_command_selects_nearest_reachable_source_without_planning_each_route() -> None:
+    data = repair_world().game_map.to_dict()
+    data["terrain"] = {"default": "grass", "rectangles": [[18, 0, 1, 32, "rock"]]}
+    next(entity for entity in data["entities"] if entity["id"] == "hub")["position"] = [36, 12]
+    simulation = Simulation(load_map_data(data))
+    simulation.entities["builder"].health = 10
+    simulation.entities["outside"].health = 10
+    with patch("airts.simulation.service_route", wraps=service_route) as search:
+        result = simulation.execute(CreateRepairAndReturnCommand(("builder", "outside", "a")))
+    assert result.accepted
+    parameters = simulation.automations[result.automation_id or ""].parameters
+    assert isinstance(parameters, RepairParameters)
+    assert parameters.destinations == {"builder": "factory", "outside": "hub"}
+    assert search.call_count == 0
+    assert simulation.navigation_field_build_count == 0
+    simulation.advance(10)
+    assert simulation.entities["builder"].path
+    assert simulation.entities["outside"].path or simulation.entities["outside"].health > 10
+
+
+@pytest.mark.parametrize("barrier", [False, True])
+def test_pruned_repair_selection_matches_exhaustive_weighted_routes(barrier: bool) -> None:
+    data = repair_world().game_map.to_dict()
+    data["terrain"] = {
+        "default": "grass",
+        "rectangles": [[0, 20, 48, 3, "road"], [16, 1, 3, 16, "forest"]]
+        + ([[18, 0, 1, 32, "rock"]] if barrier else []),
+    }
+    data["entities"].extend(
+        [
+            {"id": "other_hub", "kind": "repair_hub", "position": [38, 24]},
+            {"id": "rear_factory", "kind": "factory", "position": [2, 25]},
+            {"id": "other_center", "kind": "command_center", "position": [29, 2]},
+        ]
+    )
+    simulation = Simulation(load_map_data(data))
+    priorities = {EntityKind.REPAIR_HUB: 0, EntityKind.FACTORY: 1, EntityKind.COMMAND_CENTER: 2}
+    for key in ("a", "outside", "builder"):
+        entity = simulation.entities[key]
+        candidates = []
+        for building in simulation.entities.values():
+            if building.kind not in priorities or building.owner_id != entity.owner_id:
+                continue
+            try:
+                point, path = service_route(simulation, entity, building)
+            except PathfindingError:
+                continue
+            candidates.append((priorities[building.kind], path.cost, building.entity_id, point))
+        expected = min(candidates, key=lambda item: item[:3])
+        destination, point, path = simulation._nearest_repair_destination(entity)
+        assert (destination, point, path.cost) == (expected[2], expected[3], expected[1])
 
 
 def test_builder_approaches_repairs_and_save_continues(tmp_path: Path) -> None:
@@ -167,7 +249,7 @@ def test_hub_repairs_building_retains_target_and_restores_service(tmp_path: Path
     simulation.advance()
     hub, building = simulation.entities["hub"], simulation.entities["building"]
     assert building.health == 205 and hub.repair_target_id == "building"
-    assert tuple(work_links(simulation)) == ((hub.selection_position, building.selection_position),)
+    assert work_centers(simulation) == ((hub.selection_position, building.selection_position),)
     # A nearer wounded unit does not steal active service.
     simulation.entities["builder"].health = 20
     path = tmp_path / "hub-building.json"
@@ -192,11 +274,11 @@ def test_hub_avoids_reclamation_and_resumes_healing_when_stopped() -> None:
     before = simulation.resources["player"]
     assert simulation.execute(ReclaimBuildingCommand(("builder",), "building")).accepted
     assert simulation.entities["hub"].repair_target_id is None
-    assert not tuple(work_links(simulation))
+    assert not work_centers(simulation)
     simulation.advance(10)
     assert target.health == 155
     assert simulation.entities["hub"].repair_target_id is None
-    assert not tuple(work_links(simulation))
+    assert not work_centers(simulation)
     assert simulation.resources["player"] == before
     assert simulation.execute(StopCommand(("builder",))).accepted
     simulation.advance()
@@ -218,12 +300,12 @@ def test_repair_beam_tracks_hub_service_without_selection_in_both_renderers() ->
         assert not packed and vertices == 0  # GPU work beams use the thick feedback segment batch.
         if target_id is None:
             assert not paths and not packed and vertices == 0
-            assert not tuple(work_links(simulation))
+            assert not work_centers(simulation)
         else:
             source = simulation.entities["hub"].selection_position
             target = simulation.entities[target_id].selection_position
             assert paths == ((REPAIR_COLOR, (app.screen_point(source), app.screen_point(target))),)
-            assert tuple(work_links(simulation)) == ((source, target),)
+            assert work_centers(simulation) == ((source, target),)
             with patch("airts.presentation.rendering.pygame.draw.lines") as lines:
                 software.draw_entities(app, pygame.Surface(app.window_size))
             lines.assert_called_once_with(
@@ -252,9 +334,9 @@ def test_builder_repairs_from_a_clear_position_in_range_without_touching_buildin
     assert 2.5 < building_distance(builder.position, building) <= builder.kind.profile.repair_range
     assert not builder.path and builder.move_target is None
     assert not builder.occupied_cells & building.occupied_cells
-    assert (builder.position, building.selection_position) in tuple(work_links(simulation))
+    assert (builder.position, building.selection_position) in work_centers(simulation)
     assert simulation.execute(StopCommand(("builder",))).accepted
-    assert not tuple(work_links(simulation))
+    assert not work_centers(simulation)
 
 
 def test_factory_unit_healing_has_a_beam_only_during_service() -> None:
@@ -267,7 +349,7 @@ def test_factory_unit_healing_has_a_beam_only_during_service() -> None:
     source = simulation.entities["factory"].selection_position
     for _ in range(100):
         simulation.advance()
-        if (source, unit.position) in tuple(work_links(simulation)):
+        if (source, unit.position) in work_centers(simulation):
             break
     else:
         pytest.fail("Unit never entered factory repair service")
@@ -276,7 +358,7 @@ def test_factory_unit_healing_has_a_beam_only_during_service() -> None:
     assert unit.health > health
     simulation.advance(100)
     assert unit.health == unit.kind.profile.max_health
-    assert not tuple(work_links(simulation))
+    assert not work_centers(simulation)
 
 
 def test_builder_construction_beam_appears_from_working_range_and_stops_on_completion() -> None:
@@ -293,10 +375,10 @@ def test_builder_construction_beam_appears_from_working_range_and_stops_on_compl
     building = simulation.entities[parameters.site_entity_id or ""]
     assert builder.position == initial_position
     assert building_distance(builder.position, building) == 3.5
-    assert tuple(work_links(simulation)) == ((builder.position, building.selection_position),)
+    assert work_centers(simulation) == ((builder.position, building.selection_position),)
     simulation.advance(30)
     assert building.is_complete
-    assert not tuple(work_links(simulation))
+    assert not work_centers(simulation)
 
 
 def test_direct_building_repair_replaces_queued_construction() -> None:
@@ -334,9 +416,12 @@ def test_explicit_repair_and_return_shares_hub_capacity_and_returns() -> None:
 
 
 def test_hub_loses_target_when_it_leaves_range() -> None:
-    simulation = repair_world()
-    simulation.entities["a"].health = simulation.entities["b"].health = 20
+    data = repair_world().game_map.to_dict()
+    next(entity for entity in data["entities"] if entity["id"] == "a")["position"] = [15.5, 16.5]
+    simulation = Simulation(load_map_data(data))
+    simulation.entities["a"].health = 20
     simulation.advance(1)
+    simulation.entities["b"].health = 20
     assert simulation.execute(MoveCommand(("a",), Point(10.5, 22.5))).accepted
     simulation.advance(45)
     assert simulation.entities["a"].health < 100
@@ -414,16 +499,18 @@ def test_builder_repair_replays_combat_damage_and_restoration(patrol: bool) -> N
     assert run_replay(capture_replay(simulation)).snapshot() == simulation.snapshot()
 
 
-def test_hub_radius_includes_boundary_and_excludes_unfinished_source() -> None:
+@pytest.mark.parametrize("distance", [9.0, 9.01], ids=["boundary", "outside"])
+def test_hub_radius_includes_boundary_and_excludes_unfinished_source(distance: float) -> None:
     simulation = repair_world()
     # This case isolates repair capacity from the separately covered combat support response.
     assert simulation.remove_entity("hostile").accepted
     unit = simulation.entities["outside"]
     unit.health = 20
-    assert simulation.execute(MoveCommand(("outside",), Point(29.5, 13.5))).accepted
+    destination = Point(23.5 + distance, 13.5)
+    assert simulation.execute(MoveCommand(("outside",), destination)).accepted
     simulation.advance(20)
-    assert unit.position == Point(29.5, 13.5)
-    assert unit.health > 20
+    assert unit.position == destination
+    assert (unit.health > 20) == (distance <= 9)
     simulation.entities["hub"].construction_progress = 0.5
     health = unit.health
     simulation.advance(1)

@@ -39,8 +39,8 @@ Movement, attack and repair share one ordered queue rather than separate queues 
 Modifier state follows keyboard-event order within each input batch, so releasing Shift later in
 the same frame cannot replace earlier queued clicks. Every Shift click appends a separate task,
 including nearby or repeated ground clicks. An enemy click always names a tracking attack target;
-rapid repeated enemy clicks cannot become a double-click gathering move. Only ground movement
-participates in the ordinary double-click gathering shortcut.
+rapid repeated enemy clicks remain tracking attacks. Ground movement always gathers unless the
+units' explicit strict-formation setting applies; repeated clicks never select another movement mode.
 Each unit independently executes supported orders: mixed selections ignore attack for unarmed
 members and repair for members without repair capability, preserving those members' existing work.
 Capability filtering belongs to the shared command boundary; ownership and reference validation
@@ -118,7 +118,10 @@ Saves retain tier, paid remaining time and the simulation tick; loading neither 
 again. [Persistence](persistence.md) owns format rejection and replay diagnostic support.
 The selection panel shows tier, output, next cost/duration, remaining time and a progress bar.
 Same-type selections group by tier and running/unfinished state; each button applies to its group.
-Insufficient aggregate resources disable that group's upgrade action. Enemy inspection is read-only.
+Idle groups remain upgradeable while peers of the same tier are upgrading. The upgrade button shows
+the affordable count and cost; a click starts as many members as the current balance permits, in
+entity-ID order, through individual validated commands. It is disabled only when no member is
+affordable. Enemy inspection is read-only.
 
 ### Developer income and unit production
 
@@ -161,19 +164,29 @@ use the same bounded recovery contract rather than being frozen or silently scat
 Both paths use the shared spawn-clearance service and the shared entity-ID allocator. Production
 controllers retain only the latest 128 produced entity IDs for inspection; events remain the
 complete audit trail. The recent-ID list stays bounded during continuous production.
-`Produce + Defend` retargets each selected factory's existing loop without changing its unit kind
-and attaches only subsequently produced units to a shared production defense. Production sources
+`SetProductionDefenseCommand` saves or clears factory deployment intent independently of production
+and construction. `Produce + Defend` accepts selected owned factories even when unfinished, idle or
+without a continuous loop. It updates current finite/continuous queues without changing their kinds,
+quantities, paid progress or production pause state. Later production inherits the saved target and
+auto-repair setting unless that order explicitly supplies another rally, patrol or defense target.
+Saving deployment does not enqueue units or charge resources. The selection panel shows how many
+factories have deployment set and offers Clear deployment, which leaves existing defenders alone.
+Only subsequently produced units join the shared production defense. Production sources
 with the same owner and exact spatial target join one live controller, with one assembly circle and
 one entry under Units for inspection, pause/resume, auto-repair and cancellation. Polygons gather;
 polylines spread along the line. Ordinary manually created defenses and other owners stay separate.
 Future-unit target validation shares the deployment rules owned by
 [movement](movement.md#patrol-defense-and-combat), both on creation and retargeting.
 Retargeting a factory affects only its future units; already produced units keep their orders.
-Editing the shared controller's target or auto-repair updates every linked source. Joining an
+Editing the shared controller's target or auto-repair updates every linked source and saved factory
+deployment, including idle factories. Joining an
 existing controller inherits its auto-repair setting; an explicit auto-repair edit changes the group.
 Moving a controller onto another existing production defense is rejected; factories can instead
-join that controller through Produce + Defend. Canceling the controller detaches future
-reinforcements while factories keep producing; pausing it also holds subsequently joined units.
+join that controller through Produce + Defend. Canceling the controller clears linked factory
+deployments and detaches future reinforcements while factories keep producing; pausing it also holds
+subsequently joined units. Factories retain saved deployment when a finite queue finishes or a loop
+is replaced, including when the last defender is subsequently reassigned. Source destruction removes
+its deployment with the factory. A saved deployment does not claim or interrupt construction work.
 Factories remain independent owners of costs, queues, progress and production pause/cancel.
 
 Construction-capable units construct the kinds in `BUILDABLE_KINDS`; current profiles grant that
@@ -182,17 +195,33 @@ Placement validates capability, ownership, bounds, terrain and real building foo
 Remote orders are owner-only blueprints: they do not occupy
 space, reserve resource sites, block movement or become combat targets. Blueprints may overlap.
 Builders travel even without funds, then wait in range for money or mobile occupants to leave.
+Accepted blueprints route overlapping friendly idle mobile units to nearby clear positions. Units
+with an assignment, Hold, movement, combat/repair/reclaim target or queued order retain their intent;
+enemy units never receive clearance orders. Clearing uses ordinary path movement and route budgets,
+not displacement or teleportation. If no nearby exit is reachable, the blueprint waits with
+`SITE_OCCUPIED` and a path diagnostic. Even discs crossing the footprint edge delay publication.
 Placement is revalidated on arrival; a blueprint covered by a real building fails and the queue
-continues. Only when work starts does a job charge once and publish an unfinished building into
+continues. Real-building overlap validation queries the footprint's authoritative occupancy cells;
+it does not scan the entire army. Mobile blueprint clearance still uses actual disc geometry.
+Only when work starts does a job charge once and publish an unfinished building into
 authoritative occupancy. Each assigned builder contributes
 only within its build range of the footprint and outside it. Builders stop at clear positions within
 that range rather than requiring contact with the perimeter.
+Traveling builders retain their admitted paths without regenerating unchanged working-range
+candidate cells every tick. Arrival still checks range and stops before applying work; workers
+inside a footprint or needing a new route retain the ordinary approach/clearance checks.
 Multiple builders accelerate one job without duplicating cost or the building. Unfinished
 buildings are visible and attackable, block movement, and cannot produce income/units or repair.
 Their health grows with work while retaining accumulated damage. Destruction fails the associated
 job and releases builders to the next order. Canceling work or losing every builder leaves the
 physical scaffold; reissuing construction at an unclaimed friendly scaffold resumes progress
-without another charge. Such scaffolds count as surviving assets but not productive factories.
+without another charge. Builders can also right-click any friendly unfinished building through
+`RepairBuildingCommand`, including one another builder is already constructing. Completed repair
+hubs can finish real unfinished buildings in service range, automatically or by direct repair order.
+Hubs cannot create blueprints or materialize one that has not started. Shared construction work
+updates the physical building and its live job together, retains damage, charges no second cost and
+completes/releases the job once, including when its builders were interrupted or paused.
+Such scaffolds count as surviving assets but not productive factories.
 
 Shift-placement appends FIFO jobs and keeps placement active. Shift-left-drag creates only a
 presentation draft: grid-aligned origins follow the drag direction, spaced by the selected footprint

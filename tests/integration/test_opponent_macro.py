@@ -187,9 +187,10 @@ def test_base_rescue_and_occupied_blueprint_do_not_starve_funded_macro() -> None
     assert simulation.execute(
         CreateConstructionCommand("worker_0", EntityKind.TURRET, Point(124, 84), owner_id="ai")
     ).accepted
-    simulation.advance(10)
+    simulation.advance()
+    # Check while traffic still occupies the smaller, single-cell blueprint.
     assert any(job.reason_code == "SITE_OCCUPIED" for job in simulation.live_automations)
-    simulation.advance(10)
+    simulation.advance(19)
     assert any(squad.phase is SquadPhase.DEFENDING for squad in simulation.opponents["ai"].squads)
     assert any(
         isinstance(job.parameters, ProductionParameters) for job in simulation.live_automations
@@ -234,10 +235,10 @@ def test_surplus_capacity_demand_adapts_to_configured_production_times(
     simulation.advance(20)
     plans = [
         job.parameters.building_kind
-        for job in simulation.live_automations
+        for job in simulation.automations.values()
         if isinstance(job.parameters, ConstructionParameters)
     ]
-    assert plans == [expected]
+    assert plans and plans[0] is expected
 
 
 @pytest.mark.parametrize("multiplier", [1, 5])

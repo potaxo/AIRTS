@@ -39,6 +39,8 @@ from airts.contracts.automations import (
     ConstructionParameters,
     DefendParameters,
     ProductionParameters,
+    RepairParameters,
+    RepairPhase,
 )
 from airts.contracts.commands import (
     AttackCommand,
@@ -66,6 +68,165 @@ from airts.simulation import Simulation
 from airts.world.entities import UnitState
 from airts.world.map import GameMap, load_example_map, load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+@pytest.mark.parametrize("record_history", [False, True])
+def test_recording_choice_preserves_save_and_production_continuation(
+    tmp_path: Path, record_history: bool
+) -> None:
+    simulation = builder_factory_simulation()
+    simulation.set_history_recording(record_history)
+    assert simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1)).accepted
+    simulation.advance(2)
+    path = tmp_path / "recording-choice.json"
+    save_simulation(simulation, path)
+    state = json.loads(path.read_text(encoding="utf-8"))["state"]
+    assert bool(state["events"]) is record_history
+    assert bool(state["command_history"]) is record_history
+    restored = load_simulation(path, record_history=record_history)
+    assert restored.events.enabled is record_history
+    assert restored.export_state() == simulation.export_state()
+    for instance in (simulation, restored):
+        instance.advance(EntityKind.SCOUT.profile.production_ticks)
+        assert len(instance.entities) > len(instance.game_map.entities)
+    assert restored.export_state() == simulation.export_state()
+    assert bool(restored.events.events) is record_history
+
+
+def test_normal_load_discards_history_without_constructing_events(tmp_path: Path) -> None:
+    simulation = builder_factory_simulation()
+    simulation.execute(MoveCommand(("builder",), Point(8, 8)))
+    simulation.advance(3)
+    expected = simulation.snapshot()
+    path = tmp_path / "debug-save.json"
+    save_simulation(simulation, path)
+    with patch("airts.adapters.persistence.Event", side_effect=AssertionError("restored event")):
+        restored = load_simulation(path, record_history=False)
+    assert restored.snapshot() == expected
+    assert restored.command_count == simulation.command_count
+    assert restored.command_history == ()
+    assert restored.events.events == ()
+    before = restored.command_count
+    assert restored.execute(HoldPositionCommand(("builder",))).accepted
+    assert restored.command_count == before + 1
+    restored.advance(3)
+    assert restored.command_history == ()
+    assert restored.events.events == ()
+
+
+@pytest.mark.parametrize("field", ["events", "command_history", "command_count"])
+def test_normal_load_still_rejects_corrupt_diagnostics(field: str) -> None:
+    simulation = builder_factory_simulation()
+    simulation.execute(HoldPositionCommand(("builder",)))
+    state = simulation.export_state()
+    if field == "events":
+        state[field][0]["sequence"] = 99
+    elif field == "command_history":
+        state[field][0]["tick"] = 1000
+    else:
+        state[field] = -1
+    with pytest.raises(PersistenceError):
+        load_simulation_data(
+            {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state},
+            record_history=False,
+        )
+
+
+def test_completed_production_keeps_history_after_its_factory_is_destroyed() -> None:
+    simulation = builder_factory_simulation()
+    created = simulation.execute(CreateProductionCommand("factory", EntityKind.SCOUT, 1))
+    assert created.accepted
+    simulation.advance(EntityKind.SCOUT.profile.production_ticks)
+    job = simulation.automations[created.automation_id or ""]
+    assert job.status is AutomationStatus.COMPLETED
+    assert simulation.execute(RemoveEntityCommand("factory")).accepted
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 3)
+
+
+def test_completed_construction_keeps_history_after_its_builder_and_site_are_destroyed() -> None:
+    simulation = builder_factory_simulation()
+    created = simulation.execute(
+        CreateConstructionCommand(
+            "builder",
+            EntityKind.RESOURCE_GENERATOR,
+            Point(6, 10),
+        )
+    )
+    assert created.accepted
+    simulation.advance(Simulation.CONSTRUCTION_BUILD_TICKS)
+    job = simulation.automations[created.automation_id or ""]
+    assert job.status is AutomationStatus.COMPLETED
+    assert isinstance(job.parameters, ConstructionParameters)
+    assert job.parameters.constructed_entity_id is not None
+    assert simulation.execute(RemoveEntityCommand("builder")).accepted
+    assert simulation.execute(RemoveEntityCommand(job.parameters.constructed_entity_id)).accepted
+    restored = load_simulation_data(
+        {
+            "schema": SAVE_SCHEMA,
+            "map": simulation.game_map.to_dict(),
+            "state": simulation.export_state(),
+        }
+    )
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 3)
+
+
+@pytest.mark.parametrize("remove_returned", [False, True])
+def test_partially_completed_repair_restores_returned_members_without_reclaiming_control(
+    remove_returned: bool,
+) -> None:
+    simulation = Simulation(runtime_map())
+    simulation.entities["unit_01"].health = 10
+    simulation.entities["unit_03"].health = 1
+    created = simulation.execute(
+        CreateRepairAndReturnCommand(("unit_01", "unit_03"), health_threshold=0.5)
+    )
+    assert created.accepted
+    repair = simulation.automations[created.automation_id or ""]
+    parameters = repair.parameters
+    assert isinstance(parameters, RepairParameters)
+    for _ in range(250):
+        simulation.advance()
+        if RepairPhase.DONE in parameters.phases.values():
+            break
+    assert not repair.status.terminal
+    returned = next(key for key, phase in parameters.phases.items() if phase is RepairPhase.DONE)
+    assert returned not in simulation.assignments
+    if remove_returned:
+        assert simulation.execute(RemoveEntityCommand(returned)).accepted
+    document = {
+        "schema": SAVE_SCHEMA,
+        "map": simulation.game_map.to_dict(),
+        "state": simulation.export_state(),
+    }
+    restored = load_simulation_data(document)
+    assert restored.export_state() == simulation.export_state()
+    _assert_continues_identically(simulation, restored, 100)
+    if remove_returned:
+        raw_parameters = document["state"]["automations"][repair.automation_id]["parameters"]
+        return_positions = raw_parameters.pop("return_positions")
+        with pytest.raises(PersistenceError, match="historical repair members require"):
+            load_simulation_data(document)
+        raw_parameters["return_positions"] = return_positions
+    # An unfinished member still has to be controlled by the repair task.
+    unfinished = next(
+        key
+        for key, phase in document["state"]["automations"][repair.automation_id]["parameters"][
+            "phases"
+        ].items()
+        if phase != "done"
+    )
+    document["state"]["assignments"].pop(unfinished)
+    with pytest.raises(PersistenceError, match="assignments are incomplete"):
+        load_simulation_data(document)
 
 
 @pytest.mark.parametrize("match", [False, True], ids=["sandbox", "match"])
@@ -620,6 +781,8 @@ def test_load_rejects_inconsistent_production_timing(
     simulation.advance(3)
     state = simulation.export_state()
     state["automations"][result.automation_id]["parameters"][field] = value
+    if field == "progress_ticks":
+        state["automations"][result.automation_id]["parameters"]["cost_paid"] = False
     with pytest.raises(PersistenceError, match=diagnostic):
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
@@ -1087,7 +1250,7 @@ def test_growing_army_save_preserves_shared_cells_and_movement_continuation(
     simulation.advance(260)
     if gathering:
         selected = tuple(key for key, entity in simulation.entities.items() if entity.is_movable)
-        assert simulation.execute(MoveCommand(selected, Point(35, 35), gathering=True)).accepted
+        assert simulation.execute(MoveCommand(selected, Point(35, 35))).accepted
         simulation.advance(5)
     document = {
         "schema": SAVE_SCHEMA,
@@ -1096,5 +1259,9 @@ def test_growing_army_save_preserves_shared_cells_and_movement_continuation(
     }
     restored = load_simulation_data(document)
     assert restored.export_state() == simulation.export_state()
+    if gathering:
+        points = [point for entity in restored.entities.values() for point in entity.path]
+        assert points
+        assert len({id(point) for point in points}) == len(set(points))
     _assert_continues_identically(simulation, restored, 20)
     assert "traffic_reservations" not in document["state"]

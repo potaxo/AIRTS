@@ -141,6 +141,19 @@ def test_connectivity_tracks_obstacles_and_does_not_depend_on_cached_searches(
     assert not router.can_reach_any(start, (goal,), wall)
     assert router.field_build_count == 0
 
+    starts = np.asarray(
+        [(x + 0.5, y + 0.5) for y in range(12) for x in range(12)]
+        + [(-0.1, 0.0), (12.0, 1.0), (float("nan"), 1.0), (1.0, float("inf"))]
+    )
+    for obstacles in (wall, wall - {(5, 6)}, frozenset()):
+        for goals in ((), (goal,), (goal, start), (Point(5.5, 5.5), Point(-1, -1))):
+            expected = [router.can_reach_any(Point(x, y), goals, obstacles) for x, y in starts]
+            assert router.can_reach_many(starts, goals, obstacles).tolist() == expected
+    assert router.can_reach_many(np.empty((0, 2)), (goal,), wall).size == 0
+    with pytest.raises(ValueError, match="x and y"):
+        router.can_reach_many(np.zeros((3, 3)), (goal,), wall)
+    assert router.field_build_count == 0
+
 
 def test_branch_cost_continues_python_compensated_sum_without_changing_rounding() -> None:
     game_map = load_map_data(

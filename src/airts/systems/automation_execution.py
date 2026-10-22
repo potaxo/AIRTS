@@ -53,6 +53,16 @@ class AutomationQueries:
         field(default_factory=dict)
     )
 
+    def invalidate_repair_targets(self) -> None:
+        """Construction can complete/heal a building without changing membership."""
+        self.damaged_buildings.clear()
+        for key in tuple(self.source_indexes):
+            if key[1]:
+                del self.source_indexes[key]
+        for patrol_key in tuple(self.patrol_indexes):
+            if patrol_key[2]:
+                del self.patrol_indexes[patrol_key]
+
     def patrol_index(
         self, simulation: Simulation, owner: str, target: SpatialTarget, *, repair: bool = False
     ) -> tuple[dict[str, Point], SpatialIndex]:

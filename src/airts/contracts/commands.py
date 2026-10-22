@@ -99,8 +99,14 @@ class MoveCommand:
     entity_ids: tuple[str, ...]
     target: Point
     owner_id: str = "player"
-    gathering: bool = False
     queued: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SetFormationCommand:
+    entity_ids: tuple[str, ...]
+    enabled: bool
+    owner_id: str = "player"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +211,14 @@ class CreateProductionBatchCommand:
     priority: int = 0
     owner_id: str = "player"
     original_instruction: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SetProductionDefenseCommand:
+    factory_ids: tuple[str, ...]
+    target: SpatialTarget | None
+    owner_id: str = "player"
+    auto_repair: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +361,7 @@ class ModifyAutomationCommand:
 
 Command = (
     MoveCommand
+    | SetFormationCommand
     | StopCommand
     | HoldPositionCommand
     | AttackCommand
@@ -359,6 +374,7 @@ Command = (
     | CreateDefendCommand
     | CreateProductionCommand
     | CreateProductionBatchCommand
+    | SetProductionDefenseCommand
     | ReduceProductionCommand
     | CreateConstructionCommand
     | CreateReinforcementCommand
@@ -388,6 +404,21 @@ class CommandResult:
 
 
 def command_to_dict(command: Command) -> dict[str, object]:
+    if isinstance(command, SetProductionDefenseCommand):
+        return {
+            "type": "set_production_defense",
+            "factory_ids": list(command.factory_ids),
+            "target": None if command.target is None else target_to_dict(command.target),
+            "owner_id": command.owner_id,
+            "auto_repair": command.auto_repair,
+        }
+    if isinstance(command, SetFormationCommand):
+        return {
+            "type": "set_formation",
+            "entity_ids": list(command.entity_ids),
+            "enabled": command.enabled,
+            "owner_id": command.owner_id,
+        }
     if isinstance(command, SetAIIncomeMultiplierCommand):
         return {
             "type": "set_ai_income_multiplier",
@@ -475,7 +506,6 @@ def command_to_dict(command: Command) -> dict[str, object]:
             "entity_ids": list(command.entity_ids),
             "target": [command.target.x, command.target.y],
             "owner_id": command.owner_id,
-            **({"gathering": True} if command.gathering else {}),
             **({"queued": True} if command.queued else {}),
         }
     if isinstance(command, AttackCommand | RepairBuildingCommand | ReclaimBuildingCommand):
@@ -683,8 +713,11 @@ def command_from_dict(raw_data: object) -> Command:
             _entity_ids(data.get("entity_ids")),
             _point(data.get("target"), "target"),
             owner_id,
-            gathering=_boolean(data.get("gathering", False), "gathering"),
             queued=_boolean(data.get("queued", False), "queued"),
+        )
+    if command_type == "set_formation":
+        return SetFormationCommand(
+            _entity_ids(data.get("entity_ids")), _boolean(data.get("enabled"), "enabled"), owner_id
         )
     if command_type in {"attack", "repair_building", "reclaim_building"}:
         entity_ids = _entity_ids(data.get("entity_ids"))
@@ -735,6 +768,14 @@ def command_from_dict(raw_data: object) -> Command:
             _string(data.get("factory_id"), "factory_id"),
             EntityKind(_string(data.get("unit_kind"), "unit_kind")),
             owner_id,
+        )
+    if command_type == "set_production_defense":
+        target_data = data.get("target")
+        return SetProductionDefenseCommand(
+            _entity_ids(data.get("factory_ids")),
+            None if target_data is None else target_from_dict(target_data),
+            owner_id,
+            _boolean(data.get("auto_repair", False), "auto_repair"),
         )
     if command_type == "create_production":
         try:

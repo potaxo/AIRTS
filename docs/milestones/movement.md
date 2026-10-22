@@ -7,14 +7,31 @@ timing gates and work-counter definitions belong to [performance](performance.md
 ## Orders and routing
 
 One movement controller serves every army size. Direct commands and patrol/defend dispatch share
-group-path planning. Move chooses intent once at submission: a target more than 12 cells from
-the selection's center is a march, using compact separated arrival slots rather than translated
-source positions. Nearby ordinary moves preserve compatible translated formation positions,
-fitting them inside map edges; terrain, buildings or compressed source geometry instead require
-reachable, separated destination slots. Explicit `gathering` also gathers nearby selections.
-Both ordinary and explicit gathering marches reuse weighted group routing; members split near
-the arrival area, without waiting to restore their original formation. Distances use world cells,
-independently of camera zoom or army size. Every queued movement leg gathers, even nearby clicks.
+group-path planning. Ordinary Move always gathers into separated compact arrival slots and reuses
+weighted group routing, independently of click count, distance, zoom and army size. Members split
+near the arrival area. There is no double-click movement mode or distance threshold.
+
+`SetFormationCommand` records selected mobile units' relative offsets and cohort identity. Future
+direct Move commands, including FIFO legs, translate that saved layout instead of compacting it.
+Map-edge placement shifts the whole layout; blocked or compressed final layouts reject the move
+with `FORMATION_DESTINATION_BLOCKED`, preserving prior intent. Mixed selections preserve each enabled
+cohort; unmarked members gather normally. Joint destinations that overlap across cohorts reject
+atomically with `FORMATION_COHORTS_OVERLAP`; enabling one cohort for the selection resolves conflicting
+layouts. Disabling or recapturing a cohort preserves existing jobs
+and destinations but removes their previous coordination metadata; only future moves use the new mode.
+
+`systems/formations.py` coordinates these direct moves through the existing movement writer. All
+active members use the minimum terrain-adjusted step. Clear final approaches steer toward common
+translated slots; constrictions keep existing certified paths with bounded longitudinal stretching.
+The original offsets survive compression and restore once the cohort has a clear approach. Arrived
+members displaced by later arrivals restore their slots through shared-goal routing within the
+existing combat-route allowance; admission rotates and failures retain intent with a diagnostic.
+A completed strict leg waits for its cohort, including displaced arrived members, before dispatching
+its FIFO tail, including repeated identical destinations. Membership and speed caps derive from live
+units, so deaths/subset overrides cannot leave a dead leader or speed limit behind. Existing routing
+allowances and collision certificates remain authoritative. Automatic combat support cannot replace
+an active strict move; in-range opportunistic firing remains available. Explicit attacks, repair,
+construction and automation control clear active movement coordination without disabling the setting.
 Queued moves use preceding movement goals as their source geometry; a preceding target order
 instead validates from the unit's current reachable component. Validation does not allocate per-slot
 search fields. Dispatching a queued leg first checks the same cheap direct segment as initial
@@ -24,8 +41,8 @@ may wait. Groups share an approach route before branching.
 
 Queued movement also meters search work by expanded cells. An admitted search completes before
 further cold searches wait for the next tick; settled cached routes and direct segments remain
-eligible within the shared route allowance. Waiting keeps the complete FIFO and final destinations,
-including movement resumed after combat support. Admission rotates so deferred members make progress.
+eligible within the shared route allowance. Waiting keeps the complete FIFO and final destinations.
+Admission rotates so deferred members make progress.
 
 Actual travel speed is the mobile profile's base speed divided by terrain movement cost.
 Grass retains base speed; forest uses two thirds, road four thirds and bridge five quarters.
@@ -41,6 +58,9 @@ Gathering caches complete expanding disks, connected reachability and clearance;
 not lose established valid stations. Cache limits bound targets, candidate slots and region references.
 An unreachable firing ring remains queued in `WAITING`, with one failure diagnostic until its
 target/obstacles change or the order is replaced; eviction/load must not preserve a stale failure.
+Combat groups pursuers by target and weapon range for batch connectivity against the same exact
+static component labels. Every requester remains eligible; route admission, rotation and failure
+diagnostics retain their existing budgets and stable ordering.
 
 The current implementation shares cell centers and preserves compensated path-prefix sums and
 cost/index ties. Group branches scan numeric shared coordinates in one compiled pass and materialize
@@ -58,6 +78,20 @@ cheaper routes still reject shortcuts across slower terrain. Embedded building e
 per-unit exception masks. Front order follows the submitted segment through turns; group priority
 alternates by tick, with stable ID ties and a common passing side.
 These are current execution details, subject to the [engineering change policy](../architecture/engineering.md#change-policy).
+
+Movement prepares a contiguous snapshot, solves all mobile bodies, then batch-classifies numeric
+feedback before submitting world changes in stable body order. The feedback pass computes cell
+crossings, route progress/arrival and recovery distances together. Quiet bodies omit Python
+writeback only after collision participation; old pressure, route/recovery intent, solver status
+or actual displacement always require submission. Pressure clearing and quiet timers remain live.
+Obstacle snapshots are shared by identity in batched lookahead; only embedded endpoint exceptions
+need a distinct mask, avoiding whole-building-set comparisons per routed unit.
+
+Engineering references include Emerson's
+[Supreme Commander 2 flow-field tiles](https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter23_Crowd_Pathfinding_and_Steering_Using_Flow_Field_Tiles.pdf)
+for shared route work and [Recoil's movement stages](https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/Sim/MoveTypes/GroundMoveType.cpp)
+for separating calculation from state submission. These are design references, not replacement
+gameplay contracts or hardware-performance evidence for AIRTS.
 
 ## Patrol, defense and combat
 
@@ -104,7 +138,9 @@ These are current execution details, subject to the [engineering change policy](
   may use the global 32-route automation allowance. Every route consumes a global claim. Controllers
   rotate by tick; defense admits front ranks first. Combat visits all members even after exhaustion.
 - Opportunistic firing preserves locomotion, including travel outside an assigned defense area.
-  Actual pursuit can interrupt travel and explicit attack pursuit stops at weapon range. Ordered
+  Human and AI direct movement keeps control until arrival, including deferred route admission and
+  FIFO transitions: firing never stops or redirects travel to chase or assist. Explicit attack
+  pursuit stops at weapon range. Ordered
   targets persist until destruction or replacement. Pursuit may fire at enemies encountered along
   its route without replacing that target or advancing the FIFO; the ordered target takes priority
   whenever it is in range. Units awaiting bounded attack
@@ -114,8 +150,10 @@ These are current execution details, subject to the [engineering change policy](
   target's last known position. Patrol/defense encounters instead resume their existing assignment.
 - Actual firing recruits nearby allied units whose profiles explicitly enable combat support.
   Builders and auxiliary profiles default to no support. Hold, paused work and emergency repair
-  retain control; patrol/defense support retains its pursuit boundary. Direct moving supporters
-  resume their route and queued destinations after the target disappears. Recruitment takes effect
+  retain control. Recruitment is limited to idle units with no pending direct work, or active
+  patrol/defense assignments within their pursuit boundaries. Direct movement, attack, repair,
+  reclamation and pending FIFO work cannot be replaced by support, regardless of control source
+  or elapsed time. Recruitment takes effect
   after the firing pass, so it cannot cascade into additional shots in that same pass.
 - Successful player unit-control orders suppress support recruitment for five seconds of simulation
   time on the affected units. Further orders, including queued waypoints, restart the window;
@@ -141,6 +179,10 @@ These are current execution details, subject to the [engineering change policy](
   casualties immediately in projectile-ID order; references, affected defense stations and builder
   queue restarts are coordinated before the phase ends. Direct removal completes before returning.
   No partial removal batch enters a save. Dead attack-memory references are cleared as well.
+- Firing-ring generation filters terrain, the target footprint and exact radial boundaries in a
+  compiled batch, retaining row-major candidate order and the existing interaction-point fallback.
+  Dynamic building clearance remains the route planner's responsibility. Kernels warm before
+  gameplay so the first pursuit does not pay compilation inside its command/tick.
 - Ordinary projectiles track their target, retain their last destination after target removal,
   remain visible until arrival, and cannot damage bystanders. Scout, light/heavy tank and turret
   projectile speeds are doubled from their original profiles; damage and cadence are unchanged.
@@ -265,7 +307,16 @@ may leave a blocked component; this is not proof that free space is physically a
 ## Repair
 
 Repair-and-return selects health strictly below the command threshold, prefers hubs,
-then resumes suspended work or returns to the prior position. Patrol/defense assignments can opt
+then resumes suspended work or returns to the prior position. AI and the manual repair shortcut
+submit the same single group command. Enrollment filters healthy units first, snapshots completed
+owned repair sources once, and selects by source priority, straight-line center distance and ID.
+Service areas and static connectivity are reused across the command; unreachable sources are
+skipped. Enrollment constructs no complete movement paths. Actual travel and free service slots
+are resolved later within the existing per-controller/global route allowances. A full facility can
+wait or trigger reselection. Reselection compares reachable route costs within a priority tier,
+pruning candidates with a conservative road-cost lower bound; it never routes lower-priority
+factories after a usable hub is found. An already selected source uses direct ID lookup.
+Patrol/defense assignments can opt
 into automatic repair; disabled assignments never retreat solely because of low health. Enabled
 assignments check once per simulated second using the UI repair threshold and shared automation
 route allowance, submitting emergency repair through the same validated command boundary.
@@ -275,10 +326,13 @@ without canceling repairs already underway. Unavailable facilities reject the in
 with the ordinary diagnostic; other members continue their work and later checks retry.
 API threshold defaults and rates/ranges live in code; UI switches and the shortcut belong to
 [README](../../README.md#controls).
-Completed hubs heal one other owned mobile unit or completed building at a time within their center-based radius,
+Completed hubs heal one other owned mobile unit or building at a time within their center-based radius,
 retaining it until full health, departure, reclamation or destruction, then choosing the nearest wounded target
 with stable ID ties. Builders qualify; repair-and-return cannot bypass range or concurrent capacity.
-Unfinished buildings and buildings targeted for reclamation are excluded from automatic hub healing.
+An unfinished building receives construction work through the shared
+[construction service](../../src/airts/systems/construction.py), then ordinary healing after completion.
+Blueprints are not entities and cannot be repaired. Buildings targeted for reclamation are excluded
+from automatic hub service. Unfinished hubs cannot supply service.
 Travel stops as soon as a unit is in service range with disc clearance, even while its old path
 has remaining waypoints. Overlapping arrivals choose another clear slot; traveling repair destinations
 avoid both present occupants and other incoming destinations. Static area goals share a routing field;
@@ -287,7 +341,7 @@ When a source has no reachable slot, another eligible source is tried; total lac
 and retries within the existing global route allowance. A pushed unit outside range resumes travel.
 [repair_positions.py](../../src/airts/systems/repair_positions.py) owns service geometry and capacity.
 Factory/command-center destinations retain explicit service. Direct builder repair routes to clear
-cells within its footprint-based working range of a damaged completed owned building, without
+cells within its footprint-based working range of a damaged or unfinished owned building, without
 requiring an adjacent cell; replacement/automation assignment
 cancels it, and queued construction waits. Repairs cost no resources.
 

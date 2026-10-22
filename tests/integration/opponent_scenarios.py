@@ -5,6 +5,7 @@ from __future__ import annotations
 from airts.simulation import Simulation
 from airts.systems import economy
 from airts.world.map import load_map_data
+from airts.world.opponents import Squad, SquadPhase
 from airts.world.units.catalog import EntityKind
 
 
@@ -56,7 +57,40 @@ def opening_army(count: int = 6) -> tuple[tuple[EntityKind, float, float], ...]:
     )
 
 
-def established_empire() -> Simulation:
+def fragmented_army(count: int = 600) -> Simulation:
+    """An old front contact, opposing rear orders and a large disconnected command chain."""
+    army = tuple(
+        (EntityKind.LIGHT_TANK, 56.5 + i % 2, 52.5 + i // 2)
+        if i < 4
+        else (EntityKind.LIGHT_TANK, 98.5 + i % 20 * 1.2, 85.5 + i // 20 * 1.2)
+        for i in range(count)
+    )
+    data = opponent_scenario(enemies=((EntityKind.LIGHT_TANK, 45.5, 50.5),)).game_map.to_dict()
+    data["width"] = data["height"] = 160
+    data["terrain"] = {"default": "grass"}
+    for entity in data["entities"]:
+        if entity["id"] == "ai_factory":
+            entity["position"] = [140, 140]
+    data["entities"].extend(
+        {"id": f"army_{i:04d}", "kind": kind.value, "owner": "ai", "position": [x, y]}
+        for i, (kind, x, y) in enumerate(army)
+    )
+    simulation = Simulation(load_map_data(data), record_history=False)
+    simulation.opponents["ai"].squads = [
+        Squad(
+            entity_ids=[f"army_{i:04d}" for i in range(4)],
+            phase=SquadPhase.ATTACKING,
+            target_id="enemy_0000",
+        ),
+        *(
+            Squad(entity_ids=[f"army_{i:04d}" for i in range(start, min(start + 32, count))])
+            for start in range(4, count, 32)
+        ),
+    ]
+    return simulation
+
+
+def established_empire(*, extra_builders: int = 0) -> Simulation:
     entities: list[dict[str, object]] = [
         {"id": "human", "kind": "factory", "position": [4, 4], "owner": "player"},
         {"id": "center", "kind": "command_center", "position": [232, 208], "owner": "ai"},
@@ -85,6 +119,15 @@ def established_empire() -> Simulation:
     entities.extend(
         {"id": f"worker_{i}", "kind": "builder", "position": [150.5 + i * 2, 206.5], "owner": "ai"}
         for i in range(12)
+    )
+    entities.extend(
+        {
+            "id": f"expansion_worker_{i}",
+            "kind": "builder",
+            "position": [180.5 + i % 20 * 2, 85.5 + i // 20 * 2],
+            "owner": "ai",
+        }
+        for i in range(extra_builders)
     )
     entities.extend(
         {

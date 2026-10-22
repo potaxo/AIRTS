@@ -16,7 +16,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import automation_assignments, movement, unit_orders
+from airts.systems import automation_assignments, construction, movement, unit_orders
 from airts.systems.validation import validate_entities
 from airts.world.entities import Entity, OrderKind, UnitOrder, UnitState
 from airts.world.units.catalog import EntityKind
@@ -33,7 +33,7 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
     builders = tuple(
         key
         for key in command.entity_ids
-        if simulation.entities[key].profile.movable and simulation.entities[key].profile.can_repair
+        if simulation.entities[key].is_complete and simulation.entities[key].profile.can_repair
     )
     if not builders:
         return simulation._reject_validation(
@@ -45,10 +45,25 @@ def repair_building(simulation: Simulation, command: RepairBuildingCommand) -> C
         reason = "UNKNOWN_TARGET"
     elif target.owner_id != command.owner_id:
         reason = "TARGET_NOT_OWNED"
-    elif target.category is not EntityCategory.BUILDING or not target.is_complete:
+    elif target.category is not EntityCategory.BUILDING:
         reason = "TARGET_NOT_COMPLETED_BUILDING"
-    elif target.health >= target.kind.profile.max_health:
+    elif target.is_complete and target.health >= target.kind.profile.max_health:
         reason = "TARGET_NOT_DAMAGED"
+    elif any(
+        not simulation.entities[key].is_movable
+        and (
+            simulation.entities[key] is target
+            or simulation.entities[key].selection_position.distance_to(target.selection_position)
+            > simulation.entities[key].profile.repair_range
+        )
+        for key in builders
+    ):
+        reason = "TARGET_OUT_OF_REPAIR_RANGE"
+    elif not target.is_complete and any(
+        simulation.entities[key].is_movable and not simulation.entities[key].profile.can_build
+        for key in builders
+    ):
+        reason = "ENTITY_CANNOT_FINISH_CONSTRUCTION"
     else:
         reason = None
     if reason is not None:
@@ -119,7 +134,9 @@ def drive_builders(simulation: Simulation) -> None:
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
     for builder in sorted(builders, key=lambda entity: entity.entity_id):
         target = simulation.entities.get(builder.repair_target_id or "")
-        if target is None or target.health >= target.kind.profile.max_health:
+        if target is None or (
+            target.is_complete and target.health >= target.kind.profile.max_health
+        ):
             builder.repair_target_id = None
             builder.path.clear()
             builder.move_target = None
@@ -172,8 +189,7 @@ def drive_hubs(simulation: Simulation) -> None:
     wounded = {
         key: entity.selection_position
         for key, entity in simulation.entities.items()
-        if entity.is_complete
-        and entity.health < entity.kind.profile.max_health
+        if (not entity.is_complete or entity.health < entity.kind.profile.max_health)
         and key not in reclaiming
     }
     index = SpatialIndex(wounded)
@@ -195,7 +211,7 @@ def drive_hubs(simulation: Simulation) -> None:
             target is None
             or target is hub
             or target.entity_id not in wounded
-            or target.health >= target.kind.profile.max_health
+            or (target.is_complete and target.health >= target.kind.profile.max_health)
             or target.owner_id != hub.owner_id
             or center.distance_to(target.selection_position) > radius
         ):
@@ -204,8 +220,11 @@ def drive_hubs(simulation: Simulation) -> None:
                 for key in index.nearby(center, radius)
                 if key != hub.entity_id
                 and simulation.entities[key].owner_id == hub.owner_id
-                and simulation.entities[key].health
-                < simulation.entities[key].kind.profile.max_health
+                and (
+                    not simulation.entities[key].is_complete
+                    or simulation.entities[key].health
+                    < simulation.entities[key].kind.profile.max_health
+                )
             ]
             target = min(
                 candidates,
@@ -230,11 +249,19 @@ def drive_hubs(simulation: Simulation) -> None:
                 target,
                 rates.get((hub.entity_id, target.entity_id), hub.profile.repair_rate),
             )
-            if target.health == target.kind.profile.max_health:
+            if target.is_complete and target.health == target.kind.profile.max_health:
                 hub.repair_target_id = None
 
 
 def _heal(simulation: Simulation, source: Entity, target: Entity, rate: int) -> None:
+    if not target.is_complete:
+        work = (
+            source.profile.build_speed
+            if source.is_movable and source.profile.can_build
+            else rate * simulation.CONSTRUCTION_REQUIRED_VALUE / target.kind.profile.max_health
+        )
+        construction.apply_construction_work(simulation, target, work)
+        return
     target.health = min(target.kind.profile.max_health, target.health + rate)
     if target.health == target.kind.profile.max_health:
         simulation.events.record(

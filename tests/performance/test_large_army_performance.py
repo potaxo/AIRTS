@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from itertools import pairwise
+from math import ceil
 from time import perf_counter
 
 import pytest
@@ -16,6 +17,7 @@ from airts.contracts.commands import (
     CreateRepairAndReturnCommand,
     ModifyAutomationCommand,
     MoveCommand,
+    SetFormationCommand,
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import (
@@ -252,9 +254,47 @@ def test_thousand_unit_repair_selection_filters_before_shared_routing(check_timi
 
     automation = simulation.automations[result.automation_id or ""]
     assert automation.entity_ids == list(damaged)
+    assert simulation.navigation_field_build_count == 0
+    simulation.advance()
     assert simulation.navigation_field_build_count == 1
     if check_timing:
         assert elapsed < 1.0
+
+
+def test_repair_group_in_a_developed_world_selects_once_without_eager_paths(
+    check_timing: bool, record_property: Callable[[str, object], None]
+) -> None:
+    data = _large_simulation(1000, with_repair_hub=True).game_map.to_dict()
+    data["width"] = data["height"] = 320
+    data["terrain"] = {"default": "grass"}
+    data["entities"].extend(
+        {
+            "id": f"source_{i}",
+            "kind": "repair_hub" if i % 2 else "factory",
+            "position": [100 + i % 12 * 8, 80 + i // 12 * 8],
+        }
+        for i in range(120)
+    )
+    simulation = Simulation(load_map_data(data), record_history=False)
+    selected = tuple(f"unit_{i:04d}" for i in range(1000))
+    damaged = selected[::10]
+    for key in damaged:
+        simulation.entities[key].health = 17
+    started = perf_counter()
+    result = simulation.execute(CreateRepairAndReturnCommand(selected))
+    elapsed_ms = (perf_counter() - started) * 1000
+    assert result.accepted
+    automation = simulation.automations[result.automation_id or ""]
+    assert automation.entity_ids == list(damaged)
+    assert simulation.navigation_field_build_count == 0
+    for _ in range(ceil(len(damaged) / simulation.AUTOMATION_ROUTE_BUDGET)):
+        simulation.advance()
+        assert simulation.automation_route_count <= simulation.AUTOMATION_ROUTE_BUDGET
+    assert all(simulation.entities[key].path for key in damaged)
+    assert simulation.navigation_field_build_count == 1
+    record_property("developed_repair_command_ms", elapsed_ms)
+    if check_timing:
+        assert elapsed_ms < 100, f"batched repair command took {elapsed_ms:.2f} ms"
 
 
 def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks(
@@ -279,16 +319,18 @@ def test_thousand_unit_patrol_uses_bounded_shared_paths_and_realtime_ticks(
         assert tick_elapsed < 2.0
 
 
-@pytest.mark.parametrize("gathering", [False, True], ids=["single", "double"])
+@pytest.mark.parametrize("strict", [False, True], ids=["gather", "strict"])
 def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
     check_timing: bool,
-    gathering: bool,
+    strict: bool,
 ) -> None:
     simulation = _large_simulation(1_000)
     selected = tuple(f"unit_{index:04d}" for index in range(1_000))
 
     started = perf_counter()
-    result = simulation.execute(MoveCommand(selected, Point(70.5, 50.5), gathering=gathering))
+    if strict:
+        assert simulation.execute(SetFormationCommand(selected, True)).accepted
+    result = simulation.execute(MoveCommand(selected, Point(70.5, 50.5)))
     elapsed = perf_counter() - started
 
     destinations = {simulation.entities[entity_id].move_target for entity_id in selected}
@@ -297,10 +339,17 @@ def test_thousand_unit_move_clusters_paths_without_blocking_the_command_loop(
     assert simulation.navigation_field_build_count <= 64
     if check_timing:
         assert elapsed < 2.0
+    tick_times = []
+    for _ in range(5):
+        started = perf_counter()
+        simulation.advance()
+        tick_times.append(perf_counter() - started)
+    if check_timing:
+        assert max(tick_times) < Simulation.TICK_SECONDS
 
 
 @pytest.mark.parametrize("unit_count", [2, 1000])
-@pytest.mark.parametrize("control", ["move", "gather_move", "defend", "patrol"])
+@pytest.mark.parametrize("control", ["move", "defend", "patrol"])
 @pytest.mark.parametrize("across_river", [False, True], ids=["local", "cross-river"])
 def test_gathering_on_large_river_map_does_not_freeze_input(
     check_timing: bool,
@@ -334,10 +383,8 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
         pair_checks = simulation.collision_pair_check_count
         fields_before = simulation.navigation_field_build_count
         started = perf_counter()
-        if control in {"move", "gather_move"}:
-            result = simulation.execute(
-                MoveCommand(selected, target, gathering=control == "gather_move")
-            )
+        if control == "move":
+            result = simulation.execute(MoveCommand(selected, target))
         elif automation_id is not None:
             result = simulation.execute(ModifyAutomationCommand(automation_id, target=area))
         elif control == "defend":
@@ -353,7 +400,7 @@ def test_gathering_on_large_river_map_does_not_freeze_input(
             f"gather_{index}_pair_checks", simulation.collision_pair_check_count - pair_checks
         )
         assert result.accepted, result.reason
-        if control in {"move", "gather_move"}:
+        if control == "move":
             goals = {key: simulation.entities[key].move_target for key in selected}
             assert len(set(goals.values())) == unit_count
             assert all(goal is not None for goal in goals.values())

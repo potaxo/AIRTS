@@ -16,14 +16,118 @@ from airts.contracts.automations import (
     production_parameters,
     target_center,
 )
+from airts.contracts.commands import (
+    CommandResult,
+    SetProductionDefenseCommand,
+    ValidationFailure,
+    ValidationPhase,
+    error_reason,
+    validate_auto_repair,
+)
 from airts.contracts.events import EventType
 from airts.contracts.spatial import PolygonRegion, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
 from airts.systems import automation_assignments, automation_lifecycle, automation_runtime
+from airts.systems.validation import validate_entities, validate_geometry
+from airts.world.entities import Entity, ProductionDeployment
 from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
+
+
+def _record_deployment(simulation: Simulation, factory: Entity) -> None:
+    simulation.events.record(
+        simulation.tick,
+        EventType.PRODUCTION_DEPLOYMENT_CHANGED,
+        factory.entity_id,
+        deployment=(
+            None
+            if factory.production_deployment is None
+            else factory.production_deployment.to_dict()
+        ),
+    )
+
+
+def set_production_defense(
+    simulation: Simulation, command: SetProductionDefenseCommand
+) -> CommandResult:
+    failure = validate_entities(simulation, command.factory_ids, command.owner_id)
+    if failure is None:
+        failure = validate_auto_repair(command.auto_repair)
+    if failure is not None:
+        return simulation._reject_validation("set_production_defense", failure)
+    if any(simulation.entities[key].kind is not EntityKind.FACTORY for key in command.factory_ids):
+        return simulation._reject_validation(
+            "set_production_defense",
+            ValidationFailure(ValidationPhase.CAPABILITY, "ENTITY_NOT_FACTORY", "factory_ids"),
+        )
+    target = command.target
+    if target is not None:
+        if not isinstance(target, PolygonRegion | PolylineTarget):
+            return simulation._reject_validation(
+                "set_production_defense",
+                ValidationFailure(
+                    ValidationPhase.SPATIAL, "PRODUCTION_DEFENSE_REQUIRES_LINE_OR_AREA", "target"
+                ),
+            )
+        failure = validate_geometry(simulation, target)
+        if failure is not None:
+            return simulation._reject_validation("set_production_defense", failure)
+        try:
+            validate_defense_target(
+                simulation, target, max(EntityKind.FACTORY.production_kinds, key=collision_radius)
+            )
+        except ValueError as error:
+            return simulation._reject_validation(
+                "set_production_defense",
+                ValidationFailure(ValidationPhase.SPATIAL, error_reason(error), "target"),
+            )
+    defense = (
+        shared_production_defense(simulation, command.owner_id, target)
+        if target is not None
+        else None
+    )
+    for key in command.factory_ids:
+        factory = simulation.entities[key]
+        factory.production_deployment = (
+            ProductionDeployment(
+                target, command.auto_repair, defense.automation_id if defense is not None else None
+            )
+            if target is not None
+            else None
+        )
+        _record_deployment(simulation, factory)
+        for production in simulation.production_queue(key):
+            parameters = production_parameters(production)
+            if target is None:
+                parameters.defend_target = None
+                parameters.defend_automation_id = None
+            else:
+                parameters.auto_repair = command.auto_repair
+                attach_production_defense(
+                    simulation, production, target, auto_repair=command.auto_repair
+                )
+            production.modified_tick = simulation.tick
+            simulation.events.record(
+                simulation.tick,
+                EventType.AUTOMATION_MODIFIED,
+                production.automation_id,
+                parameters=parameters.to_dict(),
+            )
+    if defense is not None:
+        parameters_for_defense = defend_parameters(defense)
+        if parameters_for_defense.auto_repair != command.auto_repair:
+            parameters_for_defense.auto_repair = command.auto_repair
+            defense.modified_tick = simulation.tick
+            simulation.events.record(
+                simulation.tick,
+                EventType.AUTOMATION_MODIFIED,
+                defense.automation_id,
+                parameters=parameters_for_defense.to_dict(),
+            )
+        synchronize_production_defense(simulation, defense)
+    return simulation._accept("set_production_defense")
 
 
 def validate_defense_target(
@@ -58,6 +162,34 @@ def shared_production_defense(
 def synchronize_production_defense(simulation: Simulation, defense: Automation) -> None:
     """Edits to the shared controller also govern all its factories' future units."""
     parameters = defend_parameters(defense)
+    assert isinstance(parameters.target, PolygonRegion | PolylineTarget)
+    for factory in sorted(
+        (
+            entity
+            for entity in simulation.entities.values()
+            if entity.production_deployment is not None
+        ),
+        key=lambda entity: entity.entity_id,
+    ):
+        deployment = factory.production_deployment
+        if deployment is None or factory.owner_id != defense.owner_id:
+            continue
+        previous = simulation.automations.get(deployment.defend_automation_id or "")
+        if deployment.defend_automation_id != defense.automation_id and not (
+            (previous is None or previous.status.terminal)
+            and deployment.target == parameters.target
+        ):
+            continue
+        if (
+            deployment.target == parameters.target
+            and deployment.auto_repair == parameters.auto_repair
+            and deployment.defend_automation_id == defense.automation_id
+        ):
+            continue
+        deployment.target = parameters.target
+        deployment.auto_repair = parameters.auto_repair
+        deployment.defend_automation_id = defense.automation_id
+        _record_deployment(simulation, factory)
     for production in simulation.automations.values():
         source = production.parameters
         if (
@@ -83,6 +215,18 @@ def synchronize_production_defense(simulation: Simulation, defense: Automation) 
 
 def detach_production_defense(simulation: Simulation, defense: Automation) -> None:
     """Canceling the shared defense stops future reinforcements without stopping production."""
+    for factory in sorted(
+        (
+            entity
+            for entity in simulation.entities.values()
+            if entity.production_deployment is not None
+        ),
+        key=lambda entity: entity.entity_id,
+    ):
+        deployment = factory.production_deployment
+        if deployment is not None and deployment.defend_automation_id == defense.automation_id:
+            factory.production_deployment = None
+            _record_deployment(simulation, factory)
     for production in simulation._live_automation_candidates:
         source = production.parameters
         if (

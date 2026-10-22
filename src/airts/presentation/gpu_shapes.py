@@ -7,22 +7,6 @@ type FloatColor = tuple[float, float, float, float]
 SHAPE_FLOATS = 24
 
 
-def append_sprite(
-    values: array[float],
-    center: tuple[float, float],
-    previous: tuple[float, float],
-    layout: tuple[float, ...],
-    color: FloatColor,
-    index: float,
-    previous_angle: float,
-    angle: float,
-) -> None:
-    """The same record layout with static dimensions already packed for its kind."""
-    values.extend(
-        (*center, *previous, *layout, *color, 3.0, index, previous_angle, angle, 0.0, 0.0)
-    )
-
-
 def append_shape(
     values: array[float],
     *,

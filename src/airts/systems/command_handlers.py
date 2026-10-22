@@ -54,11 +54,13 @@ from airts.systems import (
     automation_assignments,
     automation_lifecycle,
     automation_runtime,
+    formations,
     movement,
     production_orders,
     unit_orders,
 )
 from airts.systems.assignment_state import state_for_assignment
+from airts.systems.repair_positions import select_repair_destinations
 from airts.systems.validation import validate_entities, validate_geometry
 from airts.world.entities import OrderKind, UnitOrder, UnitState
 
@@ -450,12 +452,10 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             else frozenset()
         )
         origins = movement.move_origins(simulation, command.entity_ids, continuing=continuing)
-        gathering = (
-            command.queued or command.gathering or movement.is_march(origins, command.target)
+        destinations, formation_goals = formations.destinations(
+            simulation, command.entity_ids, command.target, origins
         )
-        destinations = simulation._allocate_destinations(
-            command.entity_ids, command.target, gathering=gathering, origins=origins
-        )
+        leg = formations.new_leg(simulation) if formation_goals else None
         if command.queued:
             shared_goal = min(
                 destinations.values(),
@@ -471,7 +471,7 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                     replacing,
                     {key: destinations[key] for key in replacing},
                     shared_goal=shared_goal,
-                    compact_approach=gathering,
+                    compact_approach=not formation_goals,
                 )
                 if replacing
                 else {}
@@ -487,14 +487,22 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
                     "human_queue",
                     UnitState.MOVING,
                 )
+                entity.formation_goal = formation_goals.get(key)
+                entity.formation_leg = leg if key in formation_goals else None
             for key in command.entity_ids:
                 if key in continuing:
                     simulation.entities[key].order_queue.append(
-                        UnitOrder(OrderKind.MOVE, destinations[key], group_goal=shared_goal)
+                        UnitOrder(
+                            OrderKind.MOVE,
+                            destinations[key],
+                            group_goal=shared_goal,
+                            formation_goal=formation_goals.get(key),
+                            formation_leg=leg if key in formation_goals else None,
+                        )
                     )
             return simulation._accept("move")
         paths = movement.plan_group_paths(
-            simulation, command.entity_ids, destinations, compact_approach=gathering
+            simulation, command.entity_ids, destinations, compact_approach=not formation_goals
         )
     except PathfindingError as error:
         return simulation._reject_validation(
@@ -518,6 +526,8 @@ def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
             path_source,
             UnitState.MOVING,
         )
+        simulation.entities[entity_id].formation_goal = formation_goals.get(entity_id)
+        simulation.entities[entity_id].formation_leg = leg if entity_id in formation_goals else None
     return simulation._accept("move")
 
 
@@ -803,12 +813,8 @@ def create_repair(simulation: Simulation, command: CreateRepairAndReturnCommand)
     failure = validate_automation_metadata(command.priority, command.title)
     if failure is not None:
         return simulation._reject_validation("create_repair_and_return", failure)
-    destinations: dict[str, str] = {}
     try:
-        for entity_id in eligible_ids:
-            destinations[entity_id] = simulation._nearest_repair_destination(
-                simulation.entities[entity_id]
-            )[0]
+        destinations = select_repair_destinations(simulation, eligible_ids)
     except PathfindingError as error:
         return simulation._reject_validation(
             "create_repair_and_return",

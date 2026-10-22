@@ -24,6 +24,9 @@ def main() -> int:
         "--legacy-map", action="store_true", help="Open the original 64 x 64 sandbox directly."
     )
     parser.add_argument(
+        "--debug", action="store_true", help="Record full event and command history (default: off)."
+    )
+    parser.add_argument(
         "--event-log", type=Path, help="Write structured events as JSON Lines on exit."
     )
     parser.add_argument("--save-state", type=Path, help="Write complete simulation state on exit.")
@@ -59,8 +62,11 @@ def main() -> int:
         parser.error("--enemy-spawn-seconds cannot be negative")
     if arguments.enemy_cap < 0:
         parser.error("--enemy-cap cannot be negative")
+    debug_mode = bool(
+        arguments.debug or arguments.event_log or arguments.write_replay or arguments.replay
+    )
     if arguments.load_state is not None:
-        simulation = load_simulation(arguments.load_state)
+        simulation = load_simulation(arguments.load_state, record_history=debug_mode)
     elif arguments.replay is not None:
         simulation = run_replay(load_replay(arguments.replay))
     else:
@@ -86,11 +92,17 @@ def main() -> int:
             ambient_enemy_spawns=spawn_enabled,
             enemy_spawn_interval_ticks=spawn_ticks,
             enemy_spawn_cap=arguments.enemy_cap,
+            record_history=debug_mode,
         )
     show_lobby = not any(
         (arguments.map, arguments.legacy_map, arguments.load_state, arguments.replay)
     )
-    app = AirtsApp(simulation, renderer_backend=arguments.renderer, show_lobby=show_lobby)
+    app = AirtsApp(
+        simulation,
+        renderer_backend=arguments.renderer,
+        show_lobby=show_lobby,
+        debug_mode=debug_mode,
+    )
     app.run(arguments.max_frames)
     simulation = app.simulation
     if arguments.event_log is not None:

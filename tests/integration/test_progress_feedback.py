@@ -15,13 +15,13 @@ from airts.contracts.commands import (
     UpgradeEntityCommand,
 )
 from airts.presentation.app import AirtsApp
-from airts.presentation.gpu_shapes import SHAPE_FLOATS
-from airts.presentation.opengl_renderer import OpenGLFrameBuilder, OpenGLRenderer
+from airts.presentation.opengl_renderer import OpenGLRenderer
 from airts.presentation.palette import PROGRESS_COLOR, PROGRESS_TRACK
 from airts.presentation.progress import building_progress, current_production
 from airts.presentation.rendering import SoftwareRenderer
 from airts.presentation.ui.selection import draw_selection
 from airts.presentation.visuals.catalog import APPEARANCES
+from airts.presentation.visuals.gpu import ENTITY_FLOATS, pack_entities
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -90,18 +90,12 @@ def test_unselected_building_progress_pixels_and_gpu_batch_lifecycle(
     assert tuple(surface.get_at((bar.left + 1, bar.centery))[:3]) == PROGRESS_COLOR
     assert tuple(surface.get_at((bar.right - 1, bar.centery))[:3]) == PROGRESS_TRACK
     assert bar.top > app.screen_point(entity.selection_position)[1]
-    packed, *_ = OpenGLFrameBuilder._build_entities(app, (0, 0), 1)
+    packed, *_ = pack_entities(app)
     values = array("f")
     values.frombytes(packed)
-    blue = [
-        values[i : i + SHAPE_FLOATS]
-        for i in range(0, len(values), SHAPE_FLOATS)
-        if tuple(values[i + 14 : i + 17]) == pytest.approx(tuple(c / 255 for c in PROGRESS_COLOR))
-    ]
-    assert len(blue) == 1
-    assert blue[0][5] > 0  # Anchor below the sprite, with pixel thickness.
-    assert blue[0][7] == 1.5
-    assert blue[0][12] == pytest.approx(fraction)
+    offset = list(world.entities).index(entity_id) * ENTITY_FLOATS
+    assert values[offset + 24] == pytest.approx(fraction)
+    assert values[offset + 26] == 1  # GPU anchors progress below this building.
     assert world.export_state() == before
     if finish:
         world.advance(duration - duration // 2)

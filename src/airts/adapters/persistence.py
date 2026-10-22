@@ -6,6 +6,7 @@ import json
 import os
 from copy import deepcopy
 from dataclasses import dataclass
+from gc import collect as collect_garbage
 from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -49,6 +50,7 @@ from airts.systems.movement import CONTACT_WAIT_TICKS
 from airts.world.entities import (
     Entity,
     OrderKind,
+    ProductionDeployment,
     Projectile,
     ProjectileTrace,
     UnitOrder,
@@ -67,8 +69,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v27"
-MATCH_SAVE_SCHEMA = "airts-match-save-v21"
+SAVE_SCHEMA = "airts-save-v30"
+MATCH_SAVE_SCHEMA = "airts-match-save-v24"
 
 
 class PersistenceError(ValueError):
@@ -141,15 +143,25 @@ def save_simulation(simulation: Simulation, path: str | Path) -> None:
     write_save(capture_save(simulation), path)
 
 
-def load_simulation(path: str | Path) -> Simulation:
+def load_simulation(path: str | Path, *, record_history: bool = True) -> Simulation:
     try:
         with Path(path).open(encoding="utf-8") as stream:
-            return load_simulation_data(json.load(stream))
+            simulation = load_simulation_data(json.load(stream), record_history=record_history)
     except json.JSONDecodeError as error:
         raise PersistenceError(f"invalid save JSON: {error.msg}") from error
+    if (
+        len(simulation.entities) >= simulation.LARGE_SCENE_GC_ENTITY_THRESHOLD
+        or simulation.game_map.width * simulation.game_map.height
+        >= simulation.LARGE_SCENE_GC_CELL_THRESHOLD
+    ):
+        # The constructor drained the opening world, before JSON restoration.
+        # Drain and age the restored world after decoding temporaries are gone,
+        # at the load boundary rather than repeatedly scanning it in live frames.
+        collect_garbage()
+    return simulation
 
 
-def load_simulation_data(raw_data: object) -> Simulation:
+def load_simulation_data(raw_data: object, *, record_history: bool = True) -> Simulation:
     document = _mapping(raw_data, "save document")
     if document.get("schema") not in {SAVE_SCHEMA, MATCH_SAVE_SCHEMA}:
         raise PersistenceError(
@@ -189,6 +201,7 @@ def load_simulation_data(raw_data: object) -> Simulation:
         ambient_enemy_spawns=ambient_enemy_spawns,
         enemy_spawn_interval_ticks=enemy_spawn_interval_ticks,
         enemy_spawn_cap=enemy_spawn_cap,
+        record_history=record_history,
     )
     simulation.tick = tick
     simulation.entities = _load_entities(
@@ -251,13 +264,19 @@ def load_simulation_data(raw_data: object) -> Simulation:
         raise PersistenceError("invalid developer mode income state")
     simulation.spatial = _load_spatial(state.get("spatial"), simulation, tick)
     simulation.selection = _load_selection(state.get("selection"), simulation)
-    event_log = EventLog()
+    event_log = EventLog(enabled=record_history)
     try:
-        event_log.restore(_load_events(state.get("events"), tick))
+        event_log.restore(_load_events(state.get("events"), tick, retain=record_history))
     except ValueError as error:
         raise PersistenceError(f"invalid saved event sequence: {error}") from error
     simulation.events = event_log
-    simulation._command_history = _load_command_history(state.get("command_history"), tick)
+    simulation._command_history = _load_command_history(
+        state.get("command_history"), tick, retain=record_history
+    )
+    recorded_count = len(_list(state.get("command_history"), "state.command_history"))
+    simulation._command_count = _integer(
+        state.get("command_count", recorded_count), "state.command_count", minimum=recorded_count
+    )
     simulation._next_automation_number = _integer(
         state.get("next_automation_number"), "state.next_automation_number", minimum=1
     )
@@ -483,6 +502,14 @@ def _load_entities(
 ) -> dict[str, Entity]:
     entities_data = _mapping(raw_data, "state.entities")
     entities: dict[str, Entity] = {}
+    # JSON expands shared routes into independent coordinate pairs. Points are
+    # immutable; restore sharing within this load without retaining a global cache.
+    waypoints: dict[Point, Point] = {}
+
+    def waypoint(value: object, field: str) -> Point:
+        point = _point(value, field)
+        return waypoints.setdefault(point, point)
+
     for entity_id, raw_entity in entities_data.items():
         entity = _mapping(raw_entity, f"state.entities.{entity_id}")
         if entity.get("id") != entity_id:
@@ -520,6 +547,32 @@ def _load_entities(
             raise PersistenceError("entity.upgrade.remaining_ticks has no valid paid transition")
         if construction_progress is not None and (tier != 1 or remaining):
             raise PersistenceError("unfinished entity cannot have upgrade progress")
+        if "production_deployment" not in entity:
+            raise PersistenceError("entity.production_deployment is required")
+        deployment_raw = entity["production_deployment"]
+        deployment = None
+        if deployment_raw is not None:
+            if kind is not EntityKind.FACTORY:
+                raise PersistenceError("production deployment requires a factory")
+            deployment_data = _mapping(deployment_raw, "entity.production_deployment")
+            try:
+                deployment_target = target_from_dict(deployment_data.get("target"))
+            except ValueError as error:
+                raise PersistenceError(f"invalid production deployment target: {error}") from error
+            if not isinstance(deployment_target, PolygonRegion | PolylineTarget) or any(
+                not game_map.contains(point) for point in deployment_target.points
+            ):
+                raise PersistenceError(
+                    "production deployment requires a line or area inside the map"
+                )
+            deployment = ProductionDeployment(
+                deployment_target,
+                _boolean(deployment_data.get("auto_repair"), "production_deployment.auto_repair"),
+                _nullable_string(
+                    deployment_data.get("defend_automation_id"),
+                    "production_deployment.defend_automation_id",
+                ),
+            )
         if "recovery_request_tick" not in entity or "recovery_released" not in entity:
             raise PersistenceError("entity recovery request fields are required in v11")
         request_raw = entity["recovery_request_tick"]
@@ -536,7 +589,7 @@ def _load_entities(
         anchor_raw = entity.get("hold_anchor")
         hold_anchor = None if anchor_raw is None else _point(anchor_raw, "entity.hold_anchor")
         recovery_path = [
-            _point(p, "entity.recovery_path item")
+            waypoint(p, "entity.recovery_path item")
             for p in _list(entity.get("recovery_path"), "entity.recovery_path")
         ]
         recovery_retry_tick = _integer(
@@ -580,8 +633,38 @@ def _load_entities(
         move_target = (
             None if move_target_raw is None else _point(move_target_raw, "entity.move_target")
         )
-        path = [_point(item, "entity.path item") for item in _list(entity.get("path"), "path")]
+        path = [waypoint(item, "entity.path item") for item in _list(entity.get("path"), "path")]
         order_queue = _load_unit_orders(entity.get("order_queue"))
+        formation_fields = {
+            "formation_group",
+            "formation_offset",
+            "formation_goal",
+            "formation_leg",
+        }
+        if not formation_fields.issubset(entity):
+            raise PersistenceError("entity formation fields are required")
+        formation_group = _nullable_string(entity["formation_group"], "entity.formation_group")
+        formation_leg = _nullable_string(entity["formation_leg"], "entity.formation_leg")
+        formation_offset = (
+            None
+            if entity["formation_offset"] is None
+            else _point(entity["formation_offset"], "entity.formation_offset")
+        )
+        formation_goal = (
+            None
+            if entity["formation_goal"] is None
+            else _point(entity["formation_goal"], "entity.formation_goal")
+        )
+        if (
+            (formation_group is None) != (formation_offset is None)
+            or (formation_goal is None) != (formation_leg is None)
+            or (formation_group is not None and not kind.profile.movable)
+            or (formation_leg is not None and formation_group is None)
+        ):
+            raise PersistenceError("invalid entity formation membership or active leg")
+        for order in order_queue:
+            if order.formation_leg is not None and formation_group is None:
+                raise PersistenceError("queued formation move has no formation membership")
         attack_gather_raw = entity.get("attack_gather_point")
         attack_gather_point = (
             None
@@ -723,6 +806,10 @@ def _load_entities(
             path=path,
             path_cost=path_cost,
             order_queue=order_queue,
+            formation_group=formation_group,
+            formation_offset=formation_offset,
+            formation_goal=formation_goal,
+            formation_leg=formation_leg,
             attack_gather_point=attack_gather_point,
             attack_target_id=attack_target_id,
             repair_target_id=_nullable_string(
@@ -753,8 +840,44 @@ def _load_entities(
             recovery_released=recovery_released,
             construction_progress=construction_progress,
             upgrade=UpgradeState(tier=tier, remaining_ticks=remaining),
+            production_deployment=deployment,
         )
+    formation_owners: dict[str, str] = {}
+    formation_goals: dict[tuple[str, str], Point] = {}
     for loaded_entity in entities.values():
+        group = loaded_entity.formation_group
+        offset = loaded_entity.formation_offset
+        if group is not None:
+            assert offset is not None
+            if abs(offset.x) > game_map.width or abs(offset.y) > game_map.height:
+                raise PersistenceError("formation offset exceeds map dimensions")
+            if formation_owners.setdefault(group, loaded_entity.owner_id) != loaded_entity.owner_id:
+                raise PersistenceError("formation cannot mix owners")
+        for goal, leg, destination in (
+            (loaded_entity.formation_goal, loaded_entity.formation_leg, loaded_entity.move_target),
+            *(
+                (order.formation_goal, order.formation_leg, order.position)
+                for order in loaded_entity.order_queue
+            ),
+        ):
+            if goal is None:
+                continue
+            assert group is not None and leg is not None and offset is not None
+            if (
+                destination is not None
+                and destination.distance_to(Point(goal.x + offset.x, goal.y + offset.y)) > 1e-7
+            ):
+                raise PersistenceError("formation destination disagrees with its offset")
+            previous = formation_goals.setdefault((group, leg), goal)
+            if previous.distance_to(goal) > 1e-7:
+                raise PersistenceError("formation leg has inconsistent goals")
+        if loaded_entity.formation_leg is not None and (
+            loaded_entity.pursue_target
+            or loaded_entity.repair_target_id is not None
+            or loaded_entity.reclaim_target_id is not None
+            or loaded_entity.hold_anchor is not None
+        ):
+            raise PersistenceError("formation movement conflicts with active work")
         for order in loaded_entity.order_queue:
             if order.kind is OrderKind.MOVE:
                 continue
@@ -769,7 +892,11 @@ def _load_entities(
                     raise PersistenceError("queued attack has an invalid target or attacker")
             elif (
                 not loaded_entity.profile.can_repair
-                or not target.is_complete
+                or (
+                    not target.is_complete
+                    and loaded_entity.is_movable
+                    and not loaded_entity.profile.can_build
+                )
                 or target.category is not EntityCategory.BUILDING
                 or target.owner_id != loaded_entity.owner_id
             ):
@@ -791,7 +918,11 @@ def _load_entities(
                 target is None
                 or target.owner_id != loaded_entity.owner_id
                 or not loaded_entity.is_complete
-                or not target.is_complete
+                or (
+                    not target.is_complete
+                    and loaded_entity.is_movable
+                    and not loaded_entity.profile.can_build
+                )
                 or (not loaded_entity.is_movable and target is loaded_entity)
                 or (
                     loaded_entity.profile.movable
@@ -835,7 +966,17 @@ def _load_unit_orders(value: object) -> list[UnitOrder]:
             raise PersistenceError("queued order kind disagrees with its target")
         if group_goal is not None and kind is not OrderKind.MOVE:
             raise PersistenceError("only queued movement may carry a group goal")
-        orders.append(UnitOrder(kind, position, target, group_goal))
+        formation_goal = (
+            None
+            if data.get("formation_goal") is None
+            else _point(data["formation_goal"], "queued formation goal")
+        )
+        formation_leg = _nullable_string(data.get("formation_leg"), "queued formation leg")
+        if (formation_goal is None) != (formation_leg is None) or (
+            formation_leg is not None and kind is not OrderKind.MOVE
+        ):
+            raise PersistenceError("invalid queued formation leg")
+        orders.append(UnitOrder(kind, position, target, group_goal, formation_goal, formation_leg))
     return orders
 
 
@@ -936,8 +1077,6 @@ def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Aut
         except ValueError as error:
             raise PersistenceError(f"invalid automation {automation_id}: {error}") from error
         entity_ids = _string_list(data.get("entity_ids"), "automation.entity_ids")
-        if any(entity_id not in simulation.entities for entity_id in entity_ids):
-            raise PersistenceError(f"automation {automation_id} references an invalid entity")
         created_tick = _past_tick(
             data.get("created_tick"), "automation.created_tick", simulation.tick
         )
@@ -949,6 +1088,15 @@ def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Aut
         parameters = _load_automation_parameters(
             kind, data.get("parameters"), entity_ids, simulation, terminal=status.terminal
         )
+        if not status.terminal and any(
+            entity_id not in simulation.entities
+            and not (
+                isinstance(parameters, RepairParameters)
+                and parameters.phases[entity_id] is RepairPhase.DONE
+            )
+            for entity_id in entity_ids
+        ):
+            raise PersistenceError(f"automation {automation_id} references an invalid entity")
         if kind is AutomationKind.CONSTRUCTION:
             if "site_entity_id" not in _mapping(data.get("parameters"), "construction parameters"):
                 raise PersistenceError("construction.site_entity_id is required")
@@ -981,6 +1129,20 @@ def _load_automations(raw_data: object, simulation: Simulation) -> dict[str, Aut
 
 
 def _validate_automation_links(automations: dict[str, Automation], simulation: Simulation) -> None:
+    for entity in simulation.entities.values():
+        deployment = entity.production_deployment
+        if deployment is None or deployment.defend_automation_id is None:
+            continue
+        defense = automations.get(deployment.defend_automation_id)
+        if (
+            defense is None
+            or defense.owner_id != entity.owner_id
+            or not isinstance(defense.parameters, DefendParameters)
+            or not defense.parameters.production_defense
+            or defense.parameters.target != deployment.target
+            or defense.parameters.auto_repair != deployment.auto_repair
+        ):
+            raise PersistenceError("production deployment references an invalid defense")
     production_defenses: set[tuple[str, SpatialTarget]] = set()
     for automation in automations.values():
         if (
@@ -1005,6 +1167,7 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
         if any(
             simulation.entities[entity_id].owner_id != automation.owner_id
             for entity_id in automation.entity_ids
+            if entity_id in simulation.entities
         ):
             raise PersistenceError("automation references an entity owned by another player")
         if isinstance(automation.parameters, ReinforcementParameters):
@@ -1036,7 +1199,12 @@ def _validate_automation_links(automations: dict[str, Automation], simulation: S
                 ):
                     raise PersistenceError("production references an invalid patrol automation")
         elif isinstance(automation.parameters, RepairParameters):
-            for building_id in automation.parameters.destinations.values():
+            for entity_id, building_id in automation.parameters.destinations.items():
+                if automation.status.terminal or automation.parameters.phases[entity_id] in {
+                    RepairPhase.DONE,
+                    RepairPhase.RETURNING,
+                }:
+                    continue
                 building = simulation.entities.get(building_id)
                 if building is None or building.kind not in {
                     EntityKind.REPAIR_HUB,
@@ -1155,7 +1323,7 @@ def _load_automation_parameters(
         if deployment_slots:
             if len(set(deployment_slots)) != len(deployment_slots):
                 raise PersistenceError("gathering defense deployment slots are invalid")
-            if any(
+            if not terminal and any(
                 not simulation.game_map.is_passable(point)
                 or simulation.game_map.cell_for(point) in simulation._building_cells()
                 for point in deployment_slots
@@ -1182,7 +1350,7 @@ def _load_automation_parameters(
         if unit_kind.profile.category is not EntityCategory.UNIT:
             raise PersistenceError("production unit_kind must be a unit")
         factory_id = _string(data.get("factory_id"), "production.factory_id")
-        if (
+        if not terminal and (
             factory_id not in simulation.entities
             or unit_kind not in simulation.entities[factory_id].kind.production_kinds
             or not simulation.entities[factory_id].is_complete
@@ -1193,7 +1361,7 @@ def _load_automation_parameters(
         patrol_data = data.get("patrol_target")
         try:
             defend_target = None if defend_data is None else target_from_dict(defend_data)
-            if defend_target is not None:
+            if defend_target is not None and not terminal:
                 simulation._gathering_slots(defend_target, 1, collision_radius(unit_kind))
             patrol_target = None if patrol_data is None else target_from_dict(patrol_data)
             if patrol_target is not None:
@@ -1222,7 +1390,10 @@ def _load_automation_parameters(
             quantity = _integer(item[1], "production sequence quantity", minimum=1)
             if sequence_kind.profile.category is not EntityCategory.UNIT:
                 raise PersistenceError("production sequence kind must be a unit")
-            if sequence_kind not in simulation.entities[factory_id].kind.production_kinds:
+            if (
+                not terminal
+                and sequence_kind not in simulation.entities[factory_id].kind.production_kinds
+            ):
                 raise PersistenceError("production sequence kind is unsupported by its source")
             sequence.append((sequence_kind, quantity))
         sequence_index = _integer(
@@ -1239,7 +1410,10 @@ def _load_automation_parameters(
         progress_ticks = _integer(
             data.get("progress_ticks"), "production.progress_ticks", minimum=0
         )
-        if progress_ticks > build_ticks:
+        cost_paid = _boolean(data.get("cost_paid"), "production.cost_paid")
+        # A paid unit can wait at a blocked exit across pause/resume cycles.
+        # Earlier runtime increments retained that completed progress on resume.
+        if progress_ticks > build_ticks and not cost_paid:
             raise PersistenceError("production progress exceeds its build time")
         return ProductionParameters(
             factory_id=factory_id,
@@ -1250,7 +1424,7 @@ def _load_automation_parameters(
             produced_count=produced_count,
             progress_ticks=progress_ticks,
             produced_entity_ids=_bounded_production_history(data.get("produced_entity_ids")),
-            cost_paid=_boolean(data.get("cost_paid"), "production.cost_paid"),
+            cost_paid=cost_paid,
             continuous=continuous,
             auto_repair=_boolean(data.get("auto_repair"), "production.auto_repair"),
             defend_target=defend_target,
@@ -1285,9 +1459,13 @@ def _load_automation_parameters(
         if (
             builder_ids != entity_ids
             or (not builder_ids and not terminal)
-            or any(
-                item not in simulation.entities or not simulation.entities[item].profile.can_build
-                for item in builder_ids
+            or (
+                not terminal
+                and any(
+                    item not in simulation.entities
+                    or not simulation.entities[item].profile.can_build
+                    for item in builder_ids
+                )
             )
         ):
             raise PersistenceError("construction references an invalid builder")
@@ -1331,8 +1509,13 @@ def _load_automation_parameters(
         )
     if kind is AutomationKind.ECONOMY:
         generator_ids = _string_list(data.get("generator_ids"), "economy.generator_ids")
-        if generator_ids != entity_ids or any(
-            not simulation.entities[item].kind.profile.income_per_second for item in generator_ids
+        if generator_ids != entity_ids or (
+            not terminal
+            and any(
+                item not in simulation.entities
+                or not simulation.entities[item].kind.profile.income_per_second
+                for item in generator_ids
+            )
         ):
             raise PersistenceError("economy generators must match resource-generator entities")
         return EconomyParameters(
@@ -1350,6 +1533,8 @@ def _load_automation_parameters(
     phase_data = _mapping(data.get("phases"), "repair.phases")
     return_data = _mapping(data.get("return_positions", {}), "repair.return_positions")
     if not return_data:
+        if any(entity_id not in simulation.entities for entity_id in entity_ids):
+            raise PersistenceError("historical repair members require saved return positions")
         return_data = {
             entity_id: [
                 simulation.entities[entity_id].position.x,
@@ -1473,6 +1658,12 @@ def _validate_assignment_completeness(simulation: Simulation) -> None:
             if automation_id == automation.automation_id
         }
         expected = set(automation.entity_ids).difference(suspended)
+        if isinstance(automation.parameters, RepairParameters):
+            expected.difference_update(
+                entity_id
+                for entity_id, phase in automation.parameters.phases.items()
+                if phase is RepairPhase.DONE
+            )
         if automation.status.terminal:
             if assigned:
                 raise PersistenceError("terminal automations cannot retain assignments")
@@ -1561,9 +1752,9 @@ def _load_visibility(raw_data: object, simulation: Simulation) -> VisibilitySyst
     return system
 
 
-def _load_events(raw_data: object, current_tick: int) -> list[Event]:
+def _load_events(raw_data: object, current_tick: int, *, retain: bool = True) -> list[Event]:
     events: list[Event] = []
-    for raw_event in _list(raw_data, "state.events"):
+    for expected_sequence, raw_event in enumerate(_list(raw_data, "state.events"), start=1):
         data = _mapping(raw_event, "event")
         try:
             event_type = EventType(_string(data.get("type"), "event.type"))
@@ -1576,15 +1767,21 @@ def _load_events(raw_data: object, current_tick: int) -> list[Event]:
         if event_tick > current_tick:
             raise PersistenceError("event tick cannot be in the future")
         details = _mapping(data.get("details"), "event.details")
-        events.append(
-            Event(
-                sequence=_integer(data.get("sequence"), "event.sequence", minimum=1),
-                tick=event_tick,
-                event_type=event_type,
-                subject_id=subject_id,
-                details=details,
+        sequence = _integer(data.get("sequence"), "event.sequence", minimum=1)
+        if sequence != expected_sequence:
+            raise PersistenceError(
+                "invalid saved event sequence: must be contiguous and start at one"
             )
-        )
+        if retain:
+            events.append(
+                Event(
+                    sequence=sequence,
+                    tick=event_tick,
+                    event_type=event_type,
+                    subject_id=subject_id,
+                    details=details,
+                )
+            )
     return events
 
 
@@ -1599,7 +1796,9 @@ def _load_resources(raw_data: object, simulation: Simulation) -> dict[str, int]:
     }
 
 
-def _load_command_history(raw_data: object, current_tick: int) -> list[dict[str, object]]:
+def _load_command_history(
+    raw_data: object, current_tick: int, *, retain: bool = True
+) -> list[dict[str, object]]:
     history: list[dict[str, object]] = []
     previous_tick = 0
     for raw_entry in _list(raw_data, "state.command_history"):
@@ -1612,7 +1811,8 @@ def _load_command_history(raw_data: object, current_tick: int) -> list[dict[str,
             command = command_from_dict(entry.get("command"))
         except ValueError as error:
             raise PersistenceError(f"invalid recorded command: {error}") from error
-        history.append({"tick": tick, "command": command_to_dict(command)})
+        if retain:
+            history.append({"tick": tick, "command": command_to_dict(command)})
     return history
 
 

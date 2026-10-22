@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from airts.contracts.spatial import Point
+from airts.contracts.spatial import Point, PolygonRegion, PolylineTarget, target_to_dict
 from airts.world.map import Cell, footprint_cells
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory, EntityProfile, UpgradeDefinition
@@ -37,6 +37,22 @@ class UpgradeState:
     remaining_ticks: int = 0
 
 
+@dataclass(slots=True)
+class ProductionDeployment:
+    """Factory intent for subsequent production, independent of its current queue."""
+
+    target: PolygonRegion | PolylineTarget
+    auto_repair: bool = False
+    defend_automation_id: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "target": target_to_dict(self.target),
+            "auto_repair": self.auto_repair,
+            "defend_automation_id": self.defend_automation_id,
+        }
+
+
 class OrderKind(StrEnum):
     MOVE = "move"
     ATTACK = "attack"
@@ -51,10 +67,18 @@ class UnitOrder:
     position: Point
     target_entity_id: str | None = None
     group_goal: Point | None = None
+    formation_goal: Point | None = None
+    formation_leg: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
+            "formation_goal": (
+                None
+                if self.formation_goal is None
+                else [self.formation_goal.x, self.formation_goal.y]
+            ),
+            "formation_leg": self.formation_leg,
             "position": [self.position.x, self.position.y],
             "target_entity_id": self.target_entity_id,
             "group_goal": (
@@ -75,6 +99,10 @@ class Entity:
     path: list[Point] = field(default_factory=list)
     path_cost: float = 0.0
     order_queue: list[UnitOrder] = field(default_factory=list)
+    formation_group: str | None = None
+    formation_offset: Point | None = None
+    formation_goal: Point | None = None
+    formation_leg: str | None = None
     attack_gather_point: Point | None = None
     last_player_control_tick: int | None = None
     attack_target_id: str | None = None
@@ -99,6 +127,7 @@ class Entity:
     recovery_released: bool = False
     construction_progress: float | None = None
     upgrade: UpgradeState = field(default_factory=UpgradeState)
+    production_deployment: ProductionDeployment | None = None
 
     @property
     def profile(self) -> EntityProfile:
@@ -158,6 +187,9 @@ class Entity:
             "position": [self.position.x, self.position.y],
             "health": self.health,
             "construction_progress": self.construction_progress,
+            "production_deployment": (
+                None if self.production_deployment is None else self.production_deployment.to_dict()
+            ),
             "upgrade": {
                 "tier": self.upgrade.tier,
                 "remaining_ticks": self.upgrade.remaining_ticks,
@@ -169,6 +201,18 @@ class Entity:
             "path": [[point.x, point.y] for point in self.path],
             "path_cost": self.path_cost,
             "order_queue": [order.to_dict() for order in self.order_queue],
+            "formation_group": self.formation_group,
+            "formation_offset": (
+                None
+                if self.formation_offset is None
+                else [self.formation_offset.x, self.formation_offset.y]
+            ),
+            "formation_goal": (
+                None
+                if self.formation_goal is None
+                else [self.formation_goal.x, self.formation_goal.y]
+            ),
+            "formation_leg": self.formation_leg,
             "attack_gather_point": (
                 None
                 if self.attack_gather_point is None

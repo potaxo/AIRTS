@@ -11,13 +11,21 @@ from airts.contracts.automations import AutomationKind, ConstructionParameters
 from airts.contracts.spatial import Point, PointTarget, PolygonRegion, SpatialTarget
 from airts.presentation.build_placement import BuildingLineDraft
 from airts.presentation.palette import RECLAIM_COLOR, REPAIR_COLOR, WORK_BEAM_WIDTH
-from airts.presentation.rendering import reclaim_links, work_links
+from airts.presentation.rendering import reclaim_links
 from airts.presentation.ui.drawing import UiPainter
+from airts.presentation.visuals.catalog import APPEARANCES
+from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
+from airts.world.entities import Entity
 from airts.world.units.catalog import EntityKind
+
+SEGMENT_FLOATS = 17
 
 
 class FeedbackView(Protocol):
+    facing: FacingHistory
+    render_alpha: float
+
     @property
     def simulation(self) -> Simulation: ...
 
@@ -64,6 +72,7 @@ class FeedbackView(Protocol):
     def ui(self) -> UiPainter: ...
 
     def _map_point(self, position: tuple[int, int]) -> Point: ...
+    def previous_entity_position(self, entity_id: str) -> Point: ...
     def _construction_previews(self, pointer: Point | None) -> tuple[tuple[Point, bool], ...]: ...
 
 
@@ -153,7 +162,18 @@ class GPUFeedback:
                     self.segment_program,
                     [
                         (self.quad, "2f", "corner"),
-                        (self.lines, "2f 2f 4f 1f /i", "start", "end", "color", "width"),
+                        (
+                            self.lines,
+                            "2f 2f 4f 1f 2f 2f 2f 2f /i",
+                            "start",
+                            "end",
+                            "color",
+                            "width",
+                            "previous_start",
+                            "tool_port",
+                            "tool_size",
+                            "tool_angles",
+                        ),
                     ],
                 )
             )
@@ -197,7 +217,9 @@ class GPUFeedback:
         if data:
             buffer.write(data)
 
-    def draw(self, app: FeedbackView, size: tuple[int, int]) -> None:
+    def draw(
+        self, app: FeedbackView, size: tuple[int, int], *, interpolation_alpha: float | None = None
+    ) -> None:
         mouse = pygame.mouse.get_pos() if pygame.display.get_init() else (-1, -1)
         pointer = (
             app._map_point(mouse)
@@ -243,6 +265,9 @@ class GPUFeedback:
             program["viewport"].value = size
             program["origin"].value = app.map_origin
             program["tile"].value = app.tile_size
+        self.segment_program["interpolation_alpha"].value = max(
+            0.0, min(1.0, app.render_alpha if interpolation_alpha is None else interpolation_alpha)
+        )
         rect = app.canvas_rect
         self.context.scissor = (rect.x, size[1] - rect.bottom, rect.width, rect.height)
         try:
@@ -260,6 +285,7 @@ class GPUFeedback:
             self.context.scissor = None
 
     def _build(self, app: FeedbackView, pointer: Point | None) -> None:
+        app.facing.sync(app.simulation)
         shapes, lines, triangles = array("f"), array("f"), array("f")
         labels: list[tuple[str, Point, bool]] = []
 
@@ -295,10 +321,27 @@ class GPUFeedback:
             color: tuple[int, ...],
             closed: bool = False,
             width: float = 2.0,
+            source: Entity | None = None,
         ) -> None:
             vertices = points + points[:1] if closed else points
             for a, b in zip(vertices, vertices[1:], strict=False):
                 lines.extend((a.x, a.y, b.x, b.y, *rgba(color), width))
+                art = APPEARANCES[source.kind] if source is not None else None
+                if source is not None and art is not None and art.work_port is not None:
+                    previous = app.previous_entity_position(source.entity_id)
+                    pose = app.facing.pose(source.entity_id)
+                    lines.extend(
+                        (
+                            previous.x,
+                            previous.y,
+                            *art.work_port,
+                            *art.size,
+                            pose.previous_body,
+                            pose.body,
+                        )
+                    )
+                else:
+                    lines.extend((a.x, a.y, 0, 0, 0, 0, 0, 0))
 
         def target(geometry: SpatialTarget, color: tuple[int, ...], selected: bool) -> None:
             width = 4 if selected else 2
@@ -419,15 +462,20 @@ class GPUFeedback:
                 (245, 245, 245),
                 1,
             )
-        for source, destination in work_links(app.simulation):
-            line((source, destination), REPAIR_COLOR, width=WORK_BEAM_WIDTH)
-        for source, destination in reclaim_links(app.simulation):
-            line((source, destination), RECLAIM_COLOR, width=WORK_BEAM_WIDTH)
+        for source, destination in app.facing.work_links:
+            line(
+                (source.selection_position, destination.selection_position),
+                REPAIR_COLOR,
+                width=WORK_BEAM_WIDTH,
+                source=source,
+            )
+        for start, end in reclaim_links(app.simulation):
+            line((start, end), RECLAIM_COLOR, width=WORK_BEAM_WIDTH)
         self._write(self.shapes, shapes)
         self._write(self.lines, lines)
         self._write(self.triangles, triangles)
         count = self._build_labels(app, labels)
-        self.counts = (len(shapes) // 18, len(lines) // 9, len(triangles) // 6, count)
+        self.counts = (len(shapes) // 18, len(lines) // SEGMENT_FLOATS, len(triangles) // 6, count)
 
     def _build_labels(self, app: FeedbackView, labels: list[tuple[str, Point, bool]]) -> int:
         if app.ui.small_font is None or not labels:
@@ -542,10 +590,17 @@ void main() { fragment=texture(atlas,uv); }
 _SEGMENT_VERTEX = """
 #version 330
 uniform vec2 viewport; uniform vec2 origin; uniform float tile;
+uniform float interpolation_alpha;
 in vec2 corner; in vec2 start; in vec2 end; in vec4 color; in float width;
+in vec2 previous_start; in vec2 tool_port; in vec2 tool_size; in vec2 tool_angles;
 out vec4 line_color;
 void main() {
-    vec2 a=origin+start*tile; vec2 b=origin+end*tile;
+    vec2 a=origin+mix(previous_start,start,interpolation_alpha)*tile;
+    vec2 offset=tool_port*max(tool_size*tile,vec2(14.0));
+    float angle=mix(tool_angles.x,tool_angles.y,interpolation_alpha);
+    float c=cos(angle),s=sin(angle);
+    a+=vec2(c*offset.x-s*offset.y,s*offset.x+c*offset.y);
+    vec2 b=origin+end*tile;
     vec2 direction=b-a;
     float distance=length(direction);
     vec2 normal=distance>0.0001 ? vec2(-direction.y,direction.x)/distance : vec2(0,1);

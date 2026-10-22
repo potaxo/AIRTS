@@ -13,6 +13,7 @@ class Appearance:
     body: str
     size: tuple[float, float]
     weapon: str | None = None
+    work_port: tuple[float, float] | None = None
 
 
 APPEARANCES = {
@@ -23,7 +24,10 @@ APPEARANCES = {
     EntityKind.HEAVY_TANK: Appearance(
         "units/heavy_tank/body.png", (1.4, 1.4), "units/heavy_tank/weapon.png"
     ),
-    EntityKind.BUILDER: Appearance("units/builder/body.png", (1.35, 1.35)),
+    # Center of the open claw at source pixel (40, 8), relative to the 64px pivot.
+    EntityKind.BUILDER: Appearance(
+        "units/builder/body.png", (1.35, 1.35), work_port=(8 / 64, -24 / 64)
+    ),
     EntityKind.ARTILLERY: Appearance(
         "units/artillery/body.png", (1.6, 1.6), "units/artillery/weapon.png"
     ),
@@ -34,7 +38,7 @@ APPEARANCES = {
         "units/tank_destroyer/body.png", (1.45, 1.45), "units/tank_destroyer/weapon.png"
     ),
     EntityKind.TURRET: Appearance(
-        "buildings/turret/body.png", (2, 2), "buildings/turret/weapon.png"
+        "buildings/turret/body.png", (1, 1), "buildings/turret/weapon.png"
     ),
     EntityKind.FACTORY: Appearance("buildings/factory/body.png", (4, 4)),
     EntityKind.REPAIR_HUB: Appearance("buildings/repair_hub/body.png", (3, 3)),

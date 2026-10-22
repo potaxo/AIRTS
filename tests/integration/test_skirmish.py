@@ -218,10 +218,12 @@ def test_zoom_clamps_and_preserves_cursor_world_point_and_panel_wheel() -> None:
     assert app.camera.zoom == 1
 
 
-def test_opening_cover_configures_then_locks_match_until_restart() -> None:
+@pytest.mark.parametrize("debug_mode", [False, True])
+def test_opening_cover_configures_then_locks_match_until_restart(debug_mode: bool) -> None:
     from airts.presentation.lobby import Lobby
 
     app = AirtsApp(match_simulation(), show_lobby=True)
+    assert not app.debug_mode
     assert app.lobby is not None
     pygame.font.init()
     try:
@@ -230,6 +232,12 @@ def test_opening_cover_configures_then_locks_match_until_restart() -> None:
         screen = pygame.Surface(app.WINDOW_SIZE)
         app._draw(screen)
         cover = app.lobby
+        if debug_mode:
+            option = next(rect for rect, action, _ in cover.buttons if action == "debug")
+            old_key = app._opengl_overlay_key()
+            cover.click(app, option.center)
+            assert app._opengl_overlay_key() != old_key
+        assert app.debug_mode is debug_mode
         app._handle_event(
             pygame.event.Event(
                 pygame.MOUSEBUTTONDOWN, {"button": 1, "pos": cover.buttons[0][0].center}
@@ -253,12 +261,30 @@ def test_opening_cover_configures_then_locks_match_until_restart() -> None:
                 pygame.event.Event(pygame.MOUSEBUTTONDOWN, {"button": 1, "pos": start.center})
             )
         assert app.lobby is None
+        assert app.simulation.events.enabled is debug_mode
         assert app.simulation.game_map.width == 64
         app._handle_key(pygame.K_F2)
         assert isinstance(app.lobby, Lobby)
         assert app.lobby.page == "cover"
     finally:
         pygame.font.quit()
+
+
+@pytest.mark.parametrize("debug_mode", [False, True])
+def test_cover_load_uses_selected_debug_mode(tmp_path: Path, debug_mode: bool) -> None:
+    original = match_simulation()
+    original.execute(MoveCommand(("unit_01",), Point(25, 25)))
+    original.advance(2)
+    path = tmp_path / "match.json"
+    save_simulation(original, path)
+    app = AirtsApp(match_simulation(), show_lobby=True)
+    app.debug_mode = debug_mode
+    app._load_game(path)
+    assert app.lobby is None
+    assert app.simulation.snapshot() == original.snapshot()
+    assert app.simulation.events.enabled is debug_mode
+    assert bool(app.simulation.events.events) is debug_mode
+    assert bool(app.simulation.command_history) is debug_mode
 
 
 def test_ai_replaces_builder_even_when_factory_has_continuous_army_loop() -> None:

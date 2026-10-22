@@ -20,12 +20,14 @@ from airts.contracts.commands import (
     CreateConstructionCommand,
     CreateProductionCommand,
     CreateRepairAndReturnCommand,
+    HoldPositionCommand,
     MoveCommand,
     PauseAutomationCommand,
 )
 from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.systems import construction
 from airts.systems.construction import construction_distance
 from airts.world.entities import UnitState
 from airts.world.units.catalog import EntityKind
@@ -56,6 +58,27 @@ def test_builder_construction_is_paid_timed_and_places_building_on_completion() 
     assert building.kind is EntityKind.RESOURCE_GENERATOR
     assert building.position == Point(6, 10)
     assert automation not in simulation.live_automations
+
+
+def test_travelling_builder_keeps_its_route_without_rebuilding_working_positions() -> None:
+    simulation = builder_factory_simulation()
+    result = simulation.execute(
+        CreateConstructionCommand("builder", EntityKind.FACTORY, Point(16, 14))
+    )
+    assert result.accepted
+    simulation.advance()
+    builder = simulation.entities["builder"]
+    assert builder.path
+    with patch.object(
+        construction,
+        "construction_interaction_points",
+        wraps=construction.construction_interaction_points,
+    ) as points:
+        simulation.advance(5)
+    assert builder.path
+    assert points.call_count == 0
+    simulation.advance(150)
+    assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
 
 
 @pytest.mark.parametrize(
@@ -363,6 +386,7 @@ def test_site_occupied_by_unit_waits_without_charge_or_phantom_building() -> Non
     scout = simulation.entities["scout"]
     scout.position = Point(6.5, 10.5)
     simulation.occupancy.move(scout.entity_id, scout.occupied_cells)
+    assert simulation.execute(HoldPositionCommand((scout.entity_id,))).accepted
     result = simulation.execute(
         CreateConstructionCommand("builder", EntityKind.RESOURCE_EXTRACTOR, Point(6, 10))
     )

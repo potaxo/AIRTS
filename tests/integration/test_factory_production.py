@@ -285,7 +285,10 @@ def test_production_preserves_disc_clearance_across_empty_neighbor_cells(kind: E
     assert simulation.automations[result.automation_id or ""].status is AutomationStatus.COMPLETED
 
 
-def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_overlap() -> None:
+@pytest.mark.parametrize("completed_overrun", [0, 2])
+def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_overlap(
+    tmp_path: Path, completed_overrun: int
+) -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -310,6 +313,22 @@ def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_over
     assert automation.status is AutomationStatus.WAITING
     assert automation.reason_code == "SPAWN_BLOCKED"
     assert len(simulation.entities) == 2
+    parameters = automation.parameters
+    assert isinstance(parameters, ProductionParameters)
+    parameters.progress_ticks += completed_overrun
+    completed_progress = parameters.progress_ticks
+    balance = simulation.resources.copy()
+    for _ in range(3):
+        assert simulation.execute(PauseAutomationCommand(automation.automation_id)).accepted
+        assert simulation.execute(ResumeAutomationCommand(automation.automation_id)).accepted
+        simulation.advance()
+        assert parameters.progress_ticks == completed_progress
+    path = tmp_path / "blocked-exit.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    assert restored.export_state() == simulation.export_state()
+    simulation = restored
+    automation = simulation.automations[automation.automation_id]
     assert simulation.execute(MoveCommand(("blocker",), Point(7.5, 6.5))).accepted
     for _ in range(10):
         simulation.advance()
@@ -318,6 +337,7 @@ def test_production_waits_for_actual_disc_capacity_then_resumes_without_new_over
             assert units[0].position.distance_to(units[1].position) >= 0.9 - 1e-8
     assert automation.status is AutomationStatus.COMPLETED
     assert len(simulation.entities) == 3
+    assert simulation.resources == balance
 
 
 def test_production_uses_legal_space_within_an_occupied_mobile_cell() -> None:

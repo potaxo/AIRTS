@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from airts.contracts.commands import AttackCommand, RepairBuildingCommand
 from airts.contracts.events import EventType
 from airts.navigation.pathfinding import PathfindingError, RouteDeferred
-from airts.systems import automation_assignments, movement
+from airts.systems import automation_assignments, formations, movement
 from airts.world.entities import OrderKind, UnitOrder, UnitState
 
 if TYPE_CHECKING:
@@ -50,10 +50,12 @@ def append_target_order(
 
 
 def drive_order_queues(simulation: Simulation) -> None:
+    waiting = formations.waiting_members(simulation)
     pending = sorted(
         key
         for key, entity in simulation.entities.items()
         if entity.order_queue
+        and key not in waiting
         and not entity.path
         and not entity.pursue_target
         and entity.repair_target_id is None
@@ -79,7 +81,7 @@ def drive_order_queues(simulation: Simulation) -> None:
                     (key,),
                     {key: order.position},
                     shared_goal=order.group_goal,
-                    compact_approach=order.group_goal is not None,
+                    compact_approach=order.group_goal is not None and order.formation_goal is None,
                     allowance=allowance,
                 )[key]
             except RouteDeferred:
@@ -103,6 +105,8 @@ def drive_order_queues(simulation: Simulation) -> None:
             movement.start_path(
                 simulation, entity, order.position, route, "human_queue", UnitState.MOVING
             )
+            entity.formation_goal = order.formation_goal
+            entity.formation_leg = order.formation_leg
             continue
         assert order.target_entity_id is not None
         command: AttackCommand | RepairBuildingCommand = (

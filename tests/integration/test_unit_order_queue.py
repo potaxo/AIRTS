@@ -213,6 +213,9 @@ def test_live_box_selection_and_batched_shift_clicks_keep_attack_first_fifo(
                     for i, key in enumerate(ids)
                 ]
                 + [
+                    {"id": "friendly_builder", "kind": "builder", "position": [10.5, 14.5]},
+                ]
+                + [
                     {"id": key, "kind": "builder", "owner": "enemy", "position": position}
                     for key, position in (
                         ("first", [26.5, 12.5]),

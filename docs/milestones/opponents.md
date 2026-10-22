@@ -29,23 +29,37 @@ and offers return to opening configuration.
 ## Squad and economy behavior
 
 A single army objective replaces independent opportunistic squad raids. Persistent cohorts retain
-at most 32 members for bounded command/routing work; the first active cohort leads the army.
-The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
+at most 32 members for membership bookkeeping. Small armies use the first active cohort as their
+assembly reference. The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
 at least 12 can launch; there is no timeout that releases isolated units. Nearby waiting cohorts
 merge. Fresh units rally near their producer and wait for a six-unit reinforcement batch before
 following the army, rather than being appended to a distant marching cohort.
-New arrivals join only nearby gathering/retreating cohorts, so geographically separate factories
+Ordinary new arrivals join nearby gathering/retreating cohorts, so geographically separate factories
 do not share one scattered assembly queue. With no active wave, the largest cohort supplies the
 next leader rather than allowing a small distant group to hold all larger forces behind it.
-Marching cohorts share the target and regroup when stretched out. Common orders combine up to four
+Small marching armies share the target and regroup when stretched out. Ordinary orders combine up to four
 nearby cohorts per command; this dispatch chunk is not a total army-size limit. Mission opportunities
 and least-recently-ordered cohorts prevent changing front orders from permanently starving rear
 reinforcements. A depleted offensive force of fewer than twelve
 regroups; forces unable to rebuild, or clearing enemies unable to develop, can finish with survivors.
 
-Army contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
+With at least 500 available field members, a mass assault enrolls the whole field force in one
+shared attack command rather than squeezing it into a small leader's arrival slots. Infrastructure
+is preferred while choosing a reachable target with a favorable forecast; absent enemy buildings, remnants remain
+targets. A live objective supported by at least half the army persists, including below 500 down
+to 250 members, so casualty counts do not repeatedly reverse the army into assembly. Existing
+matching pursuit is not reissued. Actual route admission still uses the shared combat budget;
+issuing a large command does not synchronously compute every member's path. Local opportunistic
+fire remains available en route without changing the strategic target. Base rescue still removes
+the nearest necessary defenders before field command. Close partial advancing cohorts with a
+common objective merge and can receive nearby new members, avoiding singleton command chains.
+No extra authoritative mass-assault state or total army limit is introduced.
+
+For small armies, contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
 engage together or regroup near a friendly production anchor. Estimates include physically
-nearby field cohorts without a fixed 96-unit prefix, not distant queued reinforcements. Small home garrisons handle
+nearby field cohorts without a fixed 96-unit prefix, not distant queued reinforcements. In a favorable
+fight, ready rear cohorts share the contact order in least-recently-commanded order; front contact
+does not end the decision before offering rear reinforcement an opportunity. Small home garrisons handle
 weak raids independently. Otherwise threats to owned infrastructure recall the nearest required
 cohorts; a negative individual combat forecast never vetoes base rescue. Recent attacks on
 production and income buildings take priority over proximity alone.
@@ -67,6 +81,11 @@ unfinished turrets contribute no armed threat. Forecasts omit collision, focus f
 terrain routing and future reinforcement timing. Knowledge uses the fully visible world. Tactical
 control is a bounded rule-based state machine, not a learned policy or a full combat simulator.
 
+Nearest-enemy queries used for frontier and staging positions share one packed enemy-position
+snapshot per decision. The numeric scan retains the complete enemy set and stable entity-ID ties;
+it does not cap candidates or approximate distance. AI commands in that phase cannot move hostile
+bodies, and the snapshot is discarded at the end of the decision. It is not saved AI memory.
+
 Economy and production use separate spending envelopes. Saved growth credit earmarks roughly 40%
 of available opening/reclaimed cash and ongoing building income; the remainder funds military
 production and additional builders. Credit is spending intent, not extra money: each budget update
@@ -80,13 +99,14 @@ AI budget pauses on existing continuous loops remain tracked until actual resume
 
 There is no fixed cumulative building, army, builder or resource ceiling in the AI policy. Available
 space, funds and losses constrain real growth. Under ordinary budgets, builder demand scales with
-both extractor/synthesizer holdings and factories; up to six separate builders can construct
-concurrently. Close,
+both extractor/synthesizer holdings and factories. Each available builder can own funded work;
+there is no separate parallel-site ceiling. Close,
 connected resource sites rank ahead of distant speculative holdings, while enemy-controlled and
 unreachable sites are rejected. Production buildings first support remote income sites without
 a nearby factory, then extend the frontier in bounded steps toward unclaimed resources or enemies.
-Factory targets account for income, production time, territory and army size rather than requiring
-every factory to run continuously. After establishing a second factory, exposed production/income
+Factory expansion targets account for income, production time, territory and army size. Ordinary
+low-budget planning need not run every factory; surplus cash instead activates affordable idle
+factories through standing production orders. After establishing a second factory, exposed production/income
 holdings receive turrets before further factory expansion. Repair hubs support damaged armies.
 Visible enemy army buildup that substantially outmatches the current force prioritizes a home
 turret before further expansion, so early economic growth does not leave the core undefended.
@@ -100,8 +120,10 @@ trigger bounded clearance orders.
 
 After protecting finite production and unpaid construction, cash of at least eight factory prices
 enables surplus expansion. This is a spending policy, not an income bonus. The worker target then
-scales with cash and the size of developed holdings, with at most 24 simultaneous funded sites.
-This parallel-work budget does not limit completed buildings or lifetime construction. Command centers preferentially
+scales with cash and the size of developed holdings, but existing idle builders satisfy demand
+before further workers are queued. Rich worker replenishment also requires spare builders to fall
+below two or a quarter of current construction jobs. The retired six/24-site limits no longer
+exclude otherwise affordable work. Command centers preferentially
 produce workers in batches of up to six; without a command center, worker demand is limited relative
 to the existing/queued army so factories also keep supplying soldiers. Combat at a remote holding
 does not stop worker production at safe rear sources or locally safe construction/upgrades.
@@ -132,6 +154,14 @@ site-constrained maps use synthesizers on ordinary land, while unrestricted maps
 Production/defense coverage uses local spatial queries rather than all building pairs. Strategic
 gaps use a bounded nearby/rotating window before regional scoring, so that growing holdings do not
 create an unbounded cross-product of candidate sites and supporting buildings.
+Regional nearest-holding, builder and coverage distances are computed in warmed numeric batches
+over the complete point sets, preserving the scalar distance scores without Python all-pairs loops.
+Static impassable footprints are filtered before detailed placement admission; an exhausted kind
+does not repeat regional planning in the same decision. Base-threat queries likewise batch the
+complete enemy-to-owned-asset neighborhood rather than repeatedly walking overlapping circles.
+Producer clearance and staging geometry are shared within the decision and invalidated when a
+construction command changes pending footprints. Unreachable candidate approaches are rejected
+before repeating shared placement validation; accepted sites still use the shared validator.
 Placement rejects enemy fire coverage, nearby enemy producers, occupied/resource footprints,
 blocked exits and unreachable builder approaches, including other planned footprints. Surplus mode
 has no ten-factory or ten-synthesizer stop condition; safe space, actual funds, workers, demand and
@@ -148,7 +178,7 @@ Idle construction capacity can still upgrade. Non-income
 benefits are not evaluated. Existing paid work continues during threats. Synthesizers remain
 supplementary income when safe extraction and cheaper upgrades are unavailable.
 
-Factories produce fully funded short batches. Eight light/heavy frontliners establish the opening
+Ordinary military production uses fully funded short batches. Eight light/heavy frontliners establish the opening
 backbone; subsequent production balances resource investment across light tanks, heavy tanks,
 light artillery, tank destroyers and heavy artillery, plus a small scout quota. Desired shares shift
 from cheap units toward heavy armor and artillery as army investment, actual military cash or
@@ -157,16 +187,20 @@ demand. These are composition preferences, not nonexistent armor-damage bonuses.
 units and the prepaid current item of continuous production count toward composition, preventing
 separate factories from all filling the same gap.
 
-With surplus cash, fully funded batches scale with the number of factories and configured production
-time, without the old eight-unit batch ceiling, so rotating sources can stay productive without singleton
-requeueing. Small factory counts retain short batches for timely mixed-army composition; scouts
-retain their small quota. Every economy turn allows at most one immediate reserve/army command
+With surplus cash, idle factories receive continuous military orders instead of waiting for a
+finite batch to empty and another two-second scheduling opportunity. These have no target-count
+stop condition: each unit pays through ordinary production, not an infinite prepaid commitment.
+Idle sources rank before retuning already-running factories. Rich composition includes twenty
+seconds of standing output, so a group of newly activated factories does not all choose the same
+temporarily missing role. Paid AI loops change kind only at a unit boundary while rich; ordinary
+cash can preempt them with a funded finite specialist order, preserving paid loop progress and
+keeping mixed production possible. Manual pauses remain untouched. Every ordinary economy turn allows at most one immediate reserve/army command
 before offering production and growth opportunities; ordinary budgets keep growth before production,
 while rich budgets first offer a production command. Remaining opportunities handle clearance,
 repairs and production, then further growth if production is already supplied. Other decisions
 retain normal tactical response budgets. Thus repeated rescue,
 clearance and repair orders cannot consume every funded macro opportunity. Unused opportunities
-remain available to other work, with no increase to the global per-decision command cap.
+remain available to other work.
 
 A missing expensive role can save up to its next unit's cost within military funds instead of
 repeatedly buying another light tank; existing continuous loops respect that reserve. This can idle
@@ -178,9 +212,15 @@ Threats prioritize military output over additional nonessential builders and eco
 without forcing every funded purchase back to light tanks. No prices, production times or income
 multipliers are secretly changed, and no free resources or discounts are granted.
 
-Owners decide every ten ticks with staggered slots; budgets, construction and production run every
-twenty. A decision attempts at most three commands and normally issues at most two main-army dispatches,
-with one on economy turns. Dispatches process bounded chunks of cohorts, not a fixed total force.
+Owners make tactical decisions every ten ticks with staggered slots; ordinary low-budget macro
+work remains every twenty. Rich owners additionally rotate through background macro service on
+other ticks, without waiting for another tactical decision. A service offers one production command
+and one growth command; a successful growth search using at most sixteen detailed candidates can
+use a second spare growth opportunity. All owners together attempt at most three commands per
+simulation tick, so this is pacing rather than a total queue/building/army limit. Tactical decisions
+take priority and normally issue at most two main-army dispatches,
+with one on economy turns. Ordinary dispatches process chunks of cohorts; a mass attack shares one
+intent across its entire field force and leaves actual routing to the existing per-tick allowance.
 Target selection checks at most four candidates and placement
 at most 64 candidates per building kind across the complete decision, including surplus searches.
 The global sector grid is at most twelve cells per axis; each building kind's window checks at most

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from array import array
 from bisect import bisect_left
 from math import floor, hypot
 from typing import TYPE_CHECKING
@@ -19,6 +20,7 @@ from airts.navigation.pathfinding import (
     RouteAllowance,
     passable_segment_cells,
 )
+from airts.systems import formations
 from airts.systems.assignment_state import state_for_assignment
 from airts.world._numeric import BoolArray, FloatArray, IntArray, compile_numeric
 from airts.world.entities import Entity, OrderKind, UnitState
@@ -29,7 +31,16 @@ if TYPE_CHECKING:
     from airts.simulation import Simulation
 
 
-FORMATION_MOVE_DISTANCE = 12.0
+# Snapshot columns: position[0:2], steering[2:4], final goal[4:6],
+# radius/speed/strong/routed/mass[6:11], recovery steering[11:13],
+# pending/released/tolerance/stalled[13:17], recovery goal[17:19],
+# has recovery/previous pressure[19:21], and the real route waypoint[21:23].
+_MOVEMENT_RECORD_WIDTH = 23
+_CHANGED = 1
+_CELL_CHANGED = 2
+_OUTSIDE_RECOVERY = 4
+_PROGRESSED = 8
+_AT_WAYPOINT = 16
 
 
 def move_origins(
@@ -51,14 +62,6 @@ def move_origins(
     return origins
 
 
-def is_march(origins: dict[str, Point], target: Point) -> bool:
-    center = Point(
-        sum(point.x for point in origins.values()) / len(origins),
-        sum(point.y for point in origins.values()) / len(origins),
-    )
-    return center.distance_to(target) > FORMATION_MOVE_DISTANCE
-
-
 class MovementWorkspace:
     """Reusable contiguous inputs/scratch; never saved or fed back as world state."""
 
@@ -73,6 +76,17 @@ class MovementWorkspace:
         self.ensure(len(self.keys))
         empty = np.empty((0, 2), dtype=np.float64)
         _motion_geometry(empty, empty, empty, np.empty(0, dtype=np.bool_), empty, np.empty(0))
+        _movement_feedback(
+            np.empty((0, _MOVEMENT_RECORD_WIDTH)),
+            empty,
+            np.empty(0, dtype=np.bool_),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+            1,
+            1,
+            0.0,
+        )
 
     def ensure(self, count: int) -> None:
         if count <= self.capacity:
@@ -103,7 +117,8 @@ class MovementWorkspace:
             for key in ("moving", "stationary", "routed", "stalled", "recovering", "released")
         }
         self.integers = {
-            key: np.empty(self.capacity, dtype=np.int64) for key in ("ticks", "status")
+            key: np.empty(self.capacity, dtype=np.int64)
+            for key in ("ticks", "status", "feedback", "feedback_indices")
         }
         self.integers["work"] = np.empty(4, dtype=np.int64)
 
@@ -128,6 +143,68 @@ def _motion_geometry(
             fronts[index] = -(px * dx + py * dy) / max(hypot(dx, dy), 1e-9)
         else:
             headings[index, 0] = headings[index, 1] = fronts[index] = 0.0
+
+
+@compile_numeric
+def _movement_feedback(
+    records: FloatArray,
+    updated: FloatArray,
+    pressure: BoolArray,
+    statuses: IntArray,
+    feedback: IntArray,
+    indices: IntArray,
+    width: int,
+    height: int,
+    minimum_progress: float,
+) -> int:
+    """Batch numeric feedback; only bodies needing world submission enter the work list.
+
+    All bodies have already participated in the collision solve. Quiet bodies can
+    omit Python writeback, while previous pressure, route/recovery intent and solver
+    status always retain a submission even when the body did not move.
+    """
+    count = 0
+    for index in range(len(records)):
+        feedback[index] = 0
+        x, y = records[index, 0], records[index, 1]
+        nx, ny = updated[index, 0], updated[index, 1]
+        changed = x != nx or y != ny
+        routed = bool(records[index, 9])
+        recovery = bool(records[index, 19])
+        if not (
+            changed
+            or routed
+            or recovery
+            or pressure[index]
+            or statuses[index]
+            or records[index, 20]
+        ):
+            continue
+        mask = 0
+        if changed:
+            if not (0 <= nx < width and 0 <= ny < height):
+                raise ValueError("movement result outside map")
+            mask |= _CHANGED
+            if int(x) != int(nx) or int(y) != int(ny):
+                mask |= _CELL_CHANGED
+        if routed:
+            # A weak return can temporarily steer at its current position during
+            # contact waiting. Arrival/progress still refer to the actual route.
+            tx, ty = records[index, 21], records[index, 22]
+            distance = hypot(tx - nx, ty - ny)
+            if hypot(tx - x, ty - y) - distance >= minimum_progress:
+                mask |= _PROGRESSED
+            if distance <= 1e-9:
+                mask |= _AT_WAYPOINT
+        if (
+            recovery
+            and hypot(records[index, 17] - nx, records[index, 18] - ny) > records[index, 15]
+        ):
+            mask |= _OUTSIDE_RECOVERY
+        feedback[index] = mask
+        indices[count] = index
+        count += 1
+    return count
 
 
 def observed_velocity(simulation: Simulation, entity: Entity) -> tuple[float, float]:
@@ -326,11 +403,47 @@ def move_entities(simulation: Simulation) -> None:
         return
     entities = [simulation.entities[key] for key in keys]
     obstacles = simulation._building_cells()
+    returning = [
+        (entity, target)
+        for entity in entities
+        if (target := formations.return_target(entity)) is not None
+    ]
+    if returning:
+        offset = simulation.tick % len(returning)
+        for entity, target in returning[offset:] + returning[:offset]:
+            if not simulation._routes.claim_combat_route():
+                break
+            try:
+                anchor = entity.formation_goal
+                if (
+                    anchor is None
+                    or not simulation.game_map.is_passable(anchor)
+                    or simulation.game_map.cell_for(anchor) in obstacles
+                ):
+                    anchor = target
+                route = plan_group_paths(
+                    simulation, (entity.entity_id,), {entity.entity_id: target}, shared_goal=anchor
+                )[entity.entity_id]
+            except PathfindingError as error:
+                if entity.state is not UnitState.WAITING:
+                    simulation.events.record(
+                        simulation.tick,
+                        EventType.PATHFINDING_FAILED,
+                        entity.entity_id,
+                        operation="formation_return",
+                        reason=str(error),
+                    )
+                entity.state = UnitState.WAITING
+                continue
+            start_path(simulation, entity, target, route, "formation_return", UnitState.MOVING)
     lookahead = []
     for entity in entities:
         if len(entity.path) < 2:
             continue
-        if _route_obstacles(simulation, entity, obstacles) != obstacles:
+        # The helper returns this exact snapshot unless an embedded endpoint
+        # needs an exception. Comparing equal frozensets rescans every building
+        # cell for every routed body on a developed map.
+        if _route_obstacles(simulation, entity, obstacles) is not obstacles:
             skip_crowded_waypoints(simulation, entity, obstacles)
         else:
             lookahead.append(entity)
@@ -378,11 +491,11 @@ def move_entities(simulation: Simulation) -> None:
                 _finish_path(simulation, entity)
                 continue
         planned.add(key)
-    records = []
+    records = array("d")
     recovery_goals: list[Point | None] = []
     recovery_ticks: list[int] = []
-    recovery_tolerances: list[float] = []
     for entity in entities:
+        waypoint = entity.path[0] if entity.path else entity.position
         target = entity.path[0] if entity.path else _hold_target(simulation, entity)
         point = entity.position
         recovery_goal, recovery_tolerance = _recovery_goal(simulation, entity)
@@ -428,12 +541,11 @@ def move_entities(simulation: Simulation) -> None:
         recovery_ticks.append(
             entity.recovery_request_tick if entity.recovery_request_tick is not None else -1
         )
-        recovery_tolerances.append(recovery_tolerance)
         if not strong_intent and entity.contact_wait_ticks:
             target = point
         profile = entity.kind.profile
         assert profile.movement_speed is not None
-        records.append(
+        records.extend(
             (
                 point.x,
                 point.y,
@@ -453,9 +565,17 @@ def move_entities(simulation: Simulation) -> None:
                 recovery_tolerance,
                 (strong_intent or pending_recovery)
                 and entity.no_progress_ticks >= simulation.NO_PROGRESS_YIELD_TICKS,
+                recovery_goal.x if recovery_goal is not None else point.x,
+                recovery_goal.y if recovery_goal is not None else point.y,
+                recovery_goal is not None,
+                entity.collision_pressure,
+                waypoint.x,
+                waypoint.y,
             )
         )
-    data = np.asarray(records, dtype=np.float64)
+    # The numeric view shares the packed stream rather than copying a list of
+    # per-body Python tuples into a second temporary allocation.
+    data = np.frombuffer(records, dtype=np.float64).reshape((-1, _MOVEMENT_RECORD_WIDTH))
     count = len(keys)
     workspace.ensure(count)
     floats = {key: value[:count] for key, value in workspace.floats.items()}
@@ -467,6 +587,7 @@ def move_entities(simulation: Simulation) -> None:
     radii[:], speeds[:] = data[:, 6], data[:, 7]
     # Sample original centers in one batch; the solver shares this cap for all motion.
     speeds /= simulation._routes.movement_costs_at(positions)
+    formations.coordinate(simulation, entities, target_data, speeds)
     masses = floats["masses"]
     masses[:] = data[:, 10]
     moving, stationary = booleans["moving"], booleans["stationary"]
@@ -532,15 +653,28 @@ def move_entities(simulation: Simulation) -> None:
     movable = frozenset(keys)
     xs, ys, pressures = updated[:, 0].tolist(), updated[:, 1].tolist(), pressure.tolist()
     statuses = recovery_status.tolist()
-    for index, entity in enumerate(entities):
+    feedback = integers["feedback"]
+    feedback_indices = integers["feedback_indices"]
+    submissions = _movement_feedback(
+        data,
+        updated,
+        pressure,
+        recovery_status,
+        feedback,
+        feedback_indices,
+        simulation.game_map.width,
+        simulation.game_map.height,
+        simulation.MIN_PROGRESS_DISTANCE,
+    )
+    feedback_flags = feedback.tolist()
+    for index in feedback_indices[:submissions].tolist():
+        entity = entities[index]
         key = entity.entity_id
-        changed = xs[index] != entity.position.x or ys[index] != entity.position.y
-        candidate = Point(xs[index], ys[index]) if changed else entity.position
+        mask = feedback_flags[index]
+        candidate = Point(xs[index], ys[index]) if mask & _CHANGED else entity.position
         entity.collision_pressure = int(pressures[index])
-        if changed:
-            if simulation.game_map.cell_for(candidate) != simulation.game_map.cell_for(
-                entity.position
-            ):
+        if mask & _CHANGED:
+            if mask & _CELL_CHANGED:
                 simulation.occupancy.move(key, footprint_cells(entity.kind, candidate), movable)
             entity.position = candidate
         if pressures[index]:
@@ -553,7 +687,7 @@ def move_entities(simulation: Simulation) -> None:
             entity.recovery_released = False
         recovery_goal = recovery_goals[index]
         if recovery_goal is not None:
-            if candidate.distance_to(recovery_goal) > recovery_tolerances[index]:
+            if mask & _OUTSIDE_RECOVERY:
                 if entity.recovery_request_tick is None:
                     entity.recovery_request_tick = simulation.tick
             elif entity.recovery_request_tick is not None and statuses[index] != 2:
@@ -573,13 +707,9 @@ def move_entities(simulation: Simulation) -> None:
                     reason="LOCAL_OBSTACLE",
                     target=[target.x, target.y],
                 )
-        elif (
-            hypot(target.x - positions[index, 0], target.y - positions[index, 1])
-            - candidate.distance_to(target)
-            >= simulation.MIN_PROGRESS_DISTANCE
-        ):
+        elif mask & _PROGRESSED:
             simulation._movement_blocked.discard(key)
-        if candidate.distance_to(target) <= 1e-9:
+        if mask & _AT_WAYPOINT:
             entity.path.pop(0)
         if entity.progress_target != (entity.path[0] if entity.path else None):
             entity.progress_target = entity.progress_distance = None

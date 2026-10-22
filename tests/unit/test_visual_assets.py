@@ -22,6 +22,7 @@ from airts.world.units.catalog import EntityKind
 
 def test_every_kind_has_distinct_packaged_art_and_atlas_coordinates() -> None:
     assert set(APPEARANCES) == set(EntityKind)
+    assert APPEARANCES[EntityKind.TURRET].size == (1, 1)
     fingerprints = set()
     size, pixels = atlas_pixels()
     atlas = pygame.image.frombytes(pixels, size, "RGBA")

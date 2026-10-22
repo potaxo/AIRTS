@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
@@ -21,18 +22,46 @@ class VisibilityState(StrEnum):
     VISIBLE = "visible"
 
 
+class _ObservationTicks(Mapping[Cell, int]):
+    """Visible cells share one clock; only cells losing sight need a stored timestamp."""
+
+    def __init__(
+        self, visible: set[Cell], explored: set[Cell], previous: Mapping[Cell, int]
+    ) -> None:
+        self.visible = visible
+        self.explored = explored
+        self.previous = dict(previous)
+        self.tick: int | None = None
+
+    def __getitem__(self, cell: Cell) -> int:
+        if self.tick is not None and cell in self.visible:
+            return self.tick
+        return self.previous[cell]
+
+    def __iter__(self) -> Iterator[Cell]:
+        return iter(self.explored)
+
+    def __len__(self) -> int:
+        return len(self.explored)
+
+
 @dataclass(slots=True)
 class PlayerVisibility:
     width: int
     height: int
     visible: set[Cell] = field(default_factory=set)
     explored: set[Cell] = field(default_factory=set)
-    last_observed_tick: dict[Cell, int] = field(default_factory=dict)
+    last_observed_tick: Mapping[Cell, int] = field(default_factory=dict)
     _visible_row_masks: tuple[int, ...] = field(
         default_factory=tuple,
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        self.last_observed_tick = _ObservationTicks(
+            self.visible, self.explored, self.last_observed_tick
+        )
 
     def state_at(self, cell: Cell) -> VisibilityState:
         if cell in self.visible:
@@ -67,8 +96,10 @@ class PlayerVisibility:
         tick: int,
     ) -> tuple[int, int, int]:
         current_row_masks = tuple(row_masks)
+        observations = self.last_observed_tick
+        assert isinstance(observations, _ObservationTicks)
         if current_row_masks == self._visible_row_masks:
-            self.last_observed_tick.update(dict.fromkeys(self.visible, tick))
+            observations.tick = tick
             return 0, 0, 0
         newly_visible: set[Cell] = set()
         no_longer_visible: set[Cell] = set()
@@ -82,13 +113,14 @@ class PlayerVisibility:
             previous = previous_masks[y]
             newly_visible.update(_cells_for_row(y, mask & ~previous))
             no_longer_visible.update(_cells_for_row(y, previous & ~mask))
-        current = self.visible.difference(no_longer_visible)
-        current.update(newly_visible)
+        if observations.tick is not None:
+            observations.previous.update(dict.fromkeys(no_longer_visible, observations.tick))
+        self.visible.difference_update(no_longer_visible)
+        self.visible.update(newly_visible)
         self._visible_row_masks = current_row_masks
-        self.visible = current
         newly_explored = newly_visible.difference(self.explored)
-        self.explored.update(current)
-        self.last_observed_tick.update(dict.fromkeys(current, tick))
+        self.explored.update(newly_visible)
+        observations.tick = tick
         return len(newly_visible), len(newly_explored), len(no_longer_visible)
 
     def to_dict(self) -> dict[str, object]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from tests.integration.scenarios import interaction_simulation
 
 from airts.adapters.replay import capture_replay, load_replay, run_replay, save_replay
@@ -23,7 +24,8 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget, rectangle_region
 from airts.presentation.app import AirtsApp, InputMode
 from airts.simulation import Simulation
-from airts.world.map import GameMap
+from airts.world.map import GameMap, load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 def test_spatial_references_have_stable_ids_unique_names_and_edit_in_place(
@@ -148,6 +150,108 @@ def test_drag_selection_chooses_only_friendly_units_and_keeps_grounding() -> Non
     assert app.selected_regions == {region.reference_id}
     assert simulation.selection.entity_ids == ("tank", "unit")
     assert simulation.selection.region_ids == (region.reference_id,)
+
+
+@pytest.mark.parametrize("owner", ["player", "enemy"])
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (EntityKind.SCOUT, {"other"}),
+        (EntityKind.LIGHT_TANK, {"other"}),
+        (EntityKind.HEAVY_TANK, {"other"}),
+        (EntityKind.LIGHT_ARTILLERY, {"other"}),
+        (EntityKind.ARTILLERY, {"other"}),
+        (EntityKind.TANK_DESTROYER, {"other"}),
+        (EntityKind.BUILDER, {"builder", "other"}),
+        (EntityKind.TURRET, {"builder"}),
+    ],
+)
+def test_box_selection_prefers_attack_capable_units_and_keeps_unarmed_fallback(
+    owner: str, kind: EntityKind, expected: set[str]
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "combat_selection",
+                "name": "Combat selection",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "builder", "kind": "builder", "owner": owner, "position": [2.5, 2.5]},
+                    {"id": "other", "kind": kind.value, "owner": owner, "position": [5, 2]},
+                    {"id": "factory", "kind": "factory", "owner": owner, "position": [10, 2]},
+                ],
+            }
+        )
+    )
+    app = AirtsApp(simulation)
+    app._select_entities(Point(1, 1), Point(16, 8))
+
+    assert app.selected_entities == expected
+    assert set(simulation.selection.entity_ids) == (expected if owner == "player" else set())
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("additive", [False, True])
+def test_building_box_selection_replaces_or_toggles_and_keeps_grounding(
+    reverse: bool, additive: bool
+) -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
+    app.selected_entities = {"factory"}
+    start, end = Point(3, 3), Point(12, 6)
+    if reverse:
+        start, end = end, start
+
+    app._select_entities(start, end, additive=additive)
+
+    expected = {"generator"} if additive else {"factory", "generator"}
+    assert app.selected_entities == expected
+    assert set(simulation.selection.entity_ids) == expected
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (Point(1, 1), Point(18, 8), {"building"}),
+        (Point(9, 1), Point(18, 8), {"enemy_unit"}),
+        (Point(13, 1), Point(18, 8), {"enemy_building"}),
+    ],
+)
+def test_box_selection_keeps_owner_priority_and_enemy_buildings_read_only(
+    start: Point, end: Point, expected: set[str]
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "building_selection",
+                "name": "Building selection",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "building", "kind": "factory", "position": [2, 2]},
+                    {
+                        "id": "enemy_unit",
+                        "kind": "scout",
+                        "owner": "enemy",
+                        "position": [10.5, 2.5],
+                    },
+                    {
+                        "id": "enemy_building",
+                        "kind": "factory",
+                        "owner": "enemy",
+                        "position": [14, 2],
+                    },
+                ],
+            }
+        )
+    )
+    app = AirtsApp(simulation)
+    app._select_entities(start, end)
+    assert app.selected_entities == expected
+    assert simulation.selection.entity_ids == (("building",) if "building" in expected else ())
 
 
 def test_line_finishes_with_right_click_and_preserves_selected_units() -> None:

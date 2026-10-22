@@ -13,16 +13,12 @@ from airts.contracts.automations import AutomationKind, DefendParameters, target
 from airts.contracts.spatial import Point
 from airts.presentation.gpu_feedback import FeedbackView, GPUFeedback
 from airts.presentation.gpu_shapes import SHAPE_FLOATS, FloatColor, append_shape
+from airts.presentation.lobby import Lobby
 from airts.presentation.palette import (
-    ENTITY_COLORS,
-    PROGRESS_COLOR,
-    PROGRESS_TRACK,
     PROJECTILE_COLORS,
     TERRAIN_COLORS,
     Color,
-    match_color,
 )
-from airts.presentation.progress import building_progress
 from airts.presentation.projectile_effects import (
     SHELL_CORE_RADIUS,
     SHELL_RIM_RADIUS,
@@ -30,14 +26,20 @@ from airts.presentation.projectile_effects import (
     shell_visual_position,
 )
 from airts.presentation.rendering import SceneView, interaction_range, order_feedback
+from airts.presentation.ui.minimap import Minimap
+from airts.presentation.ui.saves import SavePanelState
 from airts.presentation.ui.theme import BACKGROUND
 from airts.presentation.visuals.assets import atlas_pixels
-from airts.presentation.visuals.catalog import APPEARANCES, ATLAS_COLUMNS, TILE_PIXELS
-from airts.presentation.visuals.gpu import append_entity_sprites
+from airts.presentation.visuals.catalog import ATLAS_COLUMNS, TILE_PIXELS
+from airts.presentation.visuals.gpu import (
+    ENTITY_ATTRIBUTES,
+    ENTITY_GEOMETRY_SHADER,
+    ENTITY_VERTEX_SHADER,
+    pack_entities,
+)
 from airts.presentation.visuals.terrain import DETAIL_MIN_TILE, GRID_COLOR, fragment_shader
 from airts.simulation import Simulation
 from airts.world.entities import ProjectileTrace
-from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
 
 LINE_FLOATS = 6
@@ -47,6 +49,9 @@ _INITIAL_SHAPE_BUFFER_BYTES = 256 * 1024
 _INITIAL_LINE_BUFFER_BYTES = 256 * 1024
 
 _GPU_RESOURCE_ATTRIBUTES = (
+    "_entity_vertex_array",
+    "_entity_buffer",
+    "_entity_program",
     "_overlay_texture",
     "_terrain_texture",
     "_sprite_texture",
@@ -65,27 +70,15 @@ _GPU_RESOURCE_ATTRIBUTES = (
 )
 
 
-_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
-    kind: (color[0] / 255, color[1] / 255, color[2] / 255, 1.0)
-    for kind, color in ENTITY_COLORS.items()
-}
-_LARGE_SELECTED_ENTITY_FLOAT_COLORS: dict[EntityKind, FloatColor] = {
-    kind: (
-        min(255, color[0] + 45) / 255,
-        min(255, color[1] + 45) / 255,
-        min(255, color[2] + 45) / 255,
-        1.0,
-    )
-    for kind, color in ENTITY_COLORS.items()
-}
-_ENEMY_FLOAT_COLOR: FloatColor = (218 / 255, 78 / 255, 78 / 255, 1.0)
-_LARGE_SELECTED_ENEMY_FLOAT_COLOR: FloatColor = (1.0, 123 / 255, 123 / 255, 1.0)
-
-
 class OpenGLRenderState(SceneView, FeedbackView, Protocol):
     """The UI-owned state needed to build a GPU frame without importing the application."""
 
     render_alpha: float
+    minimap: Minimap
+    settings_open: bool
+    help_open: bool
+    save_panel: SavePanelState
+    lobby: Lobby | None
 
     def previous_entity_position(self, entity_id: str) -> Point: ...
 
@@ -134,6 +127,7 @@ class OpenGLFrame:
     terrain_tile_size: float
     shape_buffer: bytes
     line_buffer: bytes
+    entity_buffer: bytes
 
 
 @dataclass(slots=True)
@@ -269,9 +263,8 @@ class OpenGLFrameBuilder:
                 )
             return self._frame
 
-        shape_buffer, shape_count, unit_count, building_count, selected_unit_count = (
-            self._build_entities(app, (0, 0), 1.0)
-        )
+        shape_buffer, shape_count = self._build_entities(app, (0, 0), 1.0)
+        entity_buffer, unit_count, building_count, selected_unit_count = pack_entities(app)
         line_buffer, line_vertex_count, path_count = self._build_paths(app, (0, 0), 1.0)
         (
             projectile_shape_buffer,
@@ -304,6 +297,7 @@ class OpenGLFrameBuilder:
             terrain_tile_size=tile_size,
             shape_buffer=shape_buffer,
             line_buffer=line_buffer,
+            entity_buffer=entity_buffer,
         )
         return self._frame
 
@@ -353,127 +347,11 @@ class OpenGLFrameBuilder:
         app: OpenGLRenderState,
         origin: tuple[int, int],
         tile_size: float,
-    ) -> tuple[bytes, int, int, int, int]:
+    ) -> tuple[bytes, int]:
         values = array("f")
         simulation = app.simulation
         selected_entities = app.selected_entities
-        large_selection = len(selected_entities) > 128
-        show_full_health_bars = not large_selection
         origin_x, origin_y = origin
-        app.facing.sync(simulation)
-        unit_radius = tile_size * 0.42
-        unit_count = 0
-        building_count = 0
-        selected_unit_count = 0
-
-        for entity_id, entity in simulation.entities.items():
-            selected = entity_id in selected_entities
-            color = (
-                _LARGE_SELECTED_ENTITY_FLOAT_COLORS[entity.kind]
-                if entity.owner_id == "player"
-                and selected
-                and large_selection
-                and entity.category is EntityCategory.UNIT
-                else _ENTITY_FLOAT_COLORS[entity.kind]
-                if entity.owner_id == "player"
-                else _LARGE_SELECTED_ENEMY_FLOAT_COLOR
-                if selected and large_selection and entity.category is EntityCategory.UNIT
-                else _ENEMY_FLOAT_COLOR
-            )
-            if simulation.game_map.match_slots:
-                color = _float_color(match_color(simulation.game_map, entity.owner_id))
-                if selected and large_selection and entity.category is EntityCategory.UNIT:
-                    color = (
-                        min(1.0, color[0] + 45 / 255),
-                        min(1.0, color[1] + 45 / 255),
-                        min(1.0, color[2] + 45 / 255),
-                        color[3],
-                    )
-            if entity.category is EntityCategory.BUILDING:
-                width, height = entity.kind.profile.footprint
-                half_width = width * tile_size / 2
-                half_height = height * tile_size / 2
-                center = (
-                    origin_x + (entity.position.x + width / 2) * tile_size,
-                    origin_y + (entity.position.y + height / 2) * tile_size,
-                )
-                previous_center = center
-                append_entity_sprites(
-                    values, entity, color, app.facing.pose(entity_id), center, center
-                )
-                if selected:
-                    append_shape(
-                        values,
-                        center=center,
-                        half_size=(half_width + 3, half_height + 3),
-                        color=(0.0, 0.0, 0.0, 0.0),
-                        circle=False,
-                        outline_width=2.0,
-                        outline_color=_float_color((255, 255, 255)),
-                    )
-                building_count += 1
-            else:
-                previous_position = app.previous_entity_position(entity_id)
-                center = (
-                    origin_x + entity.position.x * tile_size,
-                    origin_y + entity.position.y * tile_size,
-                )
-                previous_center = (
-                    origin_x + previous_position.x * tile_size,
-                    origin_y + previous_position.y * tile_size,
-                )
-                append_entity_sprites(
-                    values, entity, color, app.facing.pose(entity_id), center, previous_center
-                )
-                if (selected and not large_selection) or (
-                    entity_id == app.inspected_entity_id and not selected
-                ):
-                    append_shape(
-                        values,
-                        center=center,
-                        previous_center=previous_center,
-                        half_size=(unit_radius, unit_radius),
-                        minimum_half_size=(5.0, 5.0),
-                        pixel_padding=(3.0, 3.0),
-                        color=(0.0, 0.0, 0.0, 0.0),
-                        circle=True,
-                        outline_width=2.0,
-                        outline_color=_float_color((255, 255, 255) if selected else (255, 210, 90)),
-                    )
-                unit_count += 1
-                if selected:
-                    selected_unit_count += 1
-
-            if show_full_health_bars or entity_id == app.inspected_entity_id:
-                ratio = entity.health / entity.kind.profile.max_health
-                for fraction, health_color in ((1.0, (70, 35, 35)), (ratio, (74, 218, 111))):
-                    append_shape(
-                        values,
-                        center=center,
-                        previous_center=previous_center,
-                        half_size=(0.7, -APPEARANCES[entity.kind].size[1] / 2),
-                        minimum_half_size=(6.0, 1.5),
-                        pixel_offset=(0.0, -4.5),
-                        size_fraction=(fraction, 1.0),
-                        color=_float_color(health_color),
-                        circle=False,
-                        health_bar=True,
-                    )
-
-            if entity.category is EntityCategory.BUILDING:
-                for index, progress in enumerate(building_progress(simulation, entity)):
-                    for fraction, color_rgb in ((1.0, PROGRESS_TRACK), (progress, PROGRESS_COLOR)):
-                        append_shape(
-                            values,
-                            center=center,
-                            half_size=(0.7, APPEARANCES[entity.kind].size[1] / 2),
-                            minimum_half_size=(6.0, 1.5),
-                            pixel_offset=(0.0, 5.5 + index * 6),
-                            size_fraction=(fraction, 1.0),
-                            color=_float_color(color_rgb),
-                            circle=False,
-                            health_bar=True,
-                        )
 
         inspected = simulation.entities.get(app.inspected_entity_id or "")
         radius, work_range = interaction_range(inspected) if inspected is not None else (0.0, False)
@@ -542,9 +420,6 @@ class OpenGLFrameBuilder:
         return (
             values.tobytes(),
             len(values) // SHAPE_FLOATS,
-            unit_count,
-            building_count,
-            selected_unit_count,
         )
 
     @staticmethod
@@ -740,6 +615,9 @@ class OpenGLRenderer:
         self._overlay_program: Any = None
         self._line_program: Any = None
         self._shape_program: Any = None
+        self._entity_program: Any = None
+        self._entity_buffer: Any = None
+        self._entity_vertex_array: Any = None
         try:
             self._shape_program = context.program(
                 vertex_shader=_SHAPE_VERTEX_SHADER,
@@ -752,6 +630,11 @@ class OpenGLRenderer:
             self._overlay_program = context.program(
                 vertex_shader=_OVERLAY_VERTEX_SHADER,
                 fragment_shader=_OVERLAY_FRAGMENT_SHADER,
+            )
+            self._entity_program = context.program(
+                vertex_shader=ENTITY_VERTEX_SHADER,
+                geometry_shader=ENTITY_GEOMETRY_SHADER,
+                fragment_shader=_SHAPE_FRAGMENT_SHADER,
             )
             self._quad_buffer = context.buffer(
                 array("f", (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)).tobytes()
@@ -826,11 +709,17 @@ class OpenGLRenderer:
                 self._overlay_program,
                 [(self._overlay_quad_buffer, "2f 2f", "in_position", "in_uv")],
             )
+            self._entity_buffer = context.buffer(reserve=_INITIAL_SHAPE_BUFFER_BYTES, dynamic=True)
+            self._entity_vertex_array = context.vertex_array(
+                self._entity_program,
+                [(self._entity_buffer, "4f 4f 4f 4f 4f 4f 4f 4f", *ENTITY_ATTRIBUTES)],
+            )
             self._overlay_program["overlay_texture"].value = 0
             atlas_size, pixels = atlas_pixels()
             self._sprite_texture = context.texture(atlas_size, 4, data=pixels, alignment=1)
             self._sprite_texture.filter = module.NEAREST, module.NEAREST
             self._shape_program["sprite_texture"].value = 2
+            self._entity_program["sprite_texture"].value = 2
             self._feedback = GPUFeedback(module, context)
             context.enable(module.BLEND)
             context.blend_func = (module.SRC_ALPHA, module.ONE_MINUS_SRC_ALPHA)
@@ -925,14 +814,22 @@ class OpenGLRenderer:
                     vertices=frame.line_vertex_count,
                 )
             if frame.shape_count:
+                self._draw_entities(app, frame, framebuffer_size)
                 self._shape_vertex_array.render(
                     mode=self._module.TRIANGLE_STRIP,
                     vertices=4,
                     instances=frame.shape_count,
                 )
+            else:
+                self._draw_entities(app, frame, framebuffer_size)
             assert self._feedback is not None
-            self._feedback.draw(app, framebuffer_size)
+            self._feedback.draw(
+                app,
+                framebuffer_size,
+                interpolation_alpha=0.0 if frame.tick != app.simulation.tick else app.render_alpha,
+            )
             self._draw_overlay(app, frame)
+            self._draw_minimap(app, frame, framebuffer_size)
         except OpenGLRendererError:
             raise
         except Exception as error:
@@ -1002,7 +899,56 @@ class OpenGLRenderer:
             or frame.line_buffer is not self._uploaded_frame.line_buffer
         ):
             _replace_buffer(self._line_buffer, frame.line_buffer)
+        if (
+            self._uploaded_frame is None
+            or frame.entity_buffer is not self._uploaded_frame.entity_buffer
+        ):
+            _replace_buffer(self._entity_buffer, frame.entity_buffer)
         self._uploaded_frame = frame
+
+    def _draw_entities(
+        self, app: OpenGLRenderState, frame: OpenGLFrame, size: tuple[int, int]
+    ) -> None:
+        program = self._entity_program
+        program["viewport_size"].value = size
+        program["terrain_origin"].value = frame.terrain_origin
+        program["terrain_tile_size"].value = frame.terrain_tile_size
+        program["interpolation_alpha"].value = (
+            1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
+        )
+        program["minimap_mode"].value = 0
+        if frame.unit_count + frame.building_count:
+            self._entity_vertex_array.render(
+                mode=self._module.POINTS,
+                vertices=frame.unit_count + frame.building_count,
+            )
+
+    def _draw_minimap(
+        self, app: OpenGLRenderState, frame: OpenGLFrame, size: tuple[int, int]
+    ) -> None:
+        if app.settings_open or app.help_open or app.save_panel.open or app.lobby is not None:
+            return
+        rect = app.minimap.map_rect
+        program = self._entity_program
+        program["minimap_rect"].value = tuple(rect)
+        program["world_size"].value = (
+            app.simulation.game_map.width,
+            app.simulation.game_map.height,
+        )
+        program["minimap_viewport"].value = tuple(app.minimap.viewport_rect(app))
+        self._context.scissor = (rect.x, size[1] - rect.bottom, rect.width, rect.height)
+        try:
+            for mode in (1, 2):
+                program["minimap_mode"].value = mode
+                if frame.unit_count + frame.building_count:
+                    self._entity_vertex_array.render(
+                        mode=self._module.POINTS,
+                        vertices=frame.unit_count + frame.building_count,
+                    )
+            program["minimap_mode"].value = 3
+            self._entity_vertex_array.render(mode=self._module.POINTS, vertices=1)
+        finally:
+            self._context.scissor = None
 
     def _draw_overlay(self, app: OpenGLRenderState, frame: OpenGLFrame) -> None:
         overlay_key = (frame.framebuffer_size, app._opengl_overlay_key())
@@ -1219,6 +1165,12 @@ out vec4 fragment_color;
 
 TERRAIN_DETAIL
 void main() {
+    if (circle_shape > 4.5) {
+        if (outline_width > 0.0 && min((1.0-abs(local_position.x))*half_size.x,
+            (1.0-abs(local_position.y))*half_size.y) > outline_width) discard;
+        fragment_color = outline_width > 0.0 ? outline_color : fill_color;
+        return;
+    }
     if (circle_shape < -3.5) {
         ivec2 cell = clamp(ivec2(floor(world_position)), ivec2(0), terrain_size - ivec2(1));
         vec3 base = texelFetch(terrain_texture, cell, 0).rgb;

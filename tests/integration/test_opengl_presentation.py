@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 from array import array
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from airts.presentation.opengl_renderer import (
     OpenGLRendererError,
 )
 from airts.presentation.palette import match_color
+from airts.presentation.visuals.gpu import ENTITY_FLOATS, pack_entities
 from airts.simulation import Simulation
 from airts.world.map import GameMap, load_map_data
 
@@ -73,6 +75,10 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer(
 
     app = AirtsApp(Simulation(make_map(1)))
     renderer = Mock()
+    gc_thresholds = gc.get_threshold()
+    gc_enabled = gc.isenabled()
+    observed_thresholds = []
+    renderer.render.side_effect = lambda *_: observed_thresholds.append(gc.get_threshold())
     clock = Mock()
     clock.tick.return_value = 0
 
@@ -109,6 +115,13 @@ def test_default_runtime_submits_and_releases_the_opengl_renderer(
     flip.assert_called_once_with()
     clock.tick.assert_called_once_with(1_000)
     assert app.FRAME_RATE_LIMIT == 1_000
+    expected = (
+        max(gc_thresholds[0], app.GC_ALLOCATION_THRESHOLD) if gc_thresholds[0] else 0,
+        *gc_thresholds[1:],
+    )
+    assert observed_thresholds == [expected]
+    assert gc.get_threshold() == gc_thresholds
+    assert gc.isenabled() == gc_enabled
 
 
 def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back(
@@ -117,6 +130,7 @@ def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back(
     """Missing OpenGL capability is an actionable startup error, not hidden software rendering."""
 
     app = AirtsApp(Simulation(make_map(1)))
+    gc_thresholds = gc.get_threshold()
     with (
         patch.object(app, "_configure_opengl_video_backend"),
         patch("airts.presentation.app.pygame.display.init"),
@@ -139,6 +153,7 @@ def test_opengl_context_failure_is_diagnostic_and_never_silently_falls_back(
 
     software_draw.assert_not_called()
     flip.assert_not_called()
+    assert gc.get_threshold() == gc_thresholds
 
 
 def test_standalone_opengl_context_uses_the_platform_backend_by_default() -> None:
@@ -168,6 +183,7 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         ONE_MINUS_SRC_ALPHA=3,
         TRIANGLE_STRIP=4,
         LINES=5,
+        POINTS=8,
         LINEAR=6,
         NEAREST=7,
     )
@@ -178,15 +194,15 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         "GL_VERSION": "3.3 test",
     }
     context.version_code = 330
-    programs = [MagicMock() for _ in range(7)]
+    programs = [MagicMock() for _ in range(8)]
     uniforms: dict[str, SimpleNamespace] = {}
     programs[0].__getitem__.side_effect = lambda name: uniforms.setdefault(
         name, SimpleNamespace(value=None)
     )
     context.program.side_effect = programs
-    buffers = [MagicMock() for _ in range(10)]
+    buffers = [MagicMock() for _ in range(11)]
     context.buffer.side_effect = buffers
-    vertex_arrays = [MagicMock() for _ in range(8)]
+    vertex_arrays = [MagicMock() for _ in range(9)]
     context.vertex_array.side_effect = vertex_arrays
     texture = MagicMock()
     terrain_texture = MagicMock()
@@ -210,22 +226,27 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
         vertices=4,
         instances=frame.terrain_shape_count,
     )
-    shape_draw.render.assert_called_with(
-        mode=module.TRIANGLE_STRIP,
-        vertices=4,
-        instances=frame.shape_count,
-    )
+    if frame.shape_count:
+        shape_draw.render.assert_called_with(
+            mode=module.TRIANGLE_STRIP,
+            vertices=4,
+            instances=frame.shape_count,
+        )
+    else:
+        shape_draw.render.assert_not_called()
     line_draw.render.assert_called_with(
         mode=module.LINES,
         vertices=frame.line_vertex_count,
     )
     overlay_draw.render.assert_called_with(mode=module.TRIANGLE_STRIP, vertices=4)
     assert terrain_draw.render.call_count == 2
-    assert shape_draw.render.call_count == 2
+    assert shape_draw.render.call_count == (2 if frame.shape_count else 0)
+    assert vertex_arrays[4].render.call_count == 8  # World, two contact groups, camera rectangle.
     assert line_draw.render.call_count == 2
     assert overlay_draw.render.call_count == 2
     assert buffers[1].write.call_count == 1
-    assert buffers[2].write.call_count == 1
+    assert buffers[2].write.call_count == bool(frame.shape_buffer)
+    assert buffers[5].write.call_count == 1
     assert buffers[3].write.call_count == 1
     texture.write.assert_called_once()
     # Camera transforms change uniforms, preserving every terrain primitive and
@@ -240,9 +261,11 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert transformed.terrain_buffer is frame.terrain_buffer
     assert transformed.terrain_count == frame.terrain_count
     assert buffers[1].write.call_count == 1
-    assert buffers[2].write.call_count == 1
+    assert buffers[2].write.call_count == bool(frame.shape_buffer)
+    assert buffers[5].write.call_count == 1
     assert buffers[3].write.call_count == 1
     assert transformed.shape_buffer is frame.shape_buffer
+    assert transformed.entity_buffer is frame.entity_buffer
     assert transformed.line_buffer is frame.line_buffer
     assert programs[0]["terrain_origin"].value == app.map_origin
     assert programs[0]["terrain_tile_size"].value == app.tile_size
@@ -312,7 +335,7 @@ def test_opengl_renderer_releases_partial_resources_when_initialization_fails() 
         ONE_MINUS_SRC_ALPHA=3,
     )
     context = MagicMock()
-    programs = [MagicMock() for _ in range(3)]
+    programs = [MagicMock() for _ in range(4)]
     context.program.side_effect = programs
     buffers = [MagicMock() for _ in range(5)]
     context.buffer.side_effect = buffers
@@ -347,7 +370,7 @@ def test_opengl_frame_contains_every_native_4k_scenario_element() -> None:
     assert frame.building_count == 4
     assert frame.selected_unit_count == UNIT_COUNT
     assert 1 <= frame.path_count <= AirtsApp.MAX_SELECTED_PATHS
-    assert frame.shape_buffer
+    assert frame.entity_buffer
     assert frame.line_buffer
 
 
@@ -392,7 +415,12 @@ def test_opengl_normal_scene_preserves_full_health_bars_and_outer_selection_outl
     assert frame.unit_count == 2
     assert frame.building_count == 1
     assert frame.selected_unit_count == 1
-    assert frame.shape_count == 10  # 3 aligned sprites + 6 health rectangles + 1 outer outline
+    values = array("f")
+    values.frombytes(frame.entity_buffer)
+    records = [values[i : i + ENTITY_FLOATS] for i in range(0, len(values), ENTITY_FLOATS)]
+    assert len(records) == 3
+    assert all(row[19] == 1 for row in records)  # GPU health bars for every entity.
+    assert sum(row[22] == 1 and row[23] == 1 for row in records) == 1
 
 
 @pytest.mark.parametrize("teams", [False, True], ids=["sandbox", "team-match"])
@@ -423,17 +451,18 @@ def test_large_enemy_selection_keeps_all_units_and_highlights_them(teams: bool) 
         ]
     app = AirtsApp(Simulation(load_map_data(data)))
     app.selected_entities = {f"enemy_{i}" for i in range(130)}
-    packed, shapes, units, buildings, selected = OpenGLFrameBuilder._build_entities(app, (0, 0), 1)
-    assert shapes == units == 131  # Aligned layers share one atlas entry, including both images.
+    packed, units, buildings, selected = pack_entities(app)
+    assert units == 131
     assert buildings == 0 and selected == 130
     values = array("f")
     values.frombytes(packed)
     base = match_color(app.simulation.game_map, "enemy") if teams else (218, 78, 78)
-    expected = (*[min(255, component + 45) / 255 for component in base], 1)
+    expected = (*[component / 255 for component in base], 1)
     for i in range(130):
-        assert tuple(values[i * SHAPE_FLOATS + 14 : i * SHAPE_FLOATS + 18]) == pytest.approx(
+        assert tuple(values[i * ENTITY_FLOATS + 8 : i * ENTITY_FLOATS + 12]) == pytest.approx(
             expected
         )
+        assert values[i * ENTITY_FLOATS + 22] == -1  # GPU applies the large-selection tint.
 
 
 def test_opengl_frame_batches_live_projectile_feedback_on_the_gpu() -> None:
@@ -513,12 +542,12 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
     first = builder.build(app, DISPLAY_SIZE)
     second = builder.build(app, DISPLAY_SIZE)
     values = array("f")
-    values.frombytes(first.shape_buffer)
+    values.frombytes(first.entity_buffer)
     current_center = tuple(values[0:2])
     previous_center = tuple(values[2:4])
 
     assert first is second
-    assert len(values) % SHAPE_FLOATS == 0
+    assert len(values) % ENTITY_FLOATS == 0
     assert current_center != previous_center
     midpoint = tuple(
         previous + (current - previous) * app.render_alpha
@@ -533,19 +562,20 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
         ONE_MINUS_SRC_ALPHA=3,
         TRIANGLE_STRIP=4,
         LINES=5,
+        POINTS=8,
         LINEAR=6,
         NEAREST=7,
     )
     context = MagicMock()
-    programs = [MagicMock() for _ in range(7)]
+    programs = [MagicMock() for _ in range(8)]
     uniforms = [{} for _ in programs]
     for program, program_uniforms in zip(programs, uniforms, strict=True):
         program.__getitem__.side_effect = lambda key, values=program_uniforms: values.setdefault(
             key, SimpleNamespace(value=None)
         )
     context.program.side_effect = programs
-    context.buffer.side_effect = [MagicMock() for _ in range(10)]
-    context.vertex_array.side_effect = [MagicMock() for _ in range(8)]
+    context.buffer.side_effect = [MagicMock() for _ in range(11)]
+    context.vertex_array.side_effect = [MagicMock() for _ in range(9)]
     context.texture.return_value = MagicMock()
     renderer = OpenGLRenderer(module, context)
     try:

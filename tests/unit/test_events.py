@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tracemalloc
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -55,6 +56,7 @@ def test_path_events_retain_full_json_payload_with_bounded_live_allocation(tmp_p
     finally:
         tracemalloc.stop()
     assert retained < len(cells) * 32
+    assert event is not None
     expected = {"source": "human", "cost": 9999.0, "cells": [list(cell) for cell in cells]}
     assert event.details == expected
     # Reading/editing an inspector payload cannot mutate retained path history.
@@ -66,3 +68,14 @@ def test_path_events_retain_full_json_payload_with_bounded_live_allocation(tmp_p
     assert saved["details"] == expected
     restored = Event(1, 1, EventType.PATH_COMPUTED, "unit", saved["details"])
     assert restored.to_dict() == event.to_dict()
+
+
+def test_disabled_recording_does_not_allocate_events_or_pack_paths() -> None:
+    events = EventLog(enabled=False)
+    with (
+        patch("airts.contracts.events.Event", side_effect=AssertionError("created event")),
+        patch("airts.contracts.events.array", side_effect=AssertionError("packed path")),
+    ):
+        assert events.record(1, EventType.COMMAND_ACCEPTED, "unit") is None
+        assert events.record_path(1, "unit", source="human", cost=2, cells=((1, 1),)) is None
+    assert events.events == ()

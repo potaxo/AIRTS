@@ -4,17 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from enum import StrEnum
-from math import ceil, floor
+from math import ceil, floor, tau
 from typing import Protocol
 
 import pygame
 
-from airts.contracts.automations import (
-    AutomationStatus,
-    ConstructionParameters,
-    RepairParameters,
-    RepairPhase,
-)
 from airts.contracts.spatial import Point
 from airts.presentation.palette import (
     ENTITY_COLORS,
@@ -35,7 +29,7 @@ from airts.presentation.projectile_effects import (
     blast_circles,
     shell_visual_position,
 )
-from airts.presentation.visuals.assets import SpriteCache
+from airts.presentation.visuals.assets import SOFTWARE_DIRECTIONS, SpriteCache
 from airts.presentation.visuals.catalog import APPEARANCES, COMPOSITE_PATHS
 from airts.presentation.visuals.facing import FacingHistory
 from airts.presentation.visuals.terrain import (
@@ -44,10 +38,9 @@ from airts.presentation.visuals.terrain import (
     GRID_COLOR,
     detailed_surface,
 )
+from airts.presentation.visuals.work import tool_offset
 from airts.simulation import Simulation
-from airts.systems.construction import construction_distance
 from airts.systems.repair import building_distance
-from airts.systems.repair_positions import in_service_range
 from airts.world.entities import Entity, OrderKind, UnitState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
@@ -127,71 +120,6 @@ def interaction_range(entity: Entity) -> tuple[float, bool]:
     if profile.can_repair:
         return profile.repair_range, True
     return profile.attack_range, False
-
-
-def work_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
-    """Read active construction/repair endpoints without changing domain state."""
-    source: Entity | None
-    for worker in simulation.entities.values():
-        if not worker.profile.can_repair or not worker.is_complete:
-            continue
-        target = simulation.entities.get(worker.repair_target_id or "")
-        if (
-            target is not None
-            and target.owner_id == worker.owner_id
-            and target.health < target.kind.profile.max_health
-            and (
-                not worker.is_movable
-                and target is not worker
-                and target.is_complete
-                and worker.selection_position.distance_to(target.selection_position)
-                <= worker.profile.repair_range
-                or worker.is_movable
-                and target.category is EntityCategory.BUILDING
-                and target.is_complete
-                and worker.state is UnitState.REPAIRING
-                and not worker.path
-                and building_distance(worker.position, target) <= worker.profile.repair_range
-            )
-        ):
-            yield worker.selection_position, target.selection_position
-    for automation in simulation.live_automations:
-        parameters = automation.parameters
-        if (
-            isinstance(parameters, ConstructionParameters)
-            and automation.status is AutomationStatus.ACTIVE
-        ):
-            target = simulation.entities.get(parameters.site_entity_id or "")
-            if target is None or target.is_complete:
-                continue
-            for key in automation.entity_ids:
-                source = simulation.entities.get(key)
-                if (
-                    source is not None
-                    and simulation.assignments.get(key) == automation.automation_id
-                    and source.state is UnitState.BUILDING
-                    and construction_distance(source.position, parameters)
-                    <= source.profile.build_range
-                ):
-                    yield source.selection_position, target.selection_position
-        elif isinstance(parameters, RepairParameters):
-            for key, phase in parameters.phases.items():
-                target = simulation.entities.get(key)
-                source = simulation.entities.get(parameters.destinations.get(key, ""))
-                if (
-                    phase is RepairPhase.REPAIRING
-                    and simulation.assignments.get(key) == automation.automation_id
-                    and source is not None
-                    and target is not None
-                    and not source.profile.can_repair
-                    and source.is_complete
-                    and source.owner_id == target.owner_id
-                    and target.state is UnitState.REPAIRING
-                    and target.health < target.kind.profile.max_health
-                    and not target.path
-                    and in_service_range(simulation, target, source)
-                ):
-                    yield source.selection_position, target.selection_position
 
 
 def reclaim_links(simulation: Simulation) -> Iterator[tuple[Point, Point]]:
@@ -298,7 +226,6 @@ class SoftwareRenderer:
             )
         tile_size = view.tile_size
         origin_x, origin_y = view.map_origin
-        view.facing.sync(view.simulation)
         self._draw_cached_entities(view, screen, colors, tile_size, (origin_x, origin_y))
         inspected = view.simulation.entities.get(view.inspected_entity_id or "")
         radius, work_range = interaction_range(inspected) if inspected is not None else (0.0, False)
@@ -498,10 +425,12 @@ class SoftwareRenderer:
     def _representative_path_points(
         self, view: SceneView
     ) -> tuple[tuple[Color, tuple[tuple[int, int], ...]], ...]:
+        view.facing.sync(view.simulation)
         key: tuple[object, ...] = (
             id(view.simulation),
             view.simulation.tick,
             view.simulation.command_count,
+            len(view.simulation.entities),
             view.map_origin,
             view.tile_size,
             frozenset(view.selected_entities),
@@ -523,10 +452,22 @@ class SoftwareRenderer:
                     )
                     if len(points) >= 2:
                         paths.append((color, points))
-            paths.extend(
-                (REPAIR_COLOR, (view.screen_point(source), view.screen_point(target)))
-                for source, target in work_links(view.simulation)
-            )
+            for source, target in view.facing.work_links:
+                art = APPEARANCES[source.kind]
+                angle = view.facing.pose(source.entity_id).body
+                angle = round(angle / tau * SOFTWARE_DIRECTIONS) * tau / SOFTWARE_DIRECTIONS
+                size = tuple(max(14, round(d * tile_size)) for d in art.size)
+                dx, dy = tool_offset(source, angle, (size[0], size[1]))
+                x, y = view.screen_point(source.selection_position)
+                paths.append(
+                    (
+                        REPAIR_COLOR,
+                        (
+                            (x + round(dx), y + round(dy)),
+                            view.screen_point(target.selection_position),
+                        ),
+                    )
+                )
             paths.extend(
                 (RECLAIM_COLOR, (view.screen_point(source), view.screen_point(target)))
                 for source, target in reclaim_links(view.simulation)

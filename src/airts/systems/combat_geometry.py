@@ -5,7 +5,10 @@ from __future__ import annotations
 from math import ceil, floor, hypot, nextafter, sqrt
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from airts.contracts.spatial import Point
+from airts.world._numeric import BoolArray, FloatArray, compile_numeric
 from airts.world.entities import Entity
 
 if TYPE_CHECKING:
@@ -60,14 +63,53 @@ def firing_approach_points(
     attack_range = attacker.profile.attack_range
     outer_radius = max(0.5, attack_range - 0.25)
     inner_radius = max(0.0, outer_radius - 1.0)
-    target_cells = target.occupied_cells
-    points = tuple(
-        Point(x + 0.5, y + 0.5)
-        for y in range(floor(center.y - outer_radius), ceil(center.y + outer_radius) + 1)
-        for x in range(floor(center.x - outer_radius), ceil(center.x + outer_radius) + 1)
-        if simulation.game_map.contains_cell((x, y))
-        and simulation.game_map.is_cell_passable((x, y))
-        and (x, y) not in target_cells
-        and inner_radius <= hypot(x + 0.5 - center.x, y + 0.5 - center.y) <= outer_radius
+    width, height = target.kind.profile.footprint
+    coordinates = _firing_ring(
+        simulation._routes.obstacle_mask(frozenset()),
+        center.x,
+        center.y,
+        inner_radius,
+        outer_radius,
+        int(target.position.x),
+        int(target.position.y),
+        width,
+        height,
     )
+    points = tuple(Point(x, y) for x, y in coordinates.tolist())
     return points or simulation._interaction_points(target)
+
+
+@compile_numeric
+def _firing_ring(
+    terrain: BoolArray,
+    center_x: float,
+    center_y: float,
+    inner_radius: float,
+    outer_radius: float,
+    target_x: int,
+    target_y: int,
+    target_width: int,
+    target_height: int,
+) -> FloatArray:
+    """Filter the complete firing ring numerically, retaining row-major candidate order."""
+    left = max(0, floor(center_x - outer_radius))
+    right = min(terrain.shape[1] - 1, ceil(center_x + outer_radius))
+    top = max(0, floor(center_y - outer_radius))
+    bottom = min(terrain.shape[0] - 1, ceil(center_y + outer_radius))
+    points = np.empty(((right - left + 1) * (bottom - top + 1), 2), dtype=np.float64)
+    count = 0
+    for y in range(top, bottom + 1):
+        for x in range(left, right + 1):
+            if terrain[y, x] or (
+                target_x <= x < target_x + target_width and target_y <= y < target_y + target_height
+            ):
+                continue
+            if inner_radius <= hypot(x + 0.5 - center_x, y + 0.5 - center_y) <= outer_radius:
+                points[count, 0], points[count, 1] = x + 0.5, y + 0.5
+                count += 1
+    return points[:count]
+
+
+def warm_firing_geometry() -> None:
+    """Compile before commands/ticks rather than stalling the first pursuing army."""
+    _firing_ring(np.zeros((1, 1), dtype=np.bool_), 0.5, 0.5, 0.0, 0.5, 0, 0, 1, 1)

@@ -38,6 +38,13 @@ then choose **Begin match**. Slots can be human, AI, or closed; teams range from
 The setup requires exactly one human and at least two opposing teams. The default is a
 2-vs-2 match with one AI ally and two AI opponents. Configuration stays fixed during a match.
 
+**Debug mode (record full history)** is unchecked by default on the cover and team setup.
+Leave it off for normal play: save/load retains the current world and ongoing orders without
+accumulating event or command history. Enable it before starting or loading for full diagnostic
+recording. The choice applies to new matches and loads in this session; it is independent of
+the resource-bonus **Developer settings**. Loading with Debug off validates existing history but
+does not retain it. Existing large files still need to be read; new saves omit their old history.
+
 Each active player starts with a command center, factory, resource extractor, builder, scout,
 and funds. Expand extraction, produce an army, and use the river crossings to reach opponents.
 Red rings mark resource sites. Team colors show alliances; all units and buildings are visible,
@@ -76,8 +83,8 @@ Art locations, regeneration and replacement are documented in the
 | `Shift` + right-click with selected units | Append an order: ground gathers and moves, enemies are attacked, damaged owned buildings are repaired; each unit skips unsupported tasks and finishes its current task before the next |
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
-| Right-click ground or a friendly entity | Nearby: preserve formation; beyond 12 cells from the group center: gather and march along shared routes |
-| Double right-click ground at the same destination | Gather selected units around the destination; distant moves use the same march behavior |
+| Right-click ground or a friendly entity, once or repeatedly | Gather and move along shared routes; fire in range while continuing to the destination without combat detours; distance and click count do not change the movement mode |
+| **Keep formation** in the bottom command bar | Toggle strict formation for selected mobile units; the active border shows it is enabled |
 | Right-click an enemy, including rapid repeated clicks | Pursue and attack that entity; fire at enemies along the route, prioritize the ordered target in range, and continue queued work after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
@@ -87,10 +94,12 @@ Art locations, regeneration and replacement are documented in the
 | `Space` or Pause/Resume | Pause or resume simulation time |
 | `Esc` | Clear selection, spatial target, placement, and inspection; return to selection mode |
 
-Box selection selects your units when any are inside the box; otherwise it can inspect hostile
-units and their counts. Your entities also take precedence in combined selections. Enemy
+Box selection prefers your entities; otherwise it can inspect hostile entities and their counts.
+Within that side, units take precedence over buildings; a box containing only buildings selects them.
+Among units, those capable of attacking take precedence over unarmed units such as builders.
+Your entities also take precedence in combined selections. Enemy
 inspection exposes attributes without granting orders, construction, or production controls.
-A selection drag can end over the command bar, but only units inside the canvas are selected.
+A selection drag can end over the command bar, but only entities inside the canvas are selected.
 Click assistance applies to selection, context orders, and reclaim targeting. At distant zoom,
 nearby small targets are easier to hit and direct hits take precedence over assisted hits.
 As you zoom in, assistance fades: close views require a click inside the building footprint,
@@ -104,7 +113,7 @@ displayed body hit area. Shift queues use the same target rules.
 | `2` | Draw a route: left-click vertices, then right-click to finish |
 | `3` / `4` | Drag a rectangular area / draw a freehand area |
 | `T` / `Y` | Create a patrol / defense for selected units using the active point, route, or area |
-| `P` | Attach every selected factory's existing production loop to the active defense line or area; start a Loop on each factory first |
+| `P` / **Produce + Defend** | Save the active defense line or area for every selected factory, including unfinished or idle factories; current and later production sends new units there |
 | `N` | Name or rename exactly one selected region; type the name and press `Enter` |
 | `E` | Redraw the selected point, route, or region to replace its geometry |
 | `Delete` | Delete one selected route or region and cancel automations that use it |
@@ -126,7 +135,13 @@ switch prevents future automatic retreats and lets repairs already underway fini
 
 Direct orders override the selected units' current automation and pending construction/movement
 queues; other members keep working. Shift orders append to direct movement, attack, repair, or
-reclamation already in progress. Every Shift movement leg gathers, including nearby clicks.
+reclamation already in progress. Every Shift ground click appends a distinct move. Moves gather by
+default. **Keep formation** records the selection's current layout for subsequent direct movement,
+including queued legs: the cohort travels at its slowest member's terrain-adjusted speed, waits for
+its members before the next queued task, and restores its layout after squeezing through passages.
+The toggle persists on those units; turning it off releases coordination without clearing their jobs.
+Previously issued moves keep their destinations. Attack, building work and automations keep their own
+control rules. A strict destination must have room for the saved layout; otherwise the move is rejected.
 Successful player unit orders also prevent automatic combat support from taking over those units
 for five seconds of game time; each new order restarts this micro window. Hold units never join
 automatic support until another order replaces Hold. Units can still fire at enemies in range.
@@ -174,16 +189,22 @@ Select completed extractors or Matter Synthesizers to upgrade them from T1 to T2
 right panel. It shows current output, the next upgrade's resource cost/time, and running progress.
 Upgrades charge the single resource immediately and keep producing at the current tier until
 completion. **Cancel upgrade** refunds the full upgrade cost and loses its progress; destruction
-does not refund it. Same-type selections apply each button to its displayed tier group. Unfinished
-buildings and max-tier buildings cannot upgrade, and insufficient funds disable the action.
+does not refund it. Same-type selections apply each button to its displayed tier/progress group,
+so idle buildings can start while peers are upgrading. The upgrade button shows how many buildings
+you can afford; clicking starts the maximum affordable number at the current balance. Unfinished
+buildings and max-tier buildings cannot upgrade; the action is disabled when you cannot afford one.
 Upgrade progress and partial production cycles survive save/load. The
 [runtime contract](docs/milestones/runtime.md#entity-upgrades) owns the current balance table.
 
-Builders travel to queued blueprints and can wait for funds or occupants to move. An unstarted
+Builders travel to queued blueprints and can wait for funds or occupants to move. Friendly idle
+units without current or queued orders automatically walk out of the blueprint footprint; commanded
+units keep their orders. Blocked exits leave the blueprint waiting. An unstarted
 blueprint does not reserve money or space. Payment happens when construction begins, creating a
 physical, attackable scaffold. Multiple builders speed up the same job without duplicating its
 cost. Canceling construction leaves that scaffold; ordering construction at an unclaimed friendly
-scaffold resumes it without another charge. Unfinished buildings cannot produce, earn income,
+scaffold resumes it without another charge. Selecting builders and right-clicking an owned unfinished
+building also resumes it, even after another command interrupted its original builder.
+Unfinished buildings cannot produce, earn income,
 repair, or fire. Completed turrets automatically attack enemies in range; artillery fires slowly
 at long range.
 
@@ -192,11 +213,13 @@ at long range.
 | Input | Action |
 | --- | --- |
 | `R` | Send selected mobile units below 50% health to repair, then resume their work or return to their previous positions |
-| Builders + right-click a damaged building you own | Repair the completed building |
+| Builders + right-click a damaged or unfinished building you own | Repair it or continue its construction without another payment |
 | Builder action: **Reclaim building (70%)**, then left-click an owned building | Approach and gradually drain its health with a red beam; refund 70% of its construction price only on completion |
 | Right-click while choosing a reclaim target | Cancel target selection |
 
-A completed repair hub automatically heals one other mobile unit or completed building of the same owner at a time within its radius, excluding buildings being reclaimed.
+A completed repair hub automatically heals one other mobile unit or building of the same owner at a time within its radius, excluding buildings being reclaimed. It can finish an existing unfinished
+building, but cannot place or start blueprints. Select the hub and right-click an in-range building to
+choose its service target.
 Select the hub to see that radius. Thick green lines connect builders to buildings while constructing
 or repairing, and repair facilities to units or buildings while healing, even without selection. Builders work
 within the build/repair ranges shown in their details, without needing to touch the building.
@@ -245,6 +268,8 @@ For maps without match slots, ambient enemy spawning defaults to one unit per se
 of 100; a zero interval or cap disables it. Team matches use AI production instead. Loaded saves
 and replays keep their recorded spawn settings; CLI spawn options do not override them.
 `--max-frames N` exits after N rendered frames.
+`--debug` enables full history for direct startup. `--event-log`, `--write-replay`, and `--replay`
+also enable it. Ordinary startup, including `--load-state`, defaults to recording off.
 In a sandbox, `F2` resets the startup map, seed, and spawn settings instead of opening team setup.
 
 CLI exports happen after normal window exit and use the currently displayed simulation, including

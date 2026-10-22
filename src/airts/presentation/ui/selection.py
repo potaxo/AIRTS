@@ -294,6 +294,20 @@ def _draw_contents(view: SelectionView, screen: pygame.Surface) -> int:
                     (bar.x, bar.y, round(bar.width * min(progress)), bar.height),
                 )
             y += height + row_gap
+        if detail_kind is EntityKind.FACTORY:
+            deployed = sum(
+                view.simulation.entities[factory_id].production_deployment is not None
+                for factory_id in factories
+            )
+            if deployed:
+                view.ui.small_text(
+                    screen, f"Deployment set: {deployed}/{len(factories)}", (x, y), theme.SUCCESS
+                )
+                y += 24
+                rectangle = pygame.Rect(x, y, panel.width - 24, row_height)
+                view.ui.button(screen, rectangle, "Clear deployment")
+                view._command_buttons.append((rectangle, "clear_production_defense"))
+                y += row_height + row_gap
         if view.production_detail_kind in detail_kind.production_kinds:
             y = draw_unit_details(view, screen, view.production_detail_kind, x, y + 12)
     elif profile.income_per_second:
@@ -308,7 +322,7 @@ def _draw_contents(view: SelectionView, screen: pygame.Surface) -> int:
             theme.SUCCESS,
         )
         view.ui.small_text(
-            screen, "Repairs units and completed buildings", (x, y + 20), theme.MUTED
+            screen, "Repairs units and finishes existing buildings", (x, y + 20), theme.MUTED
         )
         y += 40
     elif profile.attack_damage:
@@ -379,10 +393,14 @@ def draw_upgrade_controls(
             )
             y += 12
         else:
-            total_cost = definition.cost * len(members)
-            label = f"Upgrade T{tier + 1}: {total_cost} | {definition.duration_ticks / Simulation.TICKS_PER_SECOND:g}s"
+            affordable = min(
+                len(members), view.simulation.resources.get(entity.owner_id, 0) // definition.cost
+            )
+            total_cost = definition.cost * max(1, affordable)
+            count = f" x{affordable}/{len(members)}" if affordable else ""
+            label = f"Upgrade T{tier + 1}{count}: {total_cost} | {definition.duration_ticks / Simulation.TICKS_PER_SECOND:g}s"
             operation = "upgrade"
-            enabled = view.simulation.resources.get(entity.owner_id, 0) >= total_cost
+            enabled = affordable > 0
             if not enabled:
                 label += " (need resources)"
         if read_only:
@@ -391,7 +409,10 @@ def draw_upgrade_controls(
         view.ui.button(screen, rectangle, label, enabled=enabled)
         if enabled:
             view._command_buttons.append(
-                (rectangle, f"{operation}:" + json.dumps([item.entity_id for item in members]))
+                (
+                    rectangle,
+                    f"{operation}:" + json.dumps(sorted(item.entity_id for item in members)),
+                )
             )
         y += 34
     return y

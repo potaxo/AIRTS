@@ -10,8 +10,8 @@ from airts.contracts.commands import Command, command_from_dict, command_to_dict
 from airts.simulation import Simulation
 from airts.world.map import GameMap, MapValidationError, load_map_data
 
-REPLAY_SCHEMA = "airts-replay-v36"
-MATCH_REPLAY_SCHEMA = "airts-match-replay-v38"
+REPLAY_SCHEMA = "airts-replay-v41"
+MATCH_REPLAY_SCHEMA = "airts-match-replay-v44"
 
 
 class ReplayError(ValueError):
@@ -56,6 +56,8 @@ class ReplayData:
 
 
 def capture_replay(simulation: Simulation) -> ReplayData:
+    if not simulation.events.enabled:
+        raise ReplayError("replay export requires Debug mode with history recording enabled")
     commands = tuple(
         RecordedCommand(
             tick=_integer(entry.get("tick"), "recorded command tick", minimum=0),
@@ -77,8 +79,9 @@ def capture_replay(simulation: Simulation) -> ReplayData:
 
 
 def save_replay(simulation: Simulation, path: str | Path) -> None:
+    data = capture_replay(simulation)
     with Path(path).open("w", encoding="utf-8") as stream:
-        json.dump(capture_replay(simulation).to_dict(), stream, indent=2, sort_keys=True)
+        json.dump(data.to_dict(), stream, indent=2, sort_keys=True)
         stream.write("\n")
 
 

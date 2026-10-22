@@ -201,13 +201,7 @@ class RoutingService:
             or self.game_map.cell_for(start) in blocked
         ):
             return False
-        regions = self._connected_regions.get(blocked)
-        if regions is None:
-            regions = _label_regions(self.obstacle_mask(blocked))
-            self._connected_regions[blocked] = regions
-            if len(self._connected_regions) > min(self.maximum_fields, 4):
-                self._connected_regions.popitem(last=False)
-        self._connected_regions.move_to_end(blocked)
+        regions = self._connection_regions(blocked)
         x, y = self.game_map.cell_for(start)
         region = regions[y, x]
         for goal in goals:
@@ -216,6 +210,42 @@ class RoutingService:
                 if regions[gy, gx] == region:
                     return True
         return False
+
+    def can_reach_many(
+        self, starts: FloatArray, goals: tuple[Point, ...], blocked: frozenset[Cell]
+    ) -> BoolArray:
+        """Exact static connectivity for a group sharing one set of destinations."""
+        if starts.ndim != 2 or starts.shape[1] != 2:
+            raise ValueError("connectivity starts must have x and y columns")
+        result = np.zeros(len(starts), dtype=np.bool_)
+        if not len(starts) or not goals:
+            return result
+        regions = self._connection_regions(blocked)
+        goal_regions = {
+            int(regions[int(p.y), int(p.x)]) for p in goals if self.game_map.contains(p)
+        }
+        goal_regions.discard(-1)
+        if not goal_regions:
+            return result
+        valid = (
+            (starts[:, 0] >= 0)
+            & (starts[:, 0] < self.game_map.width)
+            & (starts[:, 1] >= 0)
+            & (starts[:, 1] < self.game_map.height)
+        )
+        cells = starts[valid].astype(np.int64)
+        result[valid] = np.isin(regions[cells[:, 1], cells[:, 0]], tuple(goal_regions))
+        return result
+
+    def _connection_regions(self, blocked: frozenset[Cell]) -> IntArray:
+        regions = self._connected_regions.get(blocked)
+        if regions is None:
+            regions = _label_regions(self.obstacle_mask(blocked))
+            self._connected_regions[blocked] = regions
+            if len(self._connected_regions) > min(self.maximum_fields, 4):
+                self._connected_regions.popitem(last=False)
+        self._connected_regions.move_to_end(blocked)
+        return regions
 
     def validate_connection(self, start: Point, goal: Point, blocked: frozenset[Cell]) -> None:
         """Validate a route without allocating an unused full path."""

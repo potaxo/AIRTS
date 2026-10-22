@@ -20,7 +20,7 @@ REPAIR_HUB = EntityProfile(
     footprint=(3, 3),
     collision_radius=0.5,
     construction_cost=250,
-    repair_range=6.0,
+    repair_range=9.0,
     repair_rate=5,
 )
 

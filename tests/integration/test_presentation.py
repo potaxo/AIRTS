@@ -41,6 +41,19 @@ from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
 
 
+def test_commands_refresh_paused_render_caches_without_recording_history() -> None:
+    simulation = Simulation(runtime_map(), record_history=False)
+    app = AirtsApp(simulation)
+    app.paused = True
+    previous = app._opengl_overlay_key()
+    app.selected_entities = {"unit_01"}
+    app._handle_key(pygame.K_h)
+    assert simulation.command_count > 0
+    assert app._opengl_overlay_key() != previous
+    assert not simulation.command_history
+    assert not simulation.events.events
+
+
 @pytest.mark.parametrize("health", [49, 50, 51], ids=["below-half", "exactly-half", "above-half"])
 def test_repair_shortcut_only_sends_selected_units_below_half_health(health: int) -> None:
     simulation = Simulation(runtime_map())
@@ -357,7 +370,7 @@ def test_selection_drag_finishes_over_command_bar_without_activating_commands() 
             assert any(call.args[1] == (245, 245, 245) for call in rectangles.call_args_list)
             app._handle_mouse_up(1, end)
         assert app.drag_start is None
-        assert app.selected_entities == {"builder", "builder_2", "scout", "tank"}
+        assert app.selected_entities == {"scout", "tank"}
         assert set(app.simulation.selection.entity_ids) == app.selected_entities
         assert app.simulation.command_count == before + 1
         # A completed drag must not turn the next ordinary click into another box.
@@ -472,10 +485,33 @@ def test_visible_pause_button_stops_ticks_and_space_resumes_without_catchup(spee
     ):
         app.run(max_frames=3)
     assert ticks[:2] == [0, 0]
-    assert max(1, int(2 * speed)) <= ticks[2] <= int(2.5 * speed)
+    assert ticks[2] == 1  # One complete tick, then present/input even at accelerated speed.
     assert not app.paused
     assert app.simulation.resources["player"] == before + (ticks[2] // 10) * income
     assert app.simulation.developer_income_ticks == ticks[2] % 10
+
+
+def test_slow_frames_retain_tick_debt_but_yield_between_steps_and_pause_clears_it() -> None:
+    app = AirtsApp(interaction_simulation())
+    app._advance_simulation_frame(0.25)
+    assert app.simulation.tick == 1 and app.render_alpha == 1
+    app._advance_simulation_frame(0)
+    assert app.simulation.tick == 2
+    assert app.render_alpha == pytest.approx(0.5)
+    app.paused = True
+    app._advance_simulation_frame(1)
+    app.paused = False
+    app._advance_simulation_frame(0)
+    assert app.simulation.tick == 2 and app.render_alpha == 0
+    app.game_speed = 4
+    app._advance_simulation_frame(0.2)
+    assert app.simulation.tick == 3
+    for _ in range(6):
+        app._advance_simulation_frame(0)
+    assert app.simulation.tick == 9  # Accelerated time was retained, not discarded.
+    app._reset_presentation_history()
+    app._advance_simulation_frame(0)
+    assert app.simulation.tick == 9  # A replacement world must not inherit another game's debt.
 
 
 @pytest.mark.parametrize("size", [(1280, 720), AirtsApp.WINDOW_SIZE, (3840, 2160)])
@@ -699,6 +735,11 @@ def test_enemy_box_counts_visible_hostiles_and_keeps_commands_player_only(
         with patch("airts.presentation.app.pygame.key.get_mods", return_value=0):
             app._handle_mouse_down(1, start)
             app._handle_mouse_up(1, end)
+        assert app.selected_entities == {"scout_1", "scout_2"}
+        assert app.simulation.selection.entity_ids == ()
+        # Explicit Shift-click can still add an unarmed unit to a mixed inspection.
+        builder = app.simulation.entities["builder"].selection_position
+        app._select_entities(builder, builder, additive=True)
         assert app.selected_entities == {"scout_1", "scout_2", "builder"}
         assert app.simulation.selection.entity_ids == ()
         surface = pygame.Surface(app.window_size)
@@ -793,17 +834,16 @@ def test_double_click_enemy_selects_same_kind_and_owner_in_canvas(
 
 
 @pytest.mark.parametrize(
-    ("delay_ms", "offset_pixels", "change_selection", "gathering"),
+    ("offset_pixels", "change_selection"),
     [
-        pytest.param(200, 0, False, True, id="same-target"),
-        pytest.param(400, 4, False, True, id="small-pointer-jitter"),
-        pytest.param(401, 0, False, False, id="too-slow"),
-        pytest.param(200, 20, False, False, id="different-target"),
-        pytest.param(200, 0, True, False, id="different-selection"),
+        pytest.param(0, False, id="same-target"),
+        pytest.param(4, False, id="nearby-target"),
+        pytest.param(20, False, id="different-target"),
+        pytest.param(0, True, id="different-selection"),
     ],
 )
-def test_right_click_records_automatic_move_and_double_click_requests_gathering(
-    delay_ms: int, offset_pixels: int, change_selection: bool, gathering: bool
+def test_every_right_click_records_an_independent_gathering_move(
+    offset_pixels: int, change_selection: bool
 ) -> None:
     app = AirtsApp(builder_factory_simulation())
     app.selected_entities = {"builder", "builder_2"}
@@ -811,12 +851,12 @@ def test_right_click_records_automatic_move_and_double_click_requests_gathering(
     screen = app.screen_point(target)
     origin_x, origin_y = app.map_origin
     local = (screen[0] - origin_x, screen[1] - origin_y)
-    with patch("airts.presentation.app.pygame.time.get_ticks", side_effect=(1000, 1000 + delay_ms)):
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=0):
         app._handle_mouse_down(3, local)
         first = app.simulation.command_history[-1]["command"]
         assert isinstance(first, dict)
         assert first["type"] == "move"
-        assert not first.get("gathering", False)
+        assert "gathering" not in first
         if change_selection:
             app.selected_entities = {"builder"}
             app._selection_changed()
@@ -824,9 +864,10 @@ def test_right_click_records_automatic_move_and_double_click_requests_gathering(
     second = app.simulation.command_history[-1]["command"]
     assert isinstance(second, dict)
     assert second["type"] == "move"
-    assert second.get("gathering", False) is gathering
-    if gathering:
-        assert second["target"] == first["target"]
+    assert "gathering" not in second
+    goals = [app.simulation.entities[key].move_target for key in app.selected_entities]
+    if len(goals) > 1:
+        assert goals[0].distance_to(goals[1]) < 2
 
 
 def test_double_right_click_on_enemy_keeps_tracking_attack() -> None:
@@ -892,7 +933,7 @@ def test_shift_right_click_queues_context_orders_without_changing_selection(
         ["attack"] * 3 if repeat_target else ["move", "attack", "move"]
     )
     assert all(command["queued"] for command in commands)
-    assert all(command.get("gathering") for command in commands if command["type"] == "move")
+    assert all("gathering" not in command for command in commands if command["type"] == "move")
     assert all(
         len(app.simulation.entities[key].order_queue) == (3 if repeat_target else 2)
         for key in app.selected_entities
@@ -936,7 +977,7 @@ def test_right_click_on_friendly_is_not_stolen_by_a_nearby_enemy(friendly_id: st
         second = app.simulation.command_history[-1]["command"]
         assert isinstance(second, dict)
         assert second["type"] == "move"
-        assert second["gathering"] is True
+        assert "gathering" not in second
     entity = app.simulation.entities["tank"]
     assert entity.move_target is not None
     assert position_clear(

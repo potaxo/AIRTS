@@ -263,6 +263,28 @@ def test_reclaim_validation_preserves_current_order(
     assert simulation.entities["builder"].path == path
 
 
+def test_single_cell_turrets_allow_adjacent_construction_and_restore_occupancy() -> None:
+    simulation = world()
+    for builder, x in (("builder", 4), ("builder2", 5)):
+        assert simulation.execute(
+            CreateConstructionCommand(builder, EntityKind.TURRET, Point(x, 5))
+        ).accepted
+    simulation.advance()
+    loaded = restored(simulation)
+    for current in (simulation, loaded):
+        turrets = [
+            entity for entity in current.entities.values() if entity.kind is EntityKind.TURRET
+        ]
+        assert {entity.occupied_cells for entity in turrets} == {
+            frozenset({(4, 5)}),
+            frozenset({(5, 5)}),
+        }
+        assert {entity.selection_position for entity in turrets} == {
+            Point(4.5, 5.5),
+            Point(5.5, 5.5),
+        }
+
+
 def test_reclaim_paid_scaffold_frees_occupancy_and_fails_its_job() -> None:
     simulation = world()
     before = simulation.resources["player"]
@@ -409,7 +431,7 @@ def test_factory_produces_artillery_and_turret_is_stationary_armed_only_when_com
                         "id": "enemy",
                         "kind": "command_center",
                         "owner": "enemy",
-                        "position": [27, 10],
+                        "position": [26, 10],
                     },
                 ],
             }
@@ -503,10 +525,11 @@ def test_shift_drag_previews_then_enqueues_spaced_buildings_and_skips_invalid_si
     assert app.building_line_draft is not None
     before_preview = app.simulation.export_state()
     previews = app._construction_previews(None)
-    assert [point for point, valid in previews if valid] == [
-        Point(x, 10) for x in (8, 10, 16, 18, 20)
+    valid_x = (8, 9, 10, 11, 16, 17, 18, 19, 20)
+    assert [point for point, valid in previews if valid] == [Point(x, 10) for x in valid_x]
+    assert [point for point, valid in previews if not valid] == [
+        Point(x, 10) for x in (12, 13, 14, 15)
     ]
-    assert [point for point, valid in previews if not valid] == [Point(x, 10) for x in (12, 14)]
     app._draw_construction(pygame.Surface(app.window_size))
     assert app.simulation.export_state() == before_preview
     app._handle_mouse_up(1, end)
@@ -518,10 +541,10 @@ def test_shift_drag_previews_then_enqueues_spaced_buildings_and_skips_invalid_si
     assert [
         a.parameters.position
         for a in sorted(jobs, key=lambda a: int(a.automation_id.removeprefix("automation_")))
-    ] == [Point(x, 10) for x in (8, 10, 16, 18, 20)]
-    assert "Skipped 2" in app.notice
+    ] == [Point(x, 10) for x in valid_x]
+    assert "Skipped 4" in app.notice
     assert app.placement_kind is EntityKind.TURRET
-    assert sum(a.reason_code == "BUILDERS_QUEUED" for a in jobs) == 4
+    assert sum(a.reason_code == "BUILDERS_QUEUED" for a in jobs) == 8
 
 
 @pytest.mark.parametrize("motion_cancel", [False, True])

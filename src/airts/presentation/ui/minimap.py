@@ -20,9 +20,14 @@ from airts.world.units.schema import EntityCategory
 
 
 class MinimapView(Protocol):
-    simulation: Simulation
-    canvas_rect: pygame.Rect
-    selected_entities: set[str]
+    @property
+    def simulation(self) -> Simulation: ...
+
+    @property
+    def canvas_rect(self) -> pygame.Rect: ...
+
+    @property
+    def selected_entities(self) -> set[str]: ...
 
     @property
     def map_origin(self) -> tuple[int, int]: ...
@@ -101,7 +106,7 @@ class Minimap:
             max(1, ceil(bottom * sy) - floor(top * sy)),
         ).clip(self.map_rect)
 
-    def draw(self, view: MinimapView, screen: pygame.Surface) -> None:
+    def draw(self, view: MinimapView, screen: pygame.Surface, *, contacts: bool = True) -> None:
         game_map = view.simulation.game_map
         if self._game_map is not game_map:
             self._game_map = game_map
@@ -117,11 +122,12 @@ class Minimap:
             self._contacts_key = None
         key = (
             id(view.simulation),
-            view.simulation.tick,
-            view.simulation.command_count,
-            len(view.simulation.entities),
-            frozenset(view.selected_entities),
+            view.simulation.tick if contacts else None,
+            view.simulation.command_count if contacts else None,
+            len(view.simulation.entities) if contacts else None,
+            frozenset(view.selected_entities) if contacts else None,
             tuple(self.map_rect),
+            contacts,
         )
         if key != self._contacts_key:
             self._contacts = self._scaled_terrain.copy()
@@ -135,11 +141,13 @@ class Minimap:
                     2,
                     1,
                 )
-            self._draw_contacts(view)
+            if contacts:
+                self._draw_contacts(view)
         assert self._contacts is not None
         screen.blit(self._contacts, self.map_rect)
         pygame.draw.rect(screen, theme.EDGE, self.map_rect.inflate(2, 2), 1)
-        pygame.draw.rect(screen, theme.TEXT, self.viewport_rect(view), 1)
+        if contacts:
+            pygame.draw.rect(screen, theme.TEXT, self.viewport_rect(view), 1)
 
     def _draw_contacts(self, view: MinimapView) -> None:
         """Stamp contacts in bulk; cache membership/colors separately from moving centers."""

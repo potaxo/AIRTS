@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from random import Random
 
+import numpy as np
 import pytest
 
 from airts.contracts.spatial import Point
@@ -99,6 +100,8 @@ def test_broadphase_matches_brute_force_after_bucket_crossings(
         for point, radius in queries
     )
     assert index.nearest_many(queries) == expected_nearest
+    packed = np.asarray([(point.x, point.y, radius) for point, radius in queries])
+    assert index.nearest_many_array(packed) == expected_nearest
     expected = tuple(
         (first, second)
         for first in sorted(positions)

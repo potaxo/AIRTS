@@ -9,7 +9,8 @@ frame staging, latency and workload gates. Production/selection portraits are no
 - [world/units](../../src/airts/world/units/catalog.py) owns gameplay profiles, collision, mass,
   prices and production relationships. It imports no presentation or image code.
 - [visuals/catalog.py](../../src/airts/presentation/visuals/catalog.py) explicitly maps every
-  entity kind to its body/optional weapon PNG and displayed size in world units. A drawing's
+  entity kind to its body/optional weapon PNG, displayed size in world units and optional work-tool
+  port relative to the centered source image. A drawing's
   size does not alter footprint, movement, collision radius or mass.
 - [data/sprites](../../src/airts/data/sprites) contains shipped art, grouped as
   `units/<kind>/body.png`, `units/<kind>/weapon.png` and `buildings/<kind>/...`.
@@ -111,6 +112,14 @@ voluntary path movement, including its final step; a parked body's collision dis
 rotate it. Stopping retains the last heading. Armed mobile weapons aim at their current target;
 fixed turret bodies remain still while their weapons turn. With no target an aligned weapon follows
 its body; an independently aimed weapon returns toward it.
+
+Builders turn their integrated claw and body toward the building they are actively repairing or
+constructing in range. Both renderers use the same read-only
+[work connections](../../src/airts/presentation/visuals/work.py) for facing and green beams.
+Builder beams start at the claw opening, following the displayed rotation and minimum sprite size;
+stationary repair sources retain their center origin. OpenGL interpolates the tool port with the
+sprite using cached endpoints, so turning and camera changes do not rebuild beam geometry each
+frame. Completion, removal or cancellation clears the beam and retains the current idle heading.
 
 Visual turning is bounded per simulation tick, uses the shortest angular arc and retains adjacent
 unwrapped endpoints for GPU interpolation. Facing records are reused, synchronize once per changed

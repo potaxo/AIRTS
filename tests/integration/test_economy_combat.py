@@ -37,6 +37,7 @@ from airts.contracts.commands import (
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PointTarget, PolylineTarget
 from airts.navigation.collision.geometry import collision_radius
+from airts.navigation.pathfinding import RouteDeferred
 from airts.simulation import Simulation
 from airts.systems import automation_runtime
 from airts.world.entities import Projectile, UnitState
@@ -76,19 +77,93 @@ def test_support_requires_an_actual_shot_and_preserves_builder_and_auxiliary_exc
     assert simulation.entities["support"].pursue_target
 
 
-@pytest.mark.parametrize("order", ["idle", "move", "patrol", "defend"])
+@pytest.mark.parametrize("owner", ["player", "ai"])
+@pytest.mark.parametrize("queued", [False, True])
+def test_move_fires_in_passing_without_support_detours_and_finishes_fifo(
+    owner: str, queued: bool, tmp_path: Path
+) -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "move_priority",
+                "name": "Move priority",
+                "width": 40,
+                "height": 70,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "support", "kind": "scout", "owner": owner, "position": [5.5, 65.5]},
+                    {"id": "shooter", "kind": "scout", "owner": owner, "position": [12.5, 10.5]},
+                    {"id": "enemy", "kind": "factory", "owner": "enemy", "position": [15, 10]},
+                    {"id": "passing", "kind": "factory", "owner": "enemy", "position": [8, 37]},
+                ],
+            }
+        )
+    )
+    destination = Point(5.5, 1.5)
+    first = Point(5.5, 6.5) if queued else destination
+    assert simulation.execute(MoveCommand(("support",), first, owner)).accepted
+    if queued:
+        assert simulation.execute(
+            MoveCommand(("support",), destination, owner, queued=True)
+        ).accepted
+    simulation.advance(80)
+    assert simulation.tick > Simulation.COMBAT_SUPPORT_MANUAL_COOLDOWN_TICKS
+    assert simulation.events.query(
+        event_types=frozenset({EventType.PROJECTILE_LAUNCHED}), subject_id="support"
+    )
+    save_simulation(simulation, tmp_path / "moving.json")
+    loaded = load_simulation(tmp_path / "moving.json")
+    for world in (simulation, loaded):
+        for _ in range(48):
+            previous = world.entities["support"].position
+            world.advance()
+            unit = world.entities["support"]
+            assert unit.position.x == previous.x
+            assert unit.position.y == pytest.approx(previous.y - 0.5)
+            assert not unit.pursue_target
+        assert unit.position == destination
+        assert not unit.path and not unit.order_queue
+        assert world.events.query(
+            event_types=frozenset({EventType.PROJECTILE_LAUNCHED}), subject_id="shooter"
+        )
+        assert not world.events.query(
+            event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}), subject_id="support"
+        )
+    assert simulation.export_state() == loaded.export_state()
+    assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
+
+
+def test_deferred_move_queue_keeps_control_while_waiting_for_route_admission() -> None:
+    simulation = support_world()
+    support = simulation.entities["support"]
+    destination = Point(5.5, 24.5)
+    assert simulation._execute_command(
+        MoveCommand(("support",), Point(5.5, 11)), record=False
+    ).accepted
+    assert simulation._execute_command(
+        MoveCommand(("support",), destination, queued=True), record=False
+    ).accepted
+    with patch("airts.systems.movement.plan_group_paths", side_effect=RouteDeferred):
+        simulation.advance(12)
+        assert not support.path
+        assert len(support.order_queue) == 1
+        assert not support.pursue_target
+        assert not simulation.events.query(
+            event_types=frozenset({EventType.COMBAT_SUPPORT_JOINED}), subject_id="support"
+        )
+    simulation.advance(40)
+    assert support.position == destination
+    assert not support.path and not support.order_queue
+
+
+@pytest.mark.parametrize("order", ["idle", "patrol", "defend"])
 def test_actual_shot_enlists_nearby_combat_units_and_preserves_their_work(
     order: str, tmp_path: Path
 ) -> None:
     simulation = support_world()
     support = simulation.entities["support"]
-    destination = Point(5.5, 24.5)
     assert simulation.execute(HoldPositionCommand(("held",))).accepted
-    if order == "move":
-        assert simulation._execute_command(
-            MoveCommand(("support",), destination), record=False
-        ).accepted
-    elif order == "patrol":
+    if order == "patrol":
         assert simulation._execute_command(
             CreatePatrolCommand(
                 ("support",), PolylineTarget((Point(5.5, 10.5), Point(22.5, 10.5)))
@@ -115,8 +190,6 @@ def test_actual_shot_enlists_nearby_combat_units_and_preserves_their_work(
     for world in (simulation, loaded):
         assert world.remove_entity("enemy").accepted
         world.advance(120)
-    if order == "move":
-        assert support.position == destination
     assert simulation.export_state() == loaded.export_state()
     if order == "idle":
         assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()

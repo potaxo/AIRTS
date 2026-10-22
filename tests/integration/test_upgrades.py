@@ -320,6 +320,95 @@ def test_same_upgrade_execution_supports_a_mobile_kind_without_replacing_its_ord
     assert entity.move_target == Point(35.5, 8.5)
 
 
+@pytest.mark.parametrize("kind", [EntityKind.RESOURCE_GENERATOR, EntityKind.MATTER_SYNTHESIZER])
+@pytest.mark.parametrize("tier", [1, 2])
+@pytest.mark.parametrize("affordable", [0, 1, 2, 3])
+def test_box_selected_buildings_upgrade_affordable_idle_members_while_peers_are_running(
+    kind: EntityKind, tier: int, affordable: int
+) -> None:
+    world = Simulation(
+        load_map_data(
+            {
+                "id": "batch_upgrades",
+                "name": "Batch upgrades",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": f"income_{index}", "kind": kind.value, "position": [2 + index * 4, 2]}
+                    for index in range(4)
+                ],
+            }
+        )
+    )
+    definition = kind.upgrades[tier - 1]
+    for entity in world.entities.values():
+        entity.upgrade.tier = tier
+    world.resources["player"] = definition.cost
+    assert world.execute(UpgradeEntityCommand("income_0")).accepted
+    running = world.entities["income_0"]
+    running.upgrade.remaining_ticks -= 7
+    world.resources["player"] = definition.cost * affordable + 17
+    app = AirtsApp(world)
+    app._select_entities(Point(1, 1), Point(18, 6))
+    assert app.selected_entities == set(world.entities)
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
+    screen = pygame.Surface(app.window_size)
+
+    def draw() -> list[pygame.Rect]:
+        app._command_buttons.clear()
+        selection.draw_selection(app, screen)
+        return [rect for rect, action in app._command_buttons if action.startswith("upgrade:")]
+
+    buttons = draw()
+    assert len(buttons) == bool(affordable)
+    assert any(action.startswith("cancel_upgrade:") for _, action in app._command_buttons)
+    if affordable:
+        app._handle_command_click(buttons[0].center)
+        assert app.notice == f"Upgrade started: {affordable}."
+    assert world.resources["player"] == 17
+    assert running.upgrade.remaining_ticks == definition.duration_ticks - 7
+    assert [world.entities[f"income_{index}"].upgrade.remaining_ticks for index in range(1, 4)] == [
+        definition.duration_ticks if index <= affordable else 0 for index in range(1, 4)
+    ]
+    if affordable < 3:
+        # A second click can start the remaining peers without canceling paid upgrades.
+        world.resources["player"] = definition.cost * (3 - affordable)
+        app._handle_command_click(draw()[0].center)
+        assert world.resources["player"] == 0
+        assert running.upgrade.remaining_ticks == definition.duration_ticks - 7
+        assert all(entity.upgrade.remaining_ticks for entity in world.entities.values())
+
+
+@pytest.mark.parametrize("balance_at_click", [0, 120, 240])
+def test_batch_upgrade_uses_live_balance_after_buttons_were_drawn(balance_at_click: int) -> None:
+    world = upgrade_world()
+    second = replace(world.entities["extractor"], entity_id="second", position=Point(4, 2))
+    second.upgrade = type(second.upgrade)()
+    world.entities["second"] = second
+    world.occupancy.place(second.entity_id, second.occupied_cells)
+    world.resources["player"] = 120
+    app = AirtsApp(world)
+    app.selected_entities = {"extractor", "second"}
+    app._selection_changed()
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
+    selection.draw_selection(app, pygame.Surface(app.window_size))
+    button = next(rect for rect, action in app._command_buttons if action.startswith("upgrade:"))
+
+    world.resources["player"] = balance_at_click
+    app._handle_command_click(button.center)
+
+    assert sum(entity.upgrade.remaining_ticks > 0 for entity in world.entities.values()) == (
+        balance_at_click // 120
+    )
+    assert world.resources["player"] == 0
+    assert app.notice == f"Upgrade started: {balance_at_click // 120}."
+
+
 def test_mixed_tier_selection_controls_only_the_matching_group_and_enemies_are_read_only() -> None:
     world = upgrade_world()
     second = replace(world.entities["extractor"], entity_id="second", position=Point(4, 2))

@@ -109,8 +109,18 @@ class SpatialIndex:
             raise ValueError("radius cannot be negative")
         if not self._positions or not queries:
             return (None,) * len(queries)
-        keys, positions, heads, links = self._nearest_index_data()
         query_array = np.asarray([(p.x, p.y, r) for p, r in queries], dtype=np.float64)
+        return self.nearest_many_array(query_array)
+
+    def nearest_many_array(self, query_array: FloatArray) -> tuple[str | None, ...]:
+        """Reuse one packed query batch across several candidate snapshots."""
+        if query_array.ndim != 2 or query_array.shape[1] != 3:
+            raise ValueError("nearest queries must have x, y and radius columns")
+        if np.any(query_array[:, 2] < 0):
+            raise ValueError("radius cannot be negative")
+        if not self._positions or not len(query_array):
+            return (None,) * len(query_array)
+        keys, positions, heads, links = self._nearest_index_data()
         results = _nearest_many(
             query_array, positions, heads, links, self.bucket_size, self._bounds
         )

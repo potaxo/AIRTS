@@ -5,6 +5,8 @@ from __future__ import annotations
 from math import ceil, isclose
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from airts.contracts.automations import (
     AutomationKind,
     AutomationStatus,
@@ -23,7 +25,6 @@ from airts.world.entities import (
     OrderKind,
     Projectile,
     ProjectileTrace,
-    UnitOrder,
     UnitState,
 )
 
@@ -50,6 +51,7 @@ def drive_combat(simulation: Simulation) -> None:
     }
     nearest_enemies: dict[str, str] = {}
     approach_cache: dict[tuple[str, float], tuple[Point, ...]] = {}
+    route_groups: dict[tuple[str, float], list[str]] = {}
     pending_routes: list[str] = []
     blocked_routes: set[str] = set()
     interaction_cache: dict[str, frozenset[tuple[int, int]]] = {}
@@ -92,21 +94,17 @@ def drive_combat(simulation: Simulation) -> None:
                 and simulation.game_map.cell_for(entity.position)
                 not in _interaction_cells(simulation, target, interaction_cache)
             ):
-                goals = _approach_points(simulation, entity, target, approach_cache)
-                if simulation._routes.can_reach_any(
-                    entity.position, goals, simulation._building_cells()
-                ):
-                    pending_routes.append(key)
-                else:
-                    blocked_routes.add(key)
+                route_groups.setdefault((target.entity_id, profile.attack_range), []).append(key)
             armed.append(key)
             query_list.append((positions[key], profile.attack_range))
-        armed_ids, queries = tuple(armed), tuple(query_list)
+        if not armed:
+            continue
+        queries = np.asarray([(p.x, p.y, radius) for p, radius in query_list], dtype=np.float64)
         for other_id in sorted(owner_indexes):
             if not simulation.are_hostile(other_id, owner_id):
                 continue
-            candidates = owner_indexes[other_id].nearest_many(queries)
-            for key, candidate in zip(armed_ids, candidates, strict=True):
+            candidates = owner_indexes[other_id].nearest_many_array(queries)
+            for key, candidate in zip(armed, candidates, strict=True):
                 if candidate is None:
                     continue
                 previous = nearest_enemies.get(key)
@@ -115,6 +113,20 @@ def drive_combat(simulation: Simulation) -> None:
                     candidate,
                 ) < (_squared_distance(positions[key], positions[previous]), previous):
                     nearest_enemies[key] = candidate
+    for (target_id, _), members in route_groups.items():
+        goals = _approach_points(
+            simulation,
+            simulation.entities[members[0]],
+            simulation.entities[target_id],
+            approach_cache,
+        )
+        starts = np.asarray([(positions[key].x, positions[key].y) for key in members])
+        reachable = simulation._routes.can_reach_many(starts, goals, simulation._building_cells())
+        for key, can_reach in zip(members, reachable, strict=True):
+            if can_reach:
+                pending_routes.append(key)
+            else:
+                blocked_routes.add(key)
     # Admission rotates independently of the stable firing/event order. Static
     # failures never consume route allowance; connectivity is derived and exact
     # even after save/load or cache eviction.
@@ -288,11 +300,7 @@ def _join_nearby_combat(
                 and entity.kind.profile.combat_support
                 and entity.is_complete
                 and not entity.pursue_target
-                and (
-                    entity.path
-                    or not entity.order_queue
-                    or entity.order_queue[0].kind is not OrderKind.ATTACK
-                )
+                and entity.formation_leg is None
                 and entity.hold_anchor is None
                 and (
                     entity.last_player_control_tick is None
@@ -308,6 +316,17 @@ def _join_nearby_combat(
                         AutomationKind.DEFEND,
                     }:
                         continue
+                elif (
+                    entity.path
+                    or entity.move_target is not None
+                    or entity.order_queue
+                    or entity.repair_target_id is not None
+                    or entity.reclaim_target_id is not None
+                ):
+                    # Finite work keeps control for its entire lifetime, including
+                    # deferred FIFO dispatch. This applies to every control source;
+                    # passive in-range fire above never changes its locomotion.
+                    continue
                 eligible.append(key)
         ids = tuple(eligible)
         if not ids:
@@ -345,8 +364,6 @@ def _join_nearby_combat(
                     entity.clear_recovery_request()
                 else:
                     continue
-            elif entity.move_target is not None:
-                entity.order_queue.insert(0, UnitOrder(OrderKind.MOVE, entity.move_target))
             entity.path.clear()
             entity.move_target = None
             entity.attack_target_id = target.entity_id
