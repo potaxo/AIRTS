@@ -1375,6 +1375,11 @@ class AirtsApp:
         )
         self.notice = f"Created {result.automation_id}." if result.accepted else result.reason
         if result.accepted:
+            assert result.automation_id is not None
+            self.selected_entities.difference_update(
+                self.simulation.automations[result.automation_id].entity_ids
+            )
+            self._selection_changed()
             self.automation_panel.selected_id = result.automation_id
             self.automation_panel.group = None
 
@@ -1574,18 +1579,17 @@ class AirtsApp:
                 return
             if action == "formation":
                 formation_ids = tuple(
-                    e.entity_id for e in self._selected_entities_for_draw() if e.is_movable
+                    e.entity_id
+                    for e in self._selected_entities_for_draw()
+                    if e.is_movable and e.owner_id == "player"
                 )
-                enabled = not all(
+                enabled = not any(
                     self.simulation.entities[key].formation_group is not None
                     for key in formation_ids
                 )
                 result = self.simulation.execute(SetFormationCommand(formation_ids, enabled))
-                self.notice = (
-                    f"Keep formation {'ON' if enabled else 'OFF'}."
-                    if result.accepted
-                    else result.reason
-                )
+                if not result.accepted:
+                    self.notice = result.reason
                 return
             if action == "saves":
                 self._open_save_manager()
@@ -1651,25 +1655,35 @@ class AirtsApp:
                 operation, _, ids = action.partition(":")
                 selected = {entity.entity_id for entity in self._selected_entities_for_draw()}
                 results = []
+                queued = 0
                 for entity_id in json.loads(ids):
                     if entity_id not in selected:
                         continue
                     entity = self.simulation.entities[entity_id]
                     if (
                         operation == "upgrade"
-                        and (definition := entity.next_upgrade) is not None
+                        and (definition := entity.next_upgrade_to_queue) is not None
                         and self.simulation.resources.get("player", 0) < definition.cost
                     ):
                         continue
+                    queued_before = entity.upgrade.queued_count
                     results.append(
                         self.simulation.execute(
-                            UpgradeEntityCommand(entity_id)
+                            UpgradeEntityCommand(entity_id, queued=True)
                             if operation == "upgrade"
                             else CancelUpgradeCommand(entity_id)
                         )
                     )
+                    if (
+                        operation == "upgrade"
+                        and results[-1].accepted
+                        and entity.upgrade.queued_count > queued_before
+                    ):
+                        queued += 1
                 accepted = sum(result.accepted for result in results)
                 self.notice = f"{'Upgrade started' if operation == 'upgrade' else 'Upgrade canceled; refunded'}: {accepted}."
+                if queued:
+                    self.notice = f"Upgrade queued: {queued}; started: {accepted - queued}."
                 if any(not result.accepted for result in results):
                     self.notice += " " + next(
                         result.reason for result in results if not result.accepted
@@ -1683,20 +1697,21 @@ class AirtsApp:
                 operation, _, unit_name = action.partition(":")
                 kind = EntityKind(unit_name)
                 loops = (
-                    tuple(
-                        job
+                    {
+                        factory_id: job
                         for factory_id in factories
                         if (job := self.simulation.continuous_production(factory_id)) is not None
                         and isinstance(job.parameters, ProductionParameters)
                         and job.parameters.unit_kind is kind
-                    )
+                    }
                     if operation == "loop"
-                    else ()
+                    else {}
                 )
-                if loops:
+                cancel_loops = len(loops) == len(factories)
+                if cancel_loops:
                     results = [
                         self.simulation.execute(CancelAutomationCommand(job.automation_id))
-                        for job in loops
+                        for job in loops.values()
                     ]
                     requested = len(loops)
                 else:
@@ -1713,15 +1728,16 @@ class AirtsApp:
                             )
                         )
                         for factory_id in factories
+                        if operation != "loop" or factory_id not in loops
                     ]
-                    requested = len(factories)
+                    requested = len(results)
                 accepted = sum(result.accepted for result in results)
                 source_label = (
                     "factories" if self.inspected_kind is EntityKind.FACTORY else "command centers"
                 )
                 action_label = (
                     "Continuous production canceled"
-                    if loops
+                    if cancel_loops
                     else {
                         "loop": "Continuous production started",
                         "reduce": "Production reduced",
@@ -1736,7 +1752,7 @@ class AirtsApp:
                 if accepted:
                     self.automation_panel.selected_id = (
                         None
-                        if loops
+                        if cancel_loops
                         else next(
                             result.automation_id for result in reversed(results) if result.accepted
                         )
@@ -2480,20 +2496,18 @@ class AirtsApp:
             return
         bar = self.command_bar_rect
         theme.panel(screen, bar)
-        self.ui.small_text(
-            screen,
-            "Commands \u2014 unavailable actions are omitted",
-            (bar.x + 14, bar.y + 9),
-            theme.MUTED,
-        )
         actions: list[tuple[str, str]] = []
         selected = self._selected_entities_for_draw()
         if selected and all(
             entity.owner_id == "player" and entity.is_movable for entity in selected
         ):
-            actions.extend([("stop", "Stop"), ("hold", "Hold"), ("formation", "Keep formation")])
+            actions.extend([("stop", "Stop"), ("hold", "Hold")])
             if self.active_target is not None:
                 actions.extend([("patrol", "Patrol"), ("defend", "Defend")])
+        formation_members = [e for e in selected if e.owner_id == "player" and e.is_movable]
+        formation_enabled = any(e.formation_group is not None for e in formation_members)
+        if formation_members:
+            actions.append(("formation", f"Keep formation: {'ON' if formation_enabled else 'OFF'}"))
         factories = [
             entity
             for entity in selected
@@ -2510,7 +2524,7 @@ class AirtsApp:
         for action, label in actions:
             width = max(78, len(label) * 9 + 18)
             rectangle = pygame.Rect(x, y, width, 30)
-            active = action == "formation" and all(e.formation_group is not None for e in selected)
+            active = action == "formation" and formation_enabled
             self.ui.button(screen, rectangle, label, active=active)
             self._command_buttons.append((rectangle, action))
             x += width + 9

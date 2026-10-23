@@ -19,6 +19,8 @@ cohort; unmarked members gather normally. Joint destinations that overlap across
 atomically with `FORMATION_COHORTS_OVERLAP`; enabling one cohort for the selection resolves conflicting
 layouts. Disabling or recapturing a cohort preserves existing jobs
 and destinations but removes their previous coordination metadata; only future moves use the new mode.
+An ongoing explicit attack enrolls immediately when enabled; disabling at any time releases its
+coordination without replacing the attack target or FIFO.
 
 `systems/formations.py` coordinates these direct moves through the existing movement writer. All
 active members use the minimum terrain-adjusted step. Clear final approaches steer toward common
@@ -30,14 +32,25 @@ A completed strict leg waits for its cohort, including displaced arrived members
 its FIFO tail, including repeated identical destinations. Membership and speed caps derive from live
 units, so deaths/subset overrides cannot leave a dead leader or speed limit behind. Existing routing
 allowances and collision certificates remain authoritative. Automatic combat support cannot replace
-an active strict move; in-range opportunistic firing remains available. Explicit attacks, repair,
-construction and automation control clear active movement coordination without disabling the setting.
+an active strict move; in-range opportunistic firing remains available. Explicit attacks replace the
+movement leg with a coordinated pursuit leg. Repair, construction and automation control clear active
+movement coordination without disabling the setting.
 Queued moves use preceding movement goals as their source geometry; a preceding target order
 instead validates from the unit's current reachable component. Validation does not allocate per-slot
 search fields. Dispatching a queued leg first checks the same cheap direct segment as initial
 group planning; obstacles or slower terrain require the weighted field instead. Mobile units
 are local colliders, not whole-cell static walls; occupied destinations
 may wait. Groups share an approach route before branching.
+
+Strict attacks reuse cohort offsets, minimum terrain-adjusted speed and narrow-passage coordination.
+Combat chooses a translated firing station for the front rank using a bounded set of whole-cohort
+placements; rear ranks outside range retain their slots instead of surrounding the target. Tracking
+refreshes when the target leaves that station's weapon envelope. Routes share a goal and consume the
+existing combat/global route and queued-search allowances. The cohort waits for pending member
+admission before advancing, including FIFO attacks. In-range members may shoot while the formation
+settles; individual weapon range does not stop their approach. Failure retains the target with a
+`formation_attack` path diagnostic. Target destruction releases the next task, or retains the firing
+layout when no task remains. Turning formation off immediately restores ordinary independent pursuit.
 
 Queued movement also meters search work by expanded cells. An admitted search completes before
 further cold searches wait for the next tick; settled cached routes and direct segments remain

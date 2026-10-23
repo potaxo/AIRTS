@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pygame
 import pytest
@@ -37,7 +38,7 @@ from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, PolylineTarget, rectangle_region
 from airts.navigation.collision.geometry import collision_radius
 from airts.presentation.app import AirtsApp
-from airts.presentation.ui import automations
+from airts.presentation.ui import automations, selection
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
@@ -622,7 +623,7 @@ def test_loop_button_cancels_suspended_loops_and_preserves_finite_orders(state: 
 
 @pytest.mark.parametrize("other_kind", [None, EntityKind.SCOUT, EntityKind.HEAVY_TANK])
 @pytest.mark.parametrize("select_second", [False, True], ids=["unselected", "selected"])
-def test_lit_loop_only_cancels_selected_matching_sources_and_unlit_loop_starts_selection(
+def test_loop_fills_mixed_selection_and_only_cancels_when_all_selected_sources_match(
     other_kind: EntityKind | None, select_second: bool
 ) -> None:
     app = AirtsApp(builder_factory_simulation())
@@ -635,23 +636,82 @@ def test_lit_loop_only_cancels_selected_matching_sources_and_unlit_loop_starts_s
         ).accepted
     app.selected_entities = {"factory", "factory_2"} if select_second else {"factory"}
     app._selection_changed()
-    button = pygame.Rect(10, 10, 80, 30)
-    app._command_buttons = [(button, "loop:scout")]
+    app.simulation.advance(7)
+    first = app.simulation.continuous_production("factory")
+    assert first is not None
+    first_before = first.to_dict()
+    balance = app.simulation.resources["player"]
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
+    surface = pygame.Surface(app.window_size)
+
+    def draw_loop_button(*, active: bool) -> pygame.Rect:
+        app._command_buttons.clear()
+        with patch.object(app.ui, "button", wraps=app.ui.button) as buttons:
+            selection.draw_selection(app, surface)
+        rectangle = next(rect for rect, action in app._command_buttons if action == "loop:scout")
+        drawn = next(call for call in buttons.call_args_list if call.args[1] == rectangle)
+        assert drawn.kwargs["active"] is active
+        return rectangle
+
+    all_matching = not select_second or other_kind is EntityKind.SCOUT
+    button = draw_loop_button(active=all_matching)
     previous = app.simulation.continuous_production("factory_2")
     app._handle_command_click(button.center)
-    assert app.simulation.continuous_production("factory") is None
-    if select_second and other_kind is EntityKind.SCOUT:
-        assert app.simulation.continuous_production("factory_2") is None
+    if all_matching:
+        assert all(
+            app.simulation.continuous_production(key) is None for key in app.selected_entities
+        )
     else:
+        assert app.simulation.continuous_production("factory") is first
+        assert first.to_dict() == first_before  # Keep the already paid unit and its progress.
+        second = app.simulation.continuous_production("factory_2")
+        assert second is not None and isinstance(second.parameters, ProductionParameters)
+        assert second.parameters.unit_kind is EntityKind.SCOUT
+        if previous is not None:
+            assert previous.status is AutomationStatus.CANCELED
+    assert app.simulation.resources["player"] == balance
+    if not select_second:
         assert app.simulation.continuous_production("factory_2") is previous
-    assert len(app.simulation.automations) == (1 if other_kind is None else 2)
+    button = draw_loop_button(active=not all_matching)
     app._handle_command_click(button.center)
     for factory in app.selected_entities:
         loop = app.simulation.continuous_production(factory)
-        assert loop is not None and isinstance(loop.parameters, ProductionParameters)
-        assert loop.parameters.unit_kind is EntityKind.SCOUT
+        if all_matching:
+            assert loop is not None and isinstance(loop.parameters, ProductionParameters)
+            assert loop.parameters.unit_kind is EntityKind.SCOUT
+        else:
+            assert loop is None
     if not select_second:
         assert app.simulation.continuous_production("factory_2") is previous
+
+
+def test_filling_mixed_loop_selection_preserves_preempting_finite_production() -> None:
+    app = AirtsApp(builder_factory_simulation())
+    world = app.simulation
+    loop_result = world.execute(
+        CreateProductionCommand("factory", EntityKind.SCOUT, 1, continuous=True)
+    )
+    world.advance(7)
+    finite = world.execute(CreateProductionCommand("factory", EntityKind.BUILDER, 2))
+    world.advance(3)
+    loop = world.automations[loop_result.automation_id or ""]
+    loop_before = loop.to_dict()
+    finite_before = world.automations[finite.automation_id or ""].to_dict()
+    app.selected_entities = {"factory", "factory_2"}
+    app._selection_changed()
+    button = pygame.Rect(10, 10, 80, 30)
+    app._command_buttons = [(button, "loop:scout")]
+
+    app._handle_command_click(button.center)
+
+    assert loop.to_dict() == loop_before
+    assert world.automations[finite.automation_id or ""].to_dict() == finite_before
+    assert world.assignments["factory"] == finite.automation_id
+    second = world.continuous_production("factory_2")
+    assert second is not None and isinstance(second.parameters, ProductionParameters)
+    assert second.parameters.unit_kind is EntityKind.SCOUT
 
 
 def test_factory_plus_starts_immediately_and_minus_removes_newest_request() -> None:

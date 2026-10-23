@@ -84,7 +84,7 @@ Art locations, regeneration and replacement are documented in the
 | Double-click your entity | Select all of your entities of that type currently inside the canvas |
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
 | Right-click ground or a friendly entity, once or repeatedly | Gather and move along shared routes; fire in range while continuing to the destination without combat detours; distance and click count do not change the movement mode |
-| **Keep formation** in the bottom command bar | Toggle strict formation for selected mobile units; the active border shows it is enabled |
+| **Keep formation: ON/OFF** in the bottom command bar | Toggle strict movement and attack formation; click ON to cancel at any time, including during pursuit or with buildings mixed into the selection |
 | Right-click an enemy, including rapid repeated clicks | Pursue and attack that entity; fire at enemies along the route, prioritize the ordered target in range, and continue queued work after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
@@ -136,12 +136,14 @@ switch prevents future automatic retreats and lets repairs already underway fini
 Direct orders override the selected units' current automation and pending construction/movement
 queues; other members keep working. Shift orders append to direct movement, attack, repair, or
 reclamation already in progress. Every Shift ground click appends a distinct move. Moves gather by
-default. **Keep formation** records the selection's current layout for subsequent direct movement,
-including queued legs: the cohort travels at its slowest member's terrain-adjusted speed, waits for
+default. **Keep formation: ON/OFF** records the selection's current layout for direct movement and
+attacks, including queued legs: the cohort travels at its slowest member's terrain-adjusted speed, waits for
 its members before the next queued task, and restores its layout after squeezing through passages.
 The toggle persists on those units; turning it off releases coordination without clearing their jobs.
-Previously issued moves keep their destinations. Attack, building work and automations keep their own
-control rules. A strict destination must have room for the saved layout; otherwise the move is rejected.
+Previously issued moves keep their destinations; enabling during pursuit coordinates the current
+attack immediately. The cohort approaches as a formation and holds firing positions; rear ranks
+outside weapon range retain their slots. Building work and automations keep their own control rules.
+A strict destination must have room for the saved layout; otherwise the move is rejected.
 Successful player unit orders also prevent automatic combat support from taking over those units
 for five seconds of game time; each new order restarts this micro window. Hold units never join
 automatic support until another order replaces Hold. Units can still fire at enemies in range.
@@ -158,11 +160,13 @@ produce builders. Select one or more sources of the same type and use the right 
 | Unit name | Show that unit's attributes and production cost |
 | `+` | Add one unit to each selected source's finite production queue |
 | `-` | Remove one unfinished unit of that kind from the newest matching finite order on each source |
-| `Loop` | Start continuous production of that kind on each selected source; click the lit button again to cancel that kind's loops on the selected sources |
+| `Loop` | Enable continuous production of that kind across the selection; when every selected source already has that Loop, click again to cancel them all |
 
 Finite orders run in queue order before the loop resumes. A new Loop replaces the previous loop.
-With mixed selections, clicking a lit Loop cancels matching loops and leaves other sources alone;
-clicking an unlit Loop starts that kind on all selected sources. Finite orders remain queued.
+The Loop button is lit only when every selected source already has a loop for that kind.
+With mixed selections, clicking Loop adds it to sources that lack it, replacing loops for other kinds;
+matching loops retain their current progress. Only when every selected source already matches does
+clicking Loop cancel them all. Finite orders remain queued.
 Production waits when funds or exit space are unavailable. Canceling a paid unit discards its
 progress without a refund.
 
@@ -185,15 +189,19 @@ center snaps placement to it. Completed extractors earn income automatically. Ma
 can be built on ordinary valid terrain and provide a more expensive, lower-output alternative.
 There is no manual gathering or income activation step.
 
-Select completed extractors or Matter Synthesizers to upgrade them from T1 to T2 and T3 in the
+Select extractors or Matter Synthesizers to upgrade them from T1 to T2 and T3 in the
 right panel. It shows current output, the next upgrade's resource cost/time, and running progress.
 Upgrades charge the single resource immediately and keep producing at the current tier until
-completion. **Cancel upgrade** refunds the full upgrade cost and loses its progress; destruction
-does not refund it. Same-type selections apply each button to its displayed tier/progress group,
+completion. Unfinished buildings can queue upgrades: payment is reserved immediately, and upgrades
+start automatically after construction completes, including completion through builder or hub repair.
+The panel shows waiting tasks; you can queue T2 and T3 in order, including the next tier while an
+upgrade runs. **Cancel upgrades** clears the running and queued upgrades, refunds their full paid
+cost and loses their progress; destruction does not refund it.
+Same-type selections apply each button to its displayed tier/progress/queue group,
 so idle buildings can start while peers are upgrading. The upgrade button shows how many buildings
-you can afford; clicking starts the maximum affordable number at the current balance. Unfinished
-buildings and max-tier buildings cannot upgrade; the action is disabled when you cannot afford one.
-Upgrade progress and partial production cycles survive save/load. The
+you can afford; clicking queues or starts the maximum affordable number at the current balance.
+Max-tier buildings have no further upgrades; the action is disabled when you cannot afford one.
+Upgrade queues, progress and partial production cycles survive save/load. The
 [runtime contract](docs/milestones/runtime.md#entity-upgrades) owns the current balance table.
 
 Builders travel to queued blueprints and can wait for funds or occupants to move. Friendly idle
@@ -212,7 +220,7 @@ at long range.
 
 | Input | Action |
 | --- | --- |
-| `R` | Send selected mobile units below 50% health to repair, then resume their work or return to their previous positions |
+| `R` | Send selected mobile units below 50% health to repair and deselect those dispatched; other units remain selected. Repaired units resume their work or return to their previous positions |
 | Builders + right-click a damaged or unfinished building you own | Repair it or continue its construction without another payment |
 | Builder action: **Reclaim building (70%)**, then left-click an owned building | Approach and gradually drain its health with a red beam; refund 70% of its construction price only on completion |
 | Right-click while choosing a reclaim target | Cancel target selection |

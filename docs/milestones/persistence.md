@@ -92,10 +92,17 @@ diagnostic, without automatic migration.
 
 | Input | Current handling |
 | --- | --- |
-| Sandbox save v30 | Current write/read format |
-| Match save v24 | Current write/read format |
-| Sandbox replay v41 / match replay v44 | Current diagnostic formats and exact verification |
+| Sandbox save v32 | Current write/read format |
+| Match save v26 | Current write/read format |
+| Sandbox replay v43 / match replay v47 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
+
+Upgrade state includes a required nonnegative paid queue count. Running plus queued transitions
+cannot exceed configured tiers. An unfinished building may retain paid queued upgrades at T1 with
+no running timer; construction completion unlocks execution without another payment. The new state
+and explicit queue command semantics require new save/replay tags, with previous formats rejected
+without migration. Both waiting and running queues retain current-format continuation and replay
+verification.
 
 Factories now retain optional production deployment independently of construction and queues:
 the line/area, auto-repair setting and shared defense link survive restoration before or after the
@@ -174,10 +181,15 @@ Strict direct formations add required nullable membership, relative-offset, acti
 fields to entities, and goal/leg-ID metadata to queued moves. The leg identity separates repeated
 destinations for cohort completion barriers. Loading validates mobile membership, one owner per
 cohort, finite bounded offsets, paired goal/leg fields, coherent translated destinations, consistent
-cohort goals and conflicts with active work. Current saves retain these offsets through narrow
+cohort goals, consistent pursuit targets and conflicts with active work. Current saves retain these offsets through narrow
 passages; per-tick cohort grouping and speed/steering arrays rebuild after load. The new authoritative
 shape rejects older save/replay tags without migration. Ordinary Move no longer serializes a
 `gathering` option; movement intent comes from the explicit formation setting and recorded leg.
+Explicit pursuit now shares this active goal/leg metadata with movement; a formation leg may pursue
+only a retained explicit attack target, while repair/reclaim/Hold conflicts remain invalid. FIFO
+attacks join the live cohort leg through the command boundary; derived routing and admission state
+rebuild after load. The expanded active-leg semantics reject earlier save/replay tags without
+migration. Current-format mid-pursuit continuation and exact replay diagnostics remain supported.
 
 Current replays retain external commands and expectations. AI decisions and automatic repair commands
 are regenerated from authoritative state instead of being recorded as duplicate external inputs.
@@ -222,6 +234,14 @@ production reuse existing construction/production automations, budget timestamps
 memory. They add no save fields: current saves restore ongoing finite work, manual pauses and
 standing production before entering the new policy. Changed internal AI orders advance only the
 match replay tag; sandbox replay is unchanged by this AI policy update.
+
+Five-army coordination likewise reuses existing cohort fields. `target_id` keeps the regional
+strategic objective during local combat; an attacking cohort's `destination` can retain the fixed
+local engagement anchor. Entity pursuit/path state still owns actual execution. Field-army
+membership, cached objectives and scheduling cursors rebuild from live saved cohorts and positions;
+they are neither serialized nor authoritative. Current saves retain per-unit missions and actual
+orders, though rebuilt organizational identities and later decisions may differ. Only the match
+replay tag changes for this policy update; current save and sandbox replay tags are unchanged.
 
 ## Save execution and management
 

@@ -31,10 +31,11 @@ class UnitState(StrEnum):
 
 @dataclass(slots=True)
 class UpgradeState:
-    """Reusable per-entity upgrade progress; a running transition is already paid."""
+    """Per-entity upgrade progress; running and queued transitions are already paid."""
 
     tier: int = 1
     remaining_ticks: int = 0
+    queued_count: int = 0
 
 
 @dataclass(slots=True)
@@ -143,6 +144,13 @@ class Entity:
         return self.kind.upgrades[index] if index < len(self.kind.upgrades) else None
 
     @property
+    def next_upgrade_to_queue(self) -> UpgradeDefinition | None:
+        index = (
+            self.upgrade.tier - 1 + bool(self.upgrade.remaining_ticks) + self.upgrade.queued_count
+        )
+        return self.kind.upgrades[index] if index < len(self.kind.upgrades) else None
+
+    @property
     def is_complete(self) -> bool:
         return self.construction_progress is None
 
@@ -193,6 +201,7 @@ class Entity:
             "upgrade": {
                 "tier": self.upgrade.tier,
                 "remaining_ticks": self.upgrade.remaining_ticks,
+                "queued_count": self.upgrade.queued_count,
             },
             "state": self.state.value,
             "move_target": (

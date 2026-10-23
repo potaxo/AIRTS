@@ -16,9 +16,9 @@ from airts.contracts.automations import (
 from airts.contracts.commands import RemoveEntityCommand
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, distance_to_target
-from airts.navigation.pathfinding import PathfindingError
+from airts.navigation.pathfinding import PathfindingError, RouteDeferred
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems import automation_execution, combat_geometry, movement
+from airts.systems import automation_execution, combat_geometry, formations, movement
 from airts.world.entities import (
     SHELL_BLAST_TICKS,
     Entity,
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 def drive_combat(simulation: Simulation) -> None:
     """Acquire deterministic targets and launch projectiles for armed entities."""
 
+    _drive_formation_attacks(simulation)
     positions_by_owner: dict[str, dict[str, Point]] = {}
     for entity_id, entity in simulation.entities.items():
         positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = entity.selection_position
@@ -80,6 +81,7 @@ def drive_combat(simulation: Simulation) -> None:
                 continue
             if (
                 entity.pursue_target
+                and entity.formation_leg is None
                 and target is not None
                 and simulation.are_hostile(target.owner_id, owner_id)
                 and (
@@ -179,6 +181,7 @@ def drive_combat(simulation: Simulation) -> None:
             ordered_target_distance_squared = None
         if (
             attacker.pursue_target
+            and attacker.formation_leg is None
             and ordered_target is not None
             and ordered_target_distance_squared is not None
             and ordered_target_distance_squared <= attack_range_squared
@@ -268,6 +271,105 @@ def drive_combat(simulation: Simulation) -> None:
             position=[projectile.position.x, projectile.position.y],
         )
     _join_nearby_combat(simulation, positions_by_owner, positions, fired)
+
+
+def _drive_formation_attacks(simulation: Simulation) -> None:
+    groups: dict[tuple[str, str], list[Entity]] = {}
+    for entity in simulation.entities.values():
+        if entity.formation_leg is not None and entity.pursue_target:
+            assert entity.formation_group is not None and entity.attack_target_id is not None
+            groups.setdefault((entity.formation_group, entity.attack_target_id), []).append(entity)
+    if not groups:
+        return
+    allowance = simulation._routes.automation_allowance(
+        simulation.COMBAT_PATH_BUDGET, search_limit=8_192
+    )
+    ordered = sorted(groups.items())
+    offset = simulation.tick % len(ordered)
+    for (_, target_id), members in ordered[offset:] + ordered[:offset]:
+        target = simulation.entities.get(target_id)
+        if target is None:
+            continue
+        goal = members[0].formation_goal
+        assert goal is not None
+        # Keep a valid firing station until the target leaves its weapon envelope.
+        # Refresh moving-target routes no more often than ordinary pursuit does.
+        can_fire = any(
+            formations.slot(e).distance_to(target.selection_position) <= e.profile.attack_range
+            for e in members
+        )
+        if not can_fire and (
+            not any(e.path for e in members)
+            or max(e.route_ticks for e in members) >= simulation.TICKS_PER_SECOND
+        ):
+            try:
+                goal = formations.attack_goal(simulation, members, target)
+            except PathfindingError as error:
+                for entity in members:
+                    if entity.state is not UnitState.WAITING:
+                        simulation.events.record(
+                            simulation.tick,
+                            EventType.PATHFINDING_FAILED,
+                            entity.entity_id,
+                            operation="formation_attack",
+                            reason=str(error),
+                            target_id=target_id,
+                        )
+                    entity.path.clear()
+                    entity.move_target = None
+                    movement.reset_movement_liveness(entity)
+                    entity.state = UnitState.WAITING
+                continue
+            if goal != members[0].formation_goal:
+                for entity in members:
+                    entity.formation_goal = goal
+                    entity.path.clear()
+                    entity.move_target = None
+                    movement.reset_movement_liveness(entity)
+        pending = []
+        for entity in members:
+            if not entity.path:
+                if entity.position.distance_to(formations.slot(entity)) > 0.04:
+                    pending.append(entity)
+                else:
+                    entity.state = UnitState.ATTACKING
+        if pending:
+            offset = simulation.tick % len(pending)
+            pending = pending[offset:] + pending[:offset]
+        for entity in pending:
+            if not allowance.available or not simulation._routes.claim_combat_route():
+                break
+            assert entity.formation_offset is not None
+            destination = Point(
+                goal.x + entity.formation_offset.x, goal.y + entity.formation_offset.y
+            )
+            try:
+                route = movement.plan_group_paths(
+                    simulation,
+                    (entity.entity_id,),
+                    {entity.entity_id: destination},
+                    shared_goal=goal,
+                    compact_approach=False,
+                    allowance=allowance,
+                )[entity.entity_id]
+            except RouteDeferred:
+                break
+            except PathfindingError as error:
+                if entity.state is not UnitState.WAITING:
+                    simulation.events.record(
+                        simulation.tick,
+                        EventType.PATHFINDING_FAILED,
+                        entity.entity_id,
+                        operation="formation_attack",
+                        reason=str(error),
+                        target_id=target_id,
+                    )
+                entity.state = UnitState.WAITING
+                continue
+            allowance.claim()
+            movement.start_path(
+                simulation, entity, destination, route, "formation_attack", UnitState.ATTACKING
+            )
 
 
 def _join_nearby_combat(

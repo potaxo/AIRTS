@@ -28,7 +28,7 @@ and offers return to opening configuration.
 
 ## Squad and economy behavior
 
-A single army objective replaces independent opportunistic squad raids. Persistent cohorts retain
+Small forces share an army objective rather than independent opportunistic squad raids. Persistent cohorts retain
 at most 32 members for membership bookkeeping. Small armies use the first active cohort as their
 assembly reference. The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
 at least 12 can launch; there is no timeout that releases isolated units. Nearby waiting cohorts
@@ -43,17 +43,43 @@ and least-recently-ordered cohorts prevent changing front orders from permanentl
 reinforcements. A depleted offensive force of fewer than twelve
 regroups; forces unable to rebuild, or clearing enemies unable to develop, can finish with survivors.
 
-With at least 500 available field members, a mass assault enrolls the whole field force in one
-shared attack command rather than squeezing it into a small leader's arrival slots. Infrastructure
-is preferred while choosing a reachable target with a favorable forecast; absent enemy buildings, remnants remain
-targets. A live objective supported by at least half the army persists, including below 500 down
-to 250 members, so casualty counts do not repeatedly reverse the army into assembly. Existing
-matching pursuit is not reissued. Actual route admission still uses the shared combat budget;
-issuing a large command does not synchronously compute every member's path. Local opportunistic
-fire remains available en route without changing the strategic target. Base rescue still removes
-the nearest necessary defenders before field command. Close partial advancing cohorts with a
-common objective merge and can receive nearby new members, avoiding singleton command chains.
-No extra authoritative mass-assault state or total army limit is introduced.
+A field force of at least 300 members organizes its existing cohorts into five persistent-in-play
+field armies. The count is an organizational choice, not a unit ceiling. Spatial separation,
+static connectivity and health-weighted combat strength guide initial grouping and new-cohort
+assignment; existing cohorts are not periodically redistributed to enforce equal headcounts.
+Partial cohorts merge only inside their existing field army. New nearby members require a clear
+short approach; geographically separated reinforcements retain the six-unit departure batch.
+Existing field armies dissolve below 200 members. A committed offensive force of at least 200
+can reconstruct the grouping after loading without returning to small-wave assembly.
+
+Two ordinary assault groups, an income-preferring flank group and two rescue/support groups use
+the same offensive controller. Support groups are preferred for rescue only within a modest
+distance advantage; they advance when not needed, rather than permanently sitting at home.
+Base rescue still removes the nearest sufficient cohorts before field command, even when an
+individual combat forecast is unfavorable. Multiple enemy production regions can receive separate
+offensives. Against one compact enemy region, available armies combine in one attack command,
+including forces above 500, without a tiny leader's arrival barrier. Nearby buildings inside that
+region can become separate local siege targets, avoiding mandatory convergence on one building.
+Absent buildings, surviving units remain cleanup targets.
+
+Strategic objectives favor reachable infrastructure. Multi-front reconsideration rotates one
+army per decision after a five-second interval; initial multi-front planning offers one candidate
+per army. A live objective changes only for a materially better score, invalid reachability or a
+mobile target superseded by infrastructure. Local combat uses physically nearby, connected allies
+rather than counting distant reinforcements. A local pursuit keeps the strategic objective on its
+cohorts and records its original engagement point; targets beyond twelve cells of that point no
+longer retain pursuit. Defeated contacts return to the regional mission. Severely unfavorable
+contacts regroup locally without recalling unrelated fronts, and a joint offensive cannot cancel
+another cohort's active retreat. Each tactical decision evaluates at most two armies, prioritizing
+recent damage while aging out delayed updates. Existing matching pursuit is not reissued.
+
+Actual route admission uses the shared combat budget and cached destination/range fields;
+issuing a large command does not synchronously compute every member's path. Opportunistic fire
+remains available en route. Cohort member/center and threat-query batches are reused within the
+decision. Field-army membership, objective lookup and planning/update cursors are reconstructible
+runtime data; durable strategic targets, local engagement anchors, phases and retreat timestamps
+remain on the existing saved cohorts. Loading can rebuild organizational identities while retaining
+each unit's mission and actual movement/combat intent. No new authoritative fields are introduced.
 
 For small armies, contacts take precedence over the distant objective. Nearby cohorts jointly assess a fight,
 engage together or regroup near a friendly production anchor. Estimates include physically
@@ -218,10 +244,10 @@ other ticks, without waiting for another tactical decision. A service offers one
 and one growth command; a successful growth search using at most sixteen detailed candidates can
 use a second spare growth opportunity. All owners together attempt at most three commands per
 simulation tick, so this is pacing rather than a total queue/building/army limit. Tactical decisions
-take priority and normally issue at most two main-army dispatches,
-with one on economy turns. Ordinary dispatches process chunks of cohorts; a mass attack shares one
-intent across its entire field force and leaves actual routing to the existing per-tick allowance.
-Target selection checks at most four candidates and placement
+take priority and normally issue at most two field-army dispatches,
+with one on economy turns. Ordinary dispatches process chunks of cohorts; armies sharing an
+objective can combine one attack intent and leave routing to the existing per-tick allowance.
+Target selection checks at most four candidates per ordinary search and eight across a decision; placement checks
 at most 64 candidates per building kind across the complete decision, including surplus searches.
 The global sector grid is at most twelve cells per axis; each building kind's window checks at most
 four regions with at most sixteen detailed placement candidates each, after filtering known blocked
@@ -253,6 +279,10 @@ a game-specific build order, tournament configuration or trained model.
 These are algorithm/design references, not ported bot code or runtime dependencies. The policy uses
 bounded heuristics and rolling forecasts, without training, neural inference, a terrain influence
 map or fog-of-war inference. Tournament standing does not establish AIRTS playing strength.
+Field-army scheduling also references
+[OpenRA's spread squad updates](https://github.com/OpenRA/OpenRA/blob/bleed/OpenRA.Mods.Common/Traits/BotModules/SquadManagerBotModule.cs).
+Shared-route execution reuses the current navigation implementation; its engineering references
+belong to [movement](movement.md#orders-and-routing).
 
 ## Verification owners
 
@@ -262,6 +292,9 @@ spending, new-factory output, configured production time and retained routes;
 [scaling integration](../../tests/integration/test_opponent_scaling.py) checks continued ordinary/5x
 reinvestment, uncapped worker demand/batches, developed-region reuse, mass attacks, reinforcement
 fairness, remote support and concurrent upgrades;
+[campaign integration](../../tests/integration/test_opponent_campaigns.py) checks stable five-army membership,
+multi-front advancement across river crossings, complete cleanup, retained retreat, pursuit leashes
+and per-unit mission restoration;
 [skirmish integration](../../tests/integration/test_skirmish.py) checks teams/elimination/results;
 [opponent workload](../../tests/performance/test_opponent_performance.py) checks bounded decisions,
 with timing acceptance defined in [performance](performance.md#required-workloads).

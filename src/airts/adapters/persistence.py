@@ -69,8 +69,8 @@ from airts.world.units.catalog import BUILDABLE_KINDS, EntityKind
 from airts.world.units.schema import EntityCategory
 from airts.world.visibility import PlayerVisibility, VisibilitySystem
 
-SAVE_SCHEMA = "airts-save-v30"
-MATCH_SAVE_SCHEMA = "airts-match-save-v24"
+SAVE_SCHEMA = "airts-save-v32"
+MATCH_SAVE_SCHEMA = "airts-match-save-v26"
 
 
 class PersistenceError(ValueError):
@@ -540,11 +540,16 @@ def _load_entities(
         remaining = _integer(
             upgrade_data.get("remaining_ticks"), "entity.upgrade.remaining_ticks", minimum=0
         )
+        queued_count = _integer(
+            upgrade_data.get("queued_count"), "entity.upgrade.queued_count", minimum=0
+        )
         if tier > 1 + len(kind.upgrades):
             raise PersistenceError("entity.upgrade.tier exceeds the configured tiers")
         next_upgrade = kind.upgrades[tier - 1] if tier <= len(kind.upgrades) else None
         if remaining and (next_upgrade is None or remaining > next_upgrade.duration_ticks):
             raise PersistenceError("entity.upgrade.remaining_ticks has no valid paid transition")
+        if tier + bool(remaining) + queued_count > 1 + len(kind.upgrades):
+            raise PersistenceError("entity.upgrade queue exceeds the configured tiers")
         if construction_progress is not None and (tier != 1 or remaining):
             raise PersistenceError("unfinished entity cannot have upgrade progress")
         if "production_deployment" not in entity:
@@ -839,11 +844,12 @@ def _load_entities(
             recovery_request_tick=recovery_request_tick,
             recovery_released=recovery_released,
             construction_progress=construction_progress,
-            upgrade=UpgradeState(tier=tier, remaining_ticks=remaining),
+            upgrade=UpgradeState(tier=tier, remaining_ticks=remaining, queued_count=queued_count),
             production_deployment=deployment,
         )
     formation_owners: dict[str, str] = {}
     formation_goals: dict[tuple[str, str], Point] = {}
+    formation_targets: dict[tuple[str, str], str | None] = {}
     for loaded_entity in entities.values():
         group = loaded_entity.formation_group
         offset = loaded_entity.formation_offset
@@ -872,12 +878,18 @@ def _load_entities(
             if previous.distance_to(goal) > 1e-7:
                 raise PersistenceError("formation leg has inconsistent goals")
         if loaded_entity.formation_leg is not None and (
-            loaded_entity.pursue_target
+            (loaded_entity.pursue_target and loaded_entity.attack_gather_point is None)
             or loaded_entity.repair_target_id is not None
             or loaded_entity.reclaim_target_id is not None
             or loaded_entity.hold_anchor is not None
         ):
             raise PersistenceError("formation movement conflicts with active work")
+        if loaded_entity.formation_leg is not None:
+            assert group is not None
+            leg_key = (group, loaded_entity.formation_leg)
+            target_id = loaded_entity.attack_target_id if loaded_entity.pursue_target else None
+            if formation_targets.setdefault(leg_key, target_id) != target_id:
+                raise PersistenceError("formation leg has inconsistent attack targets")
         for order in loaded_entity.order_queue:
             if order.kind is OrderKind.MOVE:
                 continue

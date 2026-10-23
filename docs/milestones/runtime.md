@@ -101,11 +101,17 @@ no upgrades configured. Costs use the existing single resource; no second curren
 | Extractor | 4 | 8 | 120 / 30s | 16 | 360 / 60s |
 | Matter Synthesizer | 2 | 4 | 200 / 45s | 8 | 600 / 90s |
 
-`UpgradeEntityCommand` validates ownership, completion, capability, available resources and idle
-upgrade state before charging once. One upgrade can run per entity. Ordinary production continues
+`UpgradeEntityCommand` validates ownership, capability, available resources and remaining configured
+tiers before charging once. Unfinished buildings reserve their next upgrade without advancing its
+timer. `queued=True` can append further sequential tiers behind reserved or running upgrades;
+ordinary repeated commands on busy entities still reject. Only one upgrade runs per entity.
+Paid queued upgrades start on the first upgrade tick after construction completes, whether through
+construction or builder/hub repair; completing one upgrade starts the next paid tier without another
+charge. Pending work on an abandoned scaffold waits without producing income. Ordinary production continues
 at the current tier; completion switches the absolute target profile before that tick's income
-settlement without resetting the global income interval. `CancelUpgradeCommand` returns the full paid
-cost once and discards progress. Destruction/reclamation removes progress without an upgrade refund.
+settlement without resetting the global income interval. `CancelUpgradeCommand` clears running and
+queued upgrades, refunds their full paid cost once and discards progress. Finished tiers are not
+refunded. Destruction/reclamation removes pending work and progress without an upgrade refund.
 Stop and ordinary assignments do not cancel upgrades. Paused games advance neither timer.
 
 The reusable `UpgradeState` belongs to each entity; immutable `UpgradeDefinition` transitions and
@@ -114,10 +120,10 @@ catalog bindings supply costs, durations and target profiles. The shared
 branches. `Entity.profile` resolves the current tier. Current transitions change only income;
 future stat upgrades must route the affected subsystem through the effective profile. Physical
 footprint/collision changes are outside this implementation.
-Saves retain tier, paid remaining time and the simulation tick; loading neither charges nor pays
+Saves retain tier, paid remaining time, paid sequential queue count and the simulation tick; loading neither charges nor pays
 again. [Persistence](persistence.md) owns format rejection and replay diagnostic support.
 The selection panel shows tier, output, next cost/duration, remaining time and a progress bar.
-Same-type selections group by tier and running/unfinished state; each button applies to its group.
+Same-type selections group by tier, running/unfinished state and queue count; each button applies to its group.
 Idle groups remain upgradeable while peers of the same tier are upgrading. The upgrade button shows
 the affordable count and cost; a click starts as many members as the current balance permits, in
 entity-ID order, through individual validated commands. It is disabled only when no member is

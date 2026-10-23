@@ -55,7 +55,8 @@ advances tasks. `production.py` owns queues, payment and progress; `production_o
 new units. `unit_orders.py` owns direct FIFO admission and dispatch across movement, attack and repair;
 dispatch reuses the command boundary for target work. Shared leaves own validation (`validation.py`), IDs (`entity_registry.py`), spawn clearance
 (`spawning.py`) and firing approach geometry (`combat_geometry.py`).
-`formations.py` owns direct-move cohort enrollment, saved layout planning, speed/cohesion coordination
+`command_handlers.py` applies formation toggles and attack enrollment with shared movement cleanup.
+`formations.py` owns direct-order cohort enrollment, saved move/attack layout planning, speed/cohesion coordination
 and completion barriers. It supplies steering to movement, without writing positions or creating
 another command facade. Entity membership/offsets and active/queued leg identity are authoritative;
 cohort indexes and per-tick coordination arrays are derived.

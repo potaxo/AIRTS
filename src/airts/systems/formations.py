@@ -1,24 +1,17 @@
-"""Persistent direct-move formations and bounded, collision-safe coordination."""
+"""Persistent direct-order formations and bounded, collision-safe coordination."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import replace
 from math import hypot
 from typing import TYPE_CHECKING
 
-from airts.contracts.commands import (
-    CommandResult,
-    SetFormationCommand,
-    ValidationFailure,
-    ValidationPhase,
-)
 from airts.contracts.spatial import Point
 from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
-from airts.systems.validation import validate_entities
+from airts.systems import combat_geometry
 from airts.world._numeric import FloatArray
-from airts.world.entities import Entity
+from airts.world.entities import Entity, OrderKind
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -30,38 +23,100 @@ def _offset(entity: Entity) -> Point:
     return value
 
 
-def set_formation(simulation: Simulation, command: SetFormationCommand) -> CommandResult:
-    failure = validate_entities(
-        simulation, command.entity_ids, command.owner_id, require_movable=True
-    )
-    if failure is not None:
-        return simulation._reject_validation("set_formation", failure)
-    if type(command.enabled) is not bool:
-        return simulation._reject_validation(
-            "set_formation",
-            ValidationFailure(ValidationPhase.SCHEMA, "ENABLED_MUST_BE_BOOLEAN", "enabled"),
+def slot(entity: Entity) -> Point:
+    """The saved translated destination for an active direct-order leg."""
+    goal = entity.formation_goal
+    assert goal is not None
+    relative = _offset(entity)
+    return Point(goal.x + relative.x, goal.y + relative.y)
+
+
+def begin_attack(simulation: Simulation, ids: tuple[str, ...]) -> None:
+    """Direct and FIFO attacks enroll through the same saved cohort metadata."""
+    groups: dict[tuple[str, str], list[Entity]] = defaultdict(list)
+    for key in ids:
+        entity = simulation.entities[key]
+        if (
+            entity.formation_group is not None
+            and entity.pursue_target
+            and entity.attack_gather_point is not None
+        ):
+            assert entity.attack_target_id is not None
+            groups[entity.formation_group, entity.attack_target_id].append(entity)
+    if not groups:
+        return
+    replacing = frozenset(ids)
+    existing = {
+        (e.formation_group, e.attack_target_id): e
+        for e in simulation.entities.values()
+        if e.entity_id not in replacing and e.formation_leg is not None and e.pursue_target
+    }
+    for group_key, members in groups.items():
+        previous = existing.get(group_key)
+        leg = previous.formation_leg if previous is not None else new_leg(simulation)
+        goal = (
+            previous.formation_goal
+            if previous is not None
+            else Point(
+                sum(e.position.x - _offset(e).x for e in members) / len(members),
+                sum(e.position.y - _offset(e).y for e in members) / len(members),
+            )
         )
-    members = [simulation.entities[key] for key in command.entity_ids]
+        for entity in members:
+            entity.formation_leg = leg
+            entity.formation_goal = goal
+
+
+def attack_goal(simulation: Simulation, members: list[Entity], target: Entity) -> Point:
+    """Place the front rank at firing range, retaining the complete translated layout."""
+    offsets = {e.entity_id: _offset(e) for e in members}
     center = Point(
-        sum(e.position.x for e in members) / len(members),
-        sum(e.position.y for e in members) / len(members),
+        sum(e.position.x - offsets[e.entity_id].x for e in members) / len(members),
+        sum(e.position.y - offsets[e.entity_id].y for e in members) / len(members),
     )
-    group = f"{simulation.tick}:{simulation.command_count}:{min(command.entity_ids)}"
-    used = {e.formation_group for e in simulation.entities.values()}
-    while group in used:
-        group += ":"
-    for entity in members:
-        entity.formation_group = group if command.enabled else None
-        entity.formation_offset = (
-            Point(entity.position.x - center.x, entity.position.y - center.y)
-            if command.enabled
-            else None
+    dx, dy = target.selection_position.x - center.x, target.selection_position.y - center.y
+    front = max(members, key=lambda e: offsets[e.entity_id].x * dx + offsets[e.entity_id].y * dy)
+    relative = offsets[front.entity_id]
+    length = max(hypot(dx, dy), 1e-9)
+    radius = max(0.5, front.profile.attack_range - 0.25)
+    candidates = [
+        Point(
+            target.selection_position.x - dx / length * radius - relative.x,
+            target.selection_position.y - dy / length * radius - relative.y,
         )
-        entity.formation_goal = entity.formation_leg = None
-        entity.order_queue = [
-            replace(order, formation_goal=None, formation_leg=None) for order in entity.order_queue
-        ]
-    return simulation._accept("set_formation")
+    ]
+    if any(
+        e.position.distance_to(target.selection_position) <= e.profile.attack_range for e in members
+    ):
+        candidates.insert(0, center)
+    # A bounded alternative set accommodates terrain and map edges without a
+    # separate per-unit firing-ring search or changing the captured offsets.
+    alternatives = sorted(
+        combat_geometry.firing_approach_points(simulation, front, target),
+        key=lambda p: hypot(p.x - relative.x - center.x, p.y - relative.y - center.y),
+    )
+    candidates.extend(Point(p.x - relative.x, p.y - relative.y) for p in alternatives[:8])
+    ids = tuple(e.entity_id for e in members)
+    origins = {
+        e.entity_id: Point(center.x + offsets[e.entity_id].x, center.y + offsets[e.entity_id].y)
+        for e in members
+    }
+    for candidate in candidates:
+        try:
+            planned = simulation._allocate_destinations(
+                ids, candidate, preserve_formation=True, origins=origins
+            )
+        except PathfindingError:
+            continue
+        if not any(
+            planned[e.entity_id].distance_to(target.selection_position) <= e.profile.attack_range
+            for e in members
+        ):
+            continue
+        first = members[0]
+        slot, offset = planned[first.entity_id], offsets[first.entity_id]
+        return Point(slot.x - offset.x, slot.y - offset.y)
+    raise PathfindingError("NO_REACHABLE_FORMATION_FIRING_POSITION")
 
 
 def new_leg(simulation: Simulation) -> str:
@@ -138,7 +193,7 @@ def waiting_members(simulation: Simulation) -> set[str]:
 
 def return_target(entity: Entity) -> Point | None:
     """Arrived members retain their slot while the cohort settles or waits at its destination."""
-    if entity.formation_goal is None or entity.path:
+    if entity.formation_goal is None or entity.path or entity.pursue_target:
         return None
     relative = _offset(entity)
     target = Point(entity.formation_goal.x + relative.x, entity.formation_goal.y + relative.y)
@@ -151,6 +206,15 @@ def coordinate(
     """Use existing paths in constrictions; recover translated slots in clear final approaches."""
     groups: dict[tuple[str, str], list[int]] = defaultdict(list)
     pending: set[tuple[str, str]] = set()
+    pending_attacks = {
+        (e.formation_group, e.order_queue[0].target_entity_id)
+        for e in entities
+        if e.formation_group is not None
+        and e.order_queue
+        and e.order_queue[0].kind is OrderKind.ATTACK
+        and not e.pursue_target
+        and not e.path
+    }
     for i, e in enumerate(entities):
         if e.formation_group is None:
             continue
@@ -171,6 +235,22 @@ def coordinate(
                 entities[i].no_progress_ticks = 0
             continue
         members = [entities[i] for i in indices]
+        if members[0].pursue_target and (
+            (members[0].formation_group, members[0].attack_target_id) in pending_attacks
+            or any(
+                not e.path
+                and e.position.distance_to(
+                    Point(e.formation_goal.x + _offset(e).x, e.formation_goal.y + _offset(e).y)
+                )
+                > 0.04
+                for e in members
+                if e.formation_goal is not None
+            )
+        ):
+            for i in indices:
+                speeds[i] = 0
+                entities[i].no_progress_ticks = 0
+            continue
         goal = members[0].formation_goal
         assert goal is not None
         offsets = [_offset(e) for e in members]

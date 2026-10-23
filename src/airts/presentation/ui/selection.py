@@ -256,7 +256,7 @@ def _draw_contents(view: SelectionView, screen: pygame.Surface) -> int:
                 if isinstance((parameters := job.parameters), ProductionParameters)
                 and not parameters.continuous
             )
-            looping = any(
+            looping = bool(factories) and all(
                 (job := view.simulation.continuous_production(factory_id)) is not None
                 and isinstance(job.parameters, ProductionParameters)
                 and job.parameters.unit_kind is kind
@@ -346,11 +346,16 @@ def draw_upgrade_controls(
     read_only: bool = False,
 ) -> int:
     """One row per selected tier/progress group, with independent building commands."""
-    groups: dict[tuple[int, bool, bool], list[Entity]] = {}
+    groups: dict[tuple[int, bool, bool, int], list[Entity]] = {}
     for entity in entities:
-        key = (entity.upgrade.tier, bool(entity.upgrade.remaining_ticks), entity.is_complete)
+        key = (
+            entity.upgrade.tier,
+            bool(entity.upgrade.remaining_ticks),
+            entity.is_complete,
+            entity.upgrade.queued_count,
+        )
         groups.setdefault(key, []).append(entity)
-    for (tier, upgrading, complete), members in sorted(groups.items()):
+    for (tier, upgrading, complete, queued), members in sorted(groups.items()):
         entity = members[0]
         suffix = f" x{len(members)}" if len(members) > 1 else ""
         view.ui.small_text(
@@ -367,8 +372,6 @@ def draw_upgrade_controls(
         )
         y += 24
         definition = entity.next_upgrade
-        if not complete:
-            continue
         if definition is None:
             view.ui.small_text(screen, "Maximum tier", (x, y), theme.SUCCESS)
             y += 28
@@ -382,9 +385,6 @@ def draw_upgrade_controls(
                 theme.ACCENT,
             )
             y += 22
-            label = "Cancel upgrade (full refund)"
-            operation = "cancel_upgrade"
-            enabled = True
             progress = 1 - remaining / definition.duration_ticks
             bar = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 6)
             pygame.draw.rect(screen, PROGRESS_TRACK, bar)
@@ -392,29 +392,48 @@ def draw_upgrade_controls(
                 screen, PROGRESS_COLOR, (bar.x, bar.y, round(bar.width * progress), bar.height)
             )
             y += 12
-        else:
-            affordable = min(
-                len(members), view.simulation.resources.get(entity.owner_id, 0) // definition.cost
+        if queued:
+            tiers = ", ".join(
+                f"T{value}" for value in range(tier + upgrading + 1, tier + upgrading + queued + 1)
             )
-            total_cost = definition.cost * max(1, affordable)
+            label = f"Queued: {tiers}"
+            if not complete:
+                label += " | Waiting for construction"
+            view.ui.small_text(screen, label, (x, y), theme.ACCENT)
+            y += 24
+        available = entity.next_upgrade_to_queue
+        if available is not None:
+            affordable = min(
+                len(members), view.simulation.resources.get(entity.owner_id, 0) // available.cost
+            )
+            total_cost = available.cost * max(1, affordable)
             count = f" x{affordable}/{len(members)}" if affordable else ""
-            label = f"Upgrade T{tier + 1}{count}: {total_cost} | {definition.duration_ticks / Simulation.TICKS_PER_SECOND:g}s"
-            operation = "upgrade"
+            verb = "Queue" if not complete or upgrading or queued else "Upgrade"
+            label = f"{verb} T{tier + upgrading + queued + 1}{count}: {total_cost} | {available.duration_ticks / Simulation.TICKS_PER_SECOND:g}s"
             enabled = affordable > 0
             if not enabled:
                 label += " (need resources)"
-        if read_only:
-            continue
-        rectangle = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 28)
-        view.ui.button(screen, rectangle, label, enabled=enabled)
-        if enabled:
+            if not read_only:
+                rectangle = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 28)
+                view.ui.button(screen, rectangle, label, enabled=enabled)
+                if enabled:
+                    view._command_buttons.append(
+                        (
+                            rectangle,
+                            "upgrade:" + json.dumps(sorted(item.entity_id for item in members)),
+                        )
+                    )
+                y += 34
+        if (upgrading or queued) and not read_only:
+            rectangle = pygame.Rect(x, y, view.selection_panel_rect.width - 24, 28)
+            view.ui.button(screen, rectangle, "Cancel upgrades (full refund)")
             view._command_buttons.append(
                 (
                     rectangle,
-                    f"{operation}:" + json.dumps(sorted(item.entity_id for item in members)),
+                    "cancel_upgrade:" + json.dumps(sorted(item.entity_id for item in members)),
                 )
             )
-        y += 34
+            y += 34
     return y
 
 

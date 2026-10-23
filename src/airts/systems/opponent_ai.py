@@ -39,7 +39,7 @@ from airts.systems.economy import building_income_per_second
 from airts.world._numeric import FloatArray, compile_numeric
 from airts.world.entities import Entity
 from airts.world.map import Cell, Terrain, footprint_cells
-from airts.world.opponents import OpponentState, Squad, SquadPhase
+from airts.world.opponents import FieldArmy, OpponentState, Squad, SquadPhase
 from airts.world.units.catalog import EntityKind
 
 if TYPE_CHECKING:
@@ -59,7 +59,11 @@ ORDER_RETRY_TICKS = 50
 FORECAST_ROUNDS = 12
 ECONOMY_HORIZON_SECONDS = 20
 MAX_COMMAND_COHORTS = 4
-MASS_ASSAULT_SIZE = 500
+FIELD_ARMY_SIZE = 300
+FIELD_ARMY_RETENTION_SIZE = 200
+FIELD_ARMY_COUNT = 5
+STRATEGY_TICKS = 50
+CONTACT_LEASH = 12.0
 PRODUCTION_CLEARANCE = 3.0
 ATTACK_WAVE_SIZE = 20
 REINFORCEMENT_SIZE = 6
@@ -167,6 +171,9 @@ class _Decision:
     staging_points: dict[Point, Point] = field(default_factory=dict)
     staging_obstacles: frozenset[Cell] | None = None
     producer_boxes: FloatArray | None = None
+    squad_members: dict[int, list[Entity]] = field(default_factory=dict)
+    squad_centers: dict[int, Point] = field(default_factory=dict)
+    threat_cache: dict[tuple[Point, float], list[Entity]] = field(default_factory=dict)
 
     def nearest_enemy(self, point: Point) -> Entity | None:
         """Reuse positions within this decision; commands cannot move hostile bodies here."""
@@ -193,7 +200,12 @@ class _Decision:
         return self.simulation._execute_command(command, record=False)
 
     def threats(self, point: Point, radius: float = LOCAL_RADIUS) -> list[Entity]:
-        return [self.simulation.entities[key] for key in self.hostile_index.nearby(point, radius)]
+        query = point, radius
+        if query not in self.threat_cache:
+            self.threat_cache[query] = [
+                self.simulation.entities[key] for key in self.hostile_index.nearby(point, radius)
+            ]
+        return self.threat_cache[query]
 
     def margin(self, own: Sequence[Entity], enemy: Sequence[Entity]) -> float:
         self.simulation._opponent_forecast_count += 1
@@ -490,7 +502,24 @@ def _clear_production_exits(decision: _Decision) -> None:
 
 
 def _members(decision: _Decision, squad: Squad) -> list[Entity]:
-    return [decision.simulation.entities[key] for key in squad.entity_ids]
+    key = id(squad)
+    if key not in decision.squad_members:
+        decision.squad_members[key] = [
+            decision.simulation.entities[key] for key in squad.entity_ids
+        ]
+    return decision.squad_members[key]
+
+
+def _squad_center(decision: _Decision, squad: Squad) -> Point:
+    key = id(squad)
+    if key not in decision.squad_centers:
+        decision.squad_centers[key] = _center(_members(decision, squad))
+    return decision.squad_centers[key]
+
+
+def _forget_squad(decision: _Decision, squad: Squad) -> None:
+    decision.squad_members.pop(id(squad), None)
+    decision.squad_centers.pop(id(squad), None)
 
 
 def _repair_wounded(decision: _Decision) -> None:
@@ -520,13 +549,22 @@ def _assign_squads(decision: _Decision) -> None:
     assigned: set[str] = set()
     for squad in (memory.reserve, *memory.squads):
         squad.entity_ids = [key for key in squad.entity_ids if key in army]
+        _forget_squad(decision, squad)
         assigned.update(squad.entity_ids)
     memory.squads = [squad for squad in memory.squads if squad.entity_ids]
-    mobilized = sum(len(squad.entity_ids) for squad in memory.squads) >= MASS_ASSAULT_SIZE // 2
+    mobilized = sum(len(squad.entity_ids) for squad in memory.squads) >= FIELD_ARMY_RETENTION_SIZE
+    membership = {
+        id(squad): index
+        for index, group in enumerate(memory.field_armies)
+        for squad in group.squads
+    }
     waiting = [
         squad
         for squad in memory.squads
-        if squad.phase is SquadPhase.GATHERING or mobilized and squad.phase is SquadPhase.ADVANCING
+        if len(squad.entity_ids) < MAX_SQUAD_SIZE
+        and (
+            squad.phase is SquadPhase.GATHERING or mobilized and squad.phase is SquadPhase.ADVANCING
+        )
     ]
     for index, squad in enumerate(waiting):
         if not squad.entity_ids:
@@ -536,14 +574,18 @@ def _assign_squads(decision: _Decision) -> None:
                 continue
             if (squad.phase, squad.target_id) != (other.phase, other.target_id):
                 continue
+            if membership.get(id(squad)) != membership.get(id(other)):
+                continue
             if (
-                _center(_members(decision, squad)).distance_to(_center(_members(decision, other)))
+                _squad_center(decision, squad).distance_to(_squad_center(decision, other))
                 > 2 * ARMY_RADIUS
             ):
                 continue
             count = min(MAX_SQUAD_SIZE - len(squad.entity_ids), len(other.entity_ids))
             squad.entity_ids.extend(other.entity_ids[:count])
             del other.entity_ids[:count]
+            _forget_squad(decision, squad)
+            _forget_squad(decision, other)
     memory.squads = [squad for squad in memory.squads if squad.entity_ids]
     available = sorted(
         (unit for key, unit in army.items() if key not in assigned),
@@ -556,6 +598,7 @@ def _assign_squads(decision: _Decision) -> None:
         available.append(army[memory.reserve.entity_ids.pop()])
     while available and len(memory.reserve.entity_ids) < reserve_size:
         memory.reserve.entity_ids.append(available.pop(0).entity_id)
+    _forget_squad(decision, memory.reserve)
     for unit in available:
         gathering_squad = next(
             (
@@ -567,7 +610,16 @@ def _assign_squads(decision: _Decision) -> None:
                     and squad.phase is SquadPhase.ADVANCING
                 )
                 and len(squad.entity_ids) < MAX_SQUAD_SIZE
-                and _center(_members(decision, squad)).distance_to(unit.position) <= 2 * ARMY_RADIUS
+                and _squad_center(decision, squad).distance_to(unit.position) <= 2 * ARMY_RADIUS
+                and (
+                    not memory.field_armies
+                    or decision.simulation._routes.disc_segment(
+                        unit.position,
+                        _squad_center(decision, squad),
+                        decision.simulation._building_cells(),
+                        unit.profile.collision_radius,
+                    )
+                )
             ),
             None,
         )
@@ -575,6 +627,7 @@ def _assign_squads(decision: _Decision) -> None:
             gathering_squad = Squad(phase_tick=simulation.tick)
             memory.squads.append(gathering_squad)
         gathering_squad.entity_ids.append(unit.entity_id)
+        _forget_squad(decision, gathering_squad)
 
 
 def _base_threat(decision: _Decision) -> Entity | None:
@@ -678,18 +731,30 @@ def _drive_reserve(decision: _Decision, threat: Entity | None) -> None:
         )
 
 
+def _target_value(enemy: Entity, *, flank: bool = False) -> float:
+    return TARGET_VALUES.get(enemy.kind, 100.0) * (
+        1.5 if flank and enemy.profile.income_per_second else 1.0
+    )
+
+
 def _choose_target(
-    decision: _Decision, units: list[Entity], *, infrastructure: bool = False
+    decision: _Decision,
+    units: list[Entity],
+    *,
+    infrastructure: bool = False,
+    candidate_limit: int = MAX_TARGET_CANDIDATES,
+    flank: bool = False,
 ) -> Entity | None:
     center = _center(units)
     enemies = decision.enemies
     if infrastructure:
         buildings = [enemy for enemy in enemies if not enemy.is_movable]
         enemies = buildings or enemies
+
     ranked = sorted(
         enemies,
         key=lambda enemy: (
-            -TARGET_VALUES.get(enemy.kind, 100.0)
+            -_target_value(enemy, flank=flank)
             / (20 + center.distance_to(enemy.selection_position)),
             enemy.entity_id,
         ),
@@ -702,13 +767,15 @@ def _choose_target(
     seen: set[str] = set()
     for valuable, close in zip(ranked, nearest, strict=True):
         for enemy in (valuable, close):
-            if enemy.entity_id not in seen and len(candidates) < MAX_TARGET_CANDIDATES:
+            if enemy.entity_id not in seen and len(candidates) < candidate_limit:
                 candidates.append(enemy)
                 seen.add(enemy.entity_id)
-        if len(candidates) == MAX_TARGET_CANDIDATES:
+        if len(candidates) == candidate_limit:
             break
     scored: list[tuple[float, str, Entity]] = []
     for enemy in candidates:
+        if decision.simulation._opponent_candidate_count >= 2 * MAX_TARGET_CANDIDATES:
+            break
         decision.simulation._opponent_candidate_count += 1
         if not decision.simulation._routes.can_reach_any(
             units[0].position,
@@ -720,7 +787,7 @@ def _choose_target(
         if margin < -0.1:
             continue
         score = (
-            TARGET_VALUES.get(enemy.kind, 100.0)
+            _target_value(enemy, flank=flank)
             / (20 + center.distance_to(enemy.selection_position))
             * min(2.0, 1 + margin)
         )
@@ -778,7 +845,8 @@ def _order_groups(
         if (
             batch
             and not mass_attack
-            and _center(units).distance_to(_center(_members(decision, batch[0]))) > 2 * ARMY_RADIUS
+            and _squad_center(decision, squad).distance_to(_squad_center(decision, batch[0]))
+            > 2 * ARMY_RADIUS
         ):
             send_batch()
             if decision.orders >= ceiling:
@@ -833,7 +901,7 @@ def _order_groups(
 
 
 def _assembly_point(decision: _Decision, squad: Squad) -> Point:
-    center = _center(_members(decision, squad))
+    center = _squad_center(decision, squad)
     sources = [unit for unit in decision.owned if unit.kind.production_kinds and unit.is_complete]
     if not sources:
         return decision.rally
@@ -849,6 +917,7 @@ def _drive_army(
     groups = decision.memory.squads
     if not groups:
         return
+    _organize_field_armies(decision)
     guarded: set[str] = set()
     if threat is not None:
         guards = _members(decision, decision.memory.reserve)
@@ -872,10 +941,12 @@ def _drive_army(
     )
     if threat is not None:
         # Rescue uses the nearest sufficient force, not every offensive cohort.
+        support = {id(squad) for army in decision.memory.field_armies[3:] for squad in army.squads}
         responding = sorted(
             groups,
             key=lambda squad: (
-                _center(_members(decision, squad)).distance_to(threat.position),
+                _squad_center(decision, squad).distance_to(threat.position)
+                * (0.8 if id(squad) in support else 1.0),
                 squad.entity_ids[0],
             ),
         )
@@ -906,7 +977,8 @@ def _drive_army(
 def _drive_field_army(
     decision: _Decision, groups: list[Squad], guarded: set[str], ceiling: int
 ) -> None:
-    if _drive_mass_assault(decision, groups, ceiling):
+    if decision.memory.field_armies:
+        _drive_campaigns(decision, groups, guarded, ceiling)
         return
     active = [
         squad for squad in groups if squad.phase in {SquadPhase.ADVANCING, SquadPhase.ATTACKING}
@@ -916,11 +988,11 @@ def _drive_field_army(
         if active
         else max(groups, key=lambda squad: (len(squad.entity_ids), -squad.phase_tick))
     )
-    center = _center(_members(decision, leader))
+    center = _squad_center(decision, leader)
     ordered = sorted(
         groups,
         key=lambda squad: (
-            center.distance_to(_center(_members(decision, squad))),
+            center.distance_to(_squad_center(decision, squad)),
             squad.entity_ids[0],
         ),
     )
@@ -937,7 +1009,7 @@ def _drive_field_army(
         force = _members(decision, leader)
     contacts = {unit.entity_id: unit for unit in decision.threats(center)}
     for squad in ordered[:3]:
-        for enemy in decision.threats(_center(_members(decision, squad))):
+        for enemy in decision.threats(_squad_center(decision, squad)):
             contacts[enemy.entity_id] = enemy
     local = [unit for key, unit in contacts.items() if key not in guarded]
     margin = decision.margin(force, local)
@@ -950,7 +1022,7 @@ def _drive_field_army(
         near = [
             squad
             for squad in ordered
-            if _center(_members(decision, squad)).distance_to(center) <= 2 * ARMY_RADIUS
+            if _squad_center(decision, squad).distance_to(center) <= 2 * ARMY_RADIUS
         ]
         near.sort(key=lambda squad: squad.last_order_tick)
         if margin < -0.4:
@@ -1026,7 +1098,7 @@ def _drive_field_army(
         active = [
             squad
             for squad in ordered
-            if _center(_members(decision, squad)).distance_to(center) <= ARMY_RADIUS
+            if _squad_center(decision, squad).distance_to(center) <= ARMY_RADIUS
         ]
         for squad in active:
             _set_phase(decision, squad, SquadPhase.ADVANCING)
@@ -1048,14 +1120,14 @@ def _drive_field_army(
     assembled = sum(unit.position.distance_to(center) <= ARMY_RADIUS for unit in members)
     point = target.selection_position
     holding = assembled < ceil(len(members) * 0.8) or any(
-        _center(_members(decision, squad)).distance_to(center) > 2 * ARMY_RADIUS for squad in active
+        _squad_center(decision, squad).distance_to(center) > 2 * ARMY_RADIUS for squad in active
     )
     if holding:
         point = center
     attack = not holding and center.distance_to(target.selection_position) <= LOCAL_RADIUS
     missions: dict[tuple[SquadPhase, Point, bool], list[Squad]] = {}
     for squad in active:
-        lagging = _center(_members(decision, squad)).distance_to(center) > ARMY_RADIUS
+        lagging = _squad_center(decision, squad).distance_to(center) > ARMY_RADIUS
         mission = (
             SquadPhase.ATTACKING if attack and not lagging else SquadPhase.ADVANCING,
             center if lagging else point,
@@ -1073,7 +1145,7 @@ def _drive_field_army(
         )
         if (
             len(squad.entity_ids) >= REINFORCEMENT_SIZE
-            and _center(_members(decision, squad)).distance_to(center) <= ARMY_RADIUS
+            and _squad_center(decision, squad).distance_to(center) <= ARMY_RADIUS
         ):
             mission = (SquadPhase.ADVANCING, target.selection_position, False)
         else:
@@ -1096,53 +1168,410 @@ def _drive_field_army(
         )
 
 
-def _drive_mass_assault(decision: _Decision, groups: list[Squad], ceiling: int) -> bool:
-    """Commit a large field army without a small leader's moving assembly barrier.
+@dataclass(slots=True)
+class _ArmyView:
+    index: int
+    army: FieldArmy
+    squads: list[Squad]
+    units: list[Entity]
+    center: Point
 
-    Cohorts retain serializable membership, not separate march destinations. Attack
-    intent is cheap to enroll; the shared combat router admits paths over later ticks.
-    """
+
+def _organize_field_armies(decision: _Decision) -> None:
+    memory = decision.memory
+    groups = memory.squads
     count = sum(len(squad.entity_ids) for squad in groups)
-    if count < MASS_ASSAULT_SIZE // 2:
-        return False
-    objectives: dict[str, int] = {}
-    for squad in groups:
-        target = decision.simulation.entities.get(squad.target_id or "")
-        if (
-            squad.phase is SquadPhase.ADVANCING
-            and target is not None
-            and decision.simulation.are_hostile(decision.owner_id, target.owner_id)
-        ):
-            objectives[target.entity_id] = objectives.get(target.entity_id, 0) + len(
-                squad.entity_ids
+    committed = sum(
+        len(squad.entity_ids)
+        for squad in groups
+        if squad.phase in {SquadPhase.ADVANCING, SquadPhase.ATTACKING}
+        and squad.target_id is not None
+    )
+    if count < FIELD_ARMY_RETENTION_SIZE or (
+        not memory.field_armies and count < FIELD_ARMY_SIZE and committed < count / 2
+    ):
+        memory.field_armies.clear()
+        return
+    live = {id(squad) for squad in groups}
+    for army in memory.field_armies:
+        army.squads = [squad for squad in army.squads if id(squad) in live]
+        if not army.squads:
+            army.objective_id = None
+            army.plan_tick = -1
+            army.update_tick = -1
+    assigned = {id(squad) for army in memory.field_armies for squad in army.squads}
+    available = sorted(
+        (squad for squad in groups if id(squad) not in assigned),
+        key=lambda squad: (-len(squad.entity_ids), squad.entity_ids[0]),
+    )
+    if not memory.field_armies:
+        first = available.pop(0)
+        memory.field_armies = [FieldArmy([first])]
+        while len(memory.field_armies) < FIELD_ARMY_COUNT:
+            seed = max(
+                available,
+                key=lambda squad: (
+                    squad.target_id is not None
+                    and all(
+                        squad.target_id != army.squads[0].target_id for army in memory.field_armies
+                    ),
+                    min(
+                        _squad_center(decision, squad).distance_to(
+                            _squad_center(decision, army.squads[0])
+                        )
+                        for army in memory.field_armies
+                    ),
+                    squad.entity_ids[0],
+                ),
             )
-    # Hysteresis keeps losses around 500 from flipping the army back into assembly.
-    continuing = max(objectives.values(), default=0) >= count * 0.5
-    if count < MASS_ASSAULT_SIZE and not continuing:
-        return False
-    units = [unit for squad in groups for unit in _members(decision, squad)]
-    target = (
-        decision.simulation.entities[max(objectives, key=lambda key: (objectives[key], key))]
-        if continuing
-        else _choose_target(decision, units, infrastructure=True)
+            available.remove(seed)
+            memory.field_armies.append(FieldArmy([seed]))
+    strengths = [
+        sum(force_strength(_members(decision, squad)) for squad in army.squads)
+        for army in memory.field_armies
+    ]
+    desired = (
+        sum(strengths) + sum(force_strength(_members(decision, squad)) for squad in available)
+    ) / FIELD_ARMY_COUNT
+    for squad in available:
+        start = _members(decision, squad)[0].position
+
+        def assignment_score(
+            index: int, start: Point = start, objective: str | None = squad.target_id
+        ) -> tuple[float, int]:
+            army = memory.field_armies[index]
+            if not army.squads:
+                return 0.0, index
+            anchor = _members(decision, army.squads[0])[0].position
+            mission = army.squads[0].target_id
+            reachable = decision.simulation._routes.can_reach_any(
+                start, (anchor,), decision.simulation._building_cells()
+            )
+            return (
+                start.distance_to(anchor)
+                + ARMY_RADIUS * max(0.0, strengths[index] / max(1.0, desired) - 1)
+                + (0 if reachable else decision.simulation.game_map.width * 2)
+                + (
+                    decision.simulation.game_map.width * 2
+                    if mission is not None and objective is not None and mission != objective
+                    else 0
+                ),
+                index,
+            )
+
+        index = min(range(FIELD_ARMY_COUNT), key=assignment_score)
+        memory.field_armies[index].squads.append(squad)
+        strengths[index] += force_strength(_members(decision, squad))
+    for army in memory.field_armies:
+        if army.objective_id is None:
+            objectives: dict[str, int] = {}
+            for squad in army.squads:
+                target = decision.simulation.entities.get(squad.target_id or "")
+                if target is not None and squad.phase is not SquadPhase.DEFENDING:
+                    objectives[target.entity_id] = objectives.get(target.entity_id, 0) + len(
+                        squad.entity_ids
+                    )
+            if objectives:
+                army.objective_id = max(objectives, key=lambda key: (objectives[key], key))
+                army.plan_tick = decision.simulation.tick
+
+
+def _army_views(decision: _Decision, groups: list[Squad]) -> list[_ArmyView]:
+    field = {id(squad) for squad in groups}
+    views = []
+    for index, army in enumerate(decision.memory.field_armies):
+        cohorts = [squad for squad in army.squads if id(squad) in field]
+        units = [unit for squad in cohorts for unit in _members(decision, squad)]
+        if units:
+            views.append(_ArmyView(index, army, cohorts, units, _center(units)))
+    return views
+
+
+def _campaign_objectives(decision: _Decision, views: list[_ArmyView]) -> None:
+    tick = decision.simulation.tick
+    buildings = [enemy for enemy in decision.enemies if not enemy.is_movable]
+    single_front = not buildings or (
+        max(unit.position.x for unit in buildings) - min(unit.position.x for unit in buildings)
+        <= 2 * LOCAL_RADIUS
+        and max(unit.position.y for unit in buildings) - min(unit.position.y for unit in buildings)
+        <= 2 * LOCAL_RADIUS
     )
-    if target is None:
-        return False
-    for squad in groups:
-        if squad.target_id != target.entity_id:
-            squad.last_failure = None
-            squad.retry_tick = 0
-    _order_groups(
-        decision,
-        groups,
-        SquadPhase.ADVANCING,
-        target.selection_position,
-        target,
-        ceiling,
-        attack=True,
-        mass_attack=True,
+    if single_front:
+        objectives = [
+            decision.simulation.entities[view.army.objective_id]
+            for view in views
+            if view.army.objective_id in decision.simulation.entities
+            and (
+                not buildings or not decision.simulation.entities[view.army.objective_id].is_movable
+            )
+        ]
+        target = (
+            objectives[0]
+            if objectives
+            else _choose_target(
+                decision, [unit for view in views for unit in view.units], infrastructure=True
+            )
+        )
+        if target is not None:
+            for view in views:
+                reachable = decision.simulation._routes.can_reach_any(
+                    view.units[0].position,
+                    firing_approach_points(decision.simulation, view.units[0], target),
+                    decision.simulation._building_cells(),
+                )
+                if reachable:
+                    view.army.objective_id = target.entity_id
+                    view.army.plan_tick = tick
+                elif (
+                    view.army.plan_tick < 0
+                    or view.army.objective_id not in decision.simulation.entities
+                    or tick - view.army.plan_tick >= STRATEGY_TICKS
+                ):
+                    alternative = _choose_target(decision, view.units, infrastructure=True)
+                    view.army.objective_id = None if alternative is None else alternative.entity_id
+                    view.army.plan_tick = tick
+        return
+    pending = sorted(
+        (
+            view
+            for view in views
+            if view.army.plan_tick < 0
+            or view.army.objective_id not in decision.simulation.entities
+            or tick - view.army.plan_tick >= STRATEGY_TICKS
+        ),
+        key=lambda view: (view.army.plan_tick, view.index),
     )
-    return True
+    initial = all(view.army.plan_tick < 0 for view in views)
+    for view in pending if initial else pending[:1]:
+        nearby = [
+            unit
+            for other in [view, *(other for other in views if other is not view)]
+            if other.center.distance_to(view.center) <= 2 * ARMY_RADIUS
+            and decision.simulation._routes.can_reach_any(
+                view.units[0].position,
+                (other.units[0].position,),
+                decision.simulation._building_cells(),
+            )
+            for unit in other.units
+        ]
+        target = _choose_target(
+            decision,
+            nearby,
+            infrastructure=True,
+            candidate_limit=1 if initial else MAX_TARGET_CANDIDATES,
+            flank=view.index == 2,
+        )
+        current = decision.simulation.entities.get(view.army.objective_id or "")
+        if current is not None and not decision.simulation._routes.can_reach_any(
+            view.units[0].position,
+            firing_approach_points(decision.simulation, view.units[0], current),
+            decision.simulation._building_cells(),
+        ):
+            current = None
+            view.army.objective_id = None
+        if target is not None:
+            better = current is None or (
+                _target_value(target, flank=view.index == 2)
+                / (20 + view.center.distance_to(target.selection_position))
+                > 1.35
+                * _target_value(current, flank=view.index == 2)
+                / (20 + view.center.distance_to(current.selection_position))
+            )
+            if better or current is not None and current.is_movable:
+                view.army.objective_id = target.entity_id
+        elif current is None:
+            view.army.objective_id = None
+        view.army.plan_tick = tick
+
+
+def _retaining_contact(decision: _Decision, squad: Squad) -> bool:
+    if squad.phase is not SquadPhase.ATTACKING or squad.destination is None:
+        return False
+    return any(
+        target is not None
+        and target.selection_position.distance_to(squad.destination) <= CONTACT_LEASH
+        for unit in _members(decision, squad)
+        if unit.pursue_target
+        for target in (decision.simulation.entities.get(unit.attack_target_id or ""),)
+    )
+
+
+def _drive_campaigns(
+    decision: _Decision, groups: list[Squad], guarded: set[str], ceiling: int
+) -> None:
+    views = _army_views(decision, groups)
+    if not views:
+        return
+    _campaign_objectives(decision, views)
+    tick = decision.simulation.tick
+    views.sort(
+        key=lambda view: (
+            tick - view.army.update_tick < 3 * DECISION_TICKS,
+            not any(
+                unit.last_attacked_tick is not None and tick - unit.last_attacked_tick <= 10
+                for unit in view.units
+            ),
+            view.army.update_tick,
+            view.index,
+        )
+    )
+    for view in views[:MAX_SQUAD_UPDATES]:
+        if decision.orders >= ceiling:
+            break
+        view.army.update_tick = tick
+        target = decision.simulation.entities.get(view.army.objective_id or "")
+        if target is None:
+            support = min(
+                (other for other in views if other is not view),
+                key=lambda other: view.center.distance_to(other.center),
+                default=None,
+            )
+            if (
+                support is not None
+                and sum(len(squad.entity_ids) for squad in view.squads) >= REINFORCEMENT_SIZE
+                and view.center.distance_to(support.center) > 2 * ARMY_RADIUS
+                and decision.simulation._routes.can_reach_any(
+                    view.units[0].position,
+                    (support.units[0].position,),
+                    decision.simulation._building_cells(),
+                )
+            ):
+                _order_groups(
+                    decision,
+                    view.squads,
+                    SquadPhase.GATHERING,
+                    _staging_point(decision, support.center),
+                    None,
+                    ceiling,
+                )
+            continue
+        coalition = [
+            other
+            for other in views
+            if other.army.objective_id == target.entity_id
+            and other.center.distance_to(view.center) <= 2 * ARMY_RADIUS
+            and decision.simulation._routes.can_reach_any(
+                view.units[0].position,
+                (other.units[0].position,),
+                decision.simulation._building_cells(),
+            )
+        ]
+        units = [unit for other in coalition for unit in other.units]
+        contacts = {unit.entity_id: unit for unit in decision.threats(view.center)}
+        for squad in view.squads[:3]:
+            contacts.update(
+                (unit.entity_id, unit) for unit in decision.threats(_squad_center(decision, squad))
+            )
+        anchors = [
+            squad.destination
+            for squad in view.squads
+            if squad.phase is SquadPhase.ATTACKING and squad.destination is not None
+        ]
+        local = [
+            unit
+            for key, unit in contacts.items()
+            if key not in guarded
+            and (not anchors or any(unit.position.distance_to(p) <= CONTACT_LEASH for p in anchors))
+        ]
+        if local:
+            margin = decision.margin(units, local)
+            cohorts = [squad for other in coalition for squad in other.squads]
+            contact = min(
+                local,
+                key=lambda enemy: (view.center.distance_to(enemy.position), enemy.entity_id),
+            )
+            if margin < -0.4:
+                point = _assembly_point(decision, view.squads[0])
+                _order_groups(decision, cohorts, SquadPhase.RETREATING, point, None, ceiling)
+                for squad in cohorts:
+                    squad.target_id = target.entity_id
+                continue
+            if (
+                force_strength(local) >= force_strength(units) * 0.15
+                or view.center.distance_to(contact.position) <= contact.profile.attack_range + 3
+            ):
+                previous = {
+                    id(squad): squad.destination
+                    for squad in cohorts
+                    if squad.phase is SquadPhase.ATTACKING
+                }
+                _order_groups(
+                    decision,
+                    cohorts,
+                    SquadPhase.ATTACKING,
+                    contact.position,
+                    contact,
+                    ceiling,
+                    attack=True,
+                    mass_attack=True,
+                )
+                for squad in cohorts:
+                    squad.target_id = target.entity_id
+                    squad.destination = previous.get(id(squad)) or contact.selection_position
+                continue
+        for squad in view.squads:
+            if squad.phase is SquadPhase.RETREATING and tick - squad.phase_tick >= RETREAT_TICKS:
+                _set_phase(decision, squad, SquadPhase.ADVANCING)
+        nearby_buildings = [
+            enemy
+            for enemy in decision.enemies
+            if not enemy.is_movable
+            and enemy.selection_position.distance_to(view.center) <= LOCAL_RADIUS
+            and enemy.selection_position.distance_to(target.selection_position) <= 2 * LOCAL_RADIUS
+        ]
+        siege_cohorts = [squad for squad in view.squads if squad.phase is not SquadPhase.RETREATING]
+        if nearby_buildings and siege_cohorts:
+            siege = min(
+                nearby_buildings,
+                key=lambda enemy: (
+                    view.center.distance_to(enemy.selection_position),
+                    -TARGET_VALUES.get(enemy.kind, 100.0),
+                    enemy.entity_id,
+                ),
+            )
+            _order_groups(
+                decision,
+                siege_cohorts,
+                SquadPhase.ATTACKING,
+                siege.selection_position,
+                siege,
+                ceiling,
+                attack=True,
+                mass_attack=True,
+            )
+            for squad in siege_cohorts:
+                squad.target_id = target.entity_id
+                squad.destination = siege.selection_position
+            continue
+        # Shared intent does not require a shared tiny arrival point. Actual firing
+        # approaches and terrain routes remain in the ordinary budgeted combat pass.
+        mission = [
+            squad
+            for other in views
+            if other.army.objective_id == target.entity_id
+            for squad in other.squads
+            if not _retaining_contact(decision, squad)
+            and squad.phase is not SquadPhase.RETREATING
+            and (
+                squad.phase is not SquadPhase.GATHERING
+                or squad.target_id is not None
+                or len(squad.entity_ids) >= REINFORCEMENT_SIZE
+            )
+        ]
+        for squad in mission:
+            if squad.target_id != target.entity_id:
+                squad.last_failure = None
+                squad.retry_tick = 0
+        _order_groups(
+            decision,
+            mission,
+            SquadPhase.ADVANCING,
+            target.selection_position,
+            target,
+            ceiling,
+            attack=True,
+            mass_attack=True,
+        )
 
 
 def _pending_construction(decision: _Decision) -> list[ConstructionParameters]:

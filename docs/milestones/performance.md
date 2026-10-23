@@ -85,6 +85,9 @@ The thousand-unit move command workload covers default gathering and explicit st
 Both retain the command-response gate and five coordinated ticks within the fixed simulation-tick
 budget. Formation coordination uses live cohorts and shared routing; it does not add per-member
 pathfinding or relax collision, route-admission or frame gates.
+The crowd workload also covers immediate and FIFO strict attacks by 999 scouts against one target,
+retaining translated slots, shared route limits and the existing 100 ms p95 tick gate. Ordinary
+focus-attack coverage and its minimum in-range population remain unchanged.
 
 Behavior and timing variants retain identical full workloads; only timing enforces wall-clock
 budgets. Software and GPU gates measure different costs and remain separate.
@@ -104,6 +107,7 @@ use a declared 25/s established-economy fixture; upgrade and opening-income cove
 | [Continuous production](../../tests/performance/test_crowd_congestion_performance.py) | 296 defenders + four factories ->304 defenders; 100 software frames at 1920 x 1080/ten ticks; stable unique stations, separation >=90% contact distance, no building intrusion, >=100 Real FPS |
 | [Opponent decisions](../../tests/performance/test_opponent_performance.py) | 500 vs 500 mixed units, 60 ticks; original 80 x 80 opening-budget case, a 320 x 320, 32-builder, 100,000-resource surplus case, and the same large-map army/budget with 50 extra factories, 40 synthesizers, 36 turrets, seven repair hubs, a command center and extractor; unique bounded squads and per-decision command/candidate/forecast limits; timing requires complete tick p95 <100 ms and reports AI decisions/commands, starting funds, map size, builders and developed holdings |
 | [Mass mobilization](../../tests/performance/test_opponent_performance.py) | 600 AI tanks with a fragmented front contact and opposing rear command on 160 x 160, 120 ticks; one offensive order enrolls at least 500, matching pursuit is retained, at least 85% of surviving original rear members advance over 15 cells toward the objective, and route/command budgets stay bounded; timing requires tick p95 <100 ms |
+| [Multiple fronts](../../tests/performance/test_opponent_performance.py) | 320 mixed troops in five starting groups, three enemy production regions and three river crossings on 192 x 192, 120 ticks; five armies keep at least three objectives active, at least 80% of original troops advance ten cells west, at least 90% retain pursuit and every army receives a recent update; original shared command/candidate/forecast/combat-route limits remain; timing requires complete tick p95 <100 ms |
 | [Rich industry](../../tests/performance/test_opponent_performance.py) | 50 factories, 40 synthesizers, 36 turrets, seven hubs, 76 builders, 40 combat units and 200,000 funds on 256 x 224, 150 ticks; every opening factory receives standing production, at least four military kinds and 50 produced units, unique workers across more than 24 concurrent construction jobs, nonnegative cash and at most three AI commands per tick; timing requires complete tick p95 <100 ms |
 | [Developed repair](../../tests/performance/test_large_army_performance.py) | 1,000 selected units, 100 wounded, 120 extra repair/production sources on 320 x 320; enrollment creates no route fields, ordinary repair travel reaches all 100 within seven ticks using one shared field and the existing route allowance; command timing <100 ms |
 

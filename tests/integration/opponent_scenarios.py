@@ -90,6 +90,68 @@ def fragmented_army(count: int = 600) -> Simulation:
     return simulation
 
 
+def campaign_army(*, per_front: int = 64) -> Simulation:
+    """Five mixed groups, three enemy production regions and three river crossings."""
+    kinds = (
+        EntityKind.LIGHT_TANK,
+        EntityKind.LIGHT_TANK,
+        EntityKind.LIGHT_TANK,
+        EntityKind.LIGHT_TANK,
+        EntityKind.HEAVY_TANK,
+        EntityKind.LIGHT_ARTILLERY,
+        EntityKind.TANK_DESTROYER,
+        EntityKind.ARTILLERY,
+    )
+    data = opponent_scenario().game_map.to_dict()
+    data["width"] = data["height"] = 192
+    data["terrain"] = {
+        "default": "grass",
+        "rectangles": [
+            [80, 0, 6, 192, "water"],
+            *([80, y, 6, 12, "road"] for y in (24, 88, 148)),
+        ],
+    }
+    positions = {
+        "ai_factory": [168, 168],
+        "ai_builder": [164.5, 168.5],
+        "ai_income": [176, 176],
+        "player_factory": [12, 20],
+    }
+    for entity in data["entities"]:
+        entity["position"] = positions[entity["id"]]
+    data["resource_sites"] = [[176, 176]]
+    data["entities"].extend(
+        {"id": key, "kind": kind, "owner": "player", "position": [x, y]}
+        for key, kind, x, y in (
+            ("middle_factory", "factory", 14, 92),
+            ("south_factory", "factory", 12, 160),
+            ("north_income", "matter_synthesizer", 32, 28),
+            ("middle_income", "matter_synthesizer", 32, 100),
+        )
+    )
+    data["entities"].extend(
+        {
+            "id": f"army_{front}_{i:03d}",
+            "kind": kinds[i % len(kinds)].value,
+            "owner": "ai",
+            "position": [x + i % 8 * 1.2, y + i // 8 * 1.2],
+        }
+        for front, (x, y) in enumerate(
+            ((102.5, 20.5), (132.5, 52.5), (104.5, 90.5), (130.5, 126.5), (144.5, 164.5))
+        )
+        for i in range(per_front)
+    )
+    simulation = Simulation(load_map_data(data), record_history=False)
+    simulation.opponents["ai"].squads = [
+        Squad(
+            entity_ids=[f"army_{front}_{i:03d}" for i in range(start, min(start + 32, per_front))]
+        )
+        for front in range(5)
+        for start in range(0, per_front, 32)
+    ]
+    return simulation
+
+
 def established_empire(*, extra_builders: int = 0) -> Simulation:
     entities: list[dict[str, object]] = [
         {"id": "human", "kind": "factory", "position": [4, 4], "owner": "player"},

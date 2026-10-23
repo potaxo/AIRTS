@@ -15,9 +15,14 @@ from airts.adapters.persistence import (
     save_simulation,
 )
 from airts.adapters.replay import capture_replay, run_replay
+from airts.contracts.automations import ConstructionParameters
 from airts.contracts.commands import (
+    CancelAutomationCommand,
     CancelUpgradeCommand,
+    CreateConstructionCommand,
     MoveCommand,
+    RepairBuildingCommand,
+    SetDeveloperModeCommand,
     UpgradeEntityCommand,
     command_from_dict,
     command_to_dict,
@@ -77,6 +82,181 @@ def upgrade_world(*, match: bool = False) -> Simulation:
             }
         )
     )
+
+
+def unfinished_income_world(kind: EntityKind, *, hub: bool = False) -> tuple[Simulation, str, str]:
+    world = Simulation(
+        load_map_data(
+            {
+                "id": "queued-upgrades",
+                "name": "Queued upgrades",
+                "width": 40,
+                "height": 24,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "builder", "kind": "builder", "position": [8.5, 8.5]},
+                    {"id": "helper", "kind": "builder", "position": [8.5, 9.5]},
+                ]
+                + ([{"id": "hub", "kind": "repair_hub", "position": [17, 10]}] if hub else []),
+            }
+        )
+    )
+    assert world.execute(SetDeveloperModeCommand(True)).accepted
+    world.advance(20)
+    assert world.execute(SetDeveloperModeCommand(False)).accepted
+    result = world.execute(CreateConstructionCommand("builder", kind, Point(12, 10)))
+    assert result.accepted
+    world.advance()
+    parameters = world.automations[result.automation_id or ""].parameters
+    assert isinstance(parameters, ConstructionParameters) and parameters.site_entity_id is not None
+    assert not world.entities[parameters.site_entity_id].is_complete
+    return world, parameters.site_entity_id, result.automation_id or ""
+
+
+@pytest.mark.parametrize("kind", [EntityKind.RESOURCE_GENERATOR, EntityKind.MATTER_SYNTHESIZER])
+@pytest.mark.parametrize("completion", ["construction", "builder-repair", "hub-repair"])
+def test_paid_upgrade_queue_starts_after_construction_or_repair_and_restores_and_replays(
+    kind: EntityKind, completion: str, tmp_path: Path
+) -> None:
+    world, site_id, job_id = unfinished_income_world(kind, hub=completion == "hub-repair")
+    site = world.entities[site_id]
+    balance = world.resources["player"]
+    for _ in range(2):
+        assert world.execute(UpgradeEntityCommand(site_id, queued=True)).accepted
+    assert world.resources["player"] == balance - sum(item.cost for item in kind.upgrades)
+    assert site.upgrade.queued_count == 2 and site.upgrade.remaining_ticks == 0
+    assert not world.execute(UpgradeEntityCommand(site_id, queued=True)).accepted
+    if completion != "construction":
+        assert world.execute(CancelAutomationCommand(job_id)).accepted
+        if completion == "builder-repair":
+            assert world.execute(RepairBuildingCommand(("helper",), site_id)).accepted
+    path = tmp_path / "queued-upgrades.json"
+    save_simulation(world, path)
+    restored = load_simulation(path)
+    assert restored.export_state() == world.export_state()
+    first, second = kind.upgrades
+    for instance in (world, restored):
+        entity = instance.entities[site_id]
+        for _ in range(100):
+            if entity.is_complete:
+                break
+            instance.advance()
+            assert entity.upgrade.remaining_ticks == 0
+        assert entity.is_complete and entity.upgrade.tier == 1
+        assert entity.upgrade.queued_count == 2
+        instance.advance()
+        assert entity.upgrade.remaining_ticks == first.duration_ticks
+        assert entity.upgrade.queued_count == 1
+        instance.advance(first.duration_ticks)
+        assert entity.upgrade.tier == 2
+        assert entity.upgrade.remaining_ticks == second.duration_ticks
+        assert entity.upgrade.queued_count == 0
+        assert economy.income_per_second(instance, "player") == first.profile.income_per_second
+        instance.advance(second.duration_ticks)
+        assert entity.upgrade.tier == 3 and entity.upgrade.remaining_ticks == 0
+        assert economy.income_per_second(instance, "player") == second.profile.income_per_second
+        charges = [
+            event.details["amount"]
+            for event in instance.events.events
+            if event.event_type is EventType.RESOURCE_CHANGED
+            and event.details.get("reason") == "UPGRADE_COST"
+        ]
+        assert charges == [-first.cost, -second.cost]
+    assert restored.export_state() == world.export_state()
+    assert run_replay(capture_replay(world)).export_state() == world.export_state()
+
+
+def test_pending_upgrades_wait_for_orphan_scaffold_without_progress_or_income() -> None:
+    world, site_id, job_id = unfinished_income_world(EntityKind.RESOURCE_GENERATOR)
+    assert world.execute(CancelAutomationCommand(job_id)).accepted
+    assert world.execute(UpgradeEntityCommand(site_id)).accepted
+    site = world.entities[site_id]
+    progress = site.construction_progress
+    balance = world.resources["player"]
+    world.advance(350)
+    assert site.upgrade.tier == 1 and site.upgrade.queued_count == 1
+    assert site.upgrade.remaining_ticks == 0 and site.construction_progress == progress
+    assert world.resources["player"] == balance
+    assert not world.events.query(
+        event_types=frozenset({EventType.UPGRADE_STARTED}), subject_id=site_id
+    )
+
+
+@pytest.mark.parametrize("phase", ["unfinished", "running-first", "running-second"])
+def test_cancel_refunds_only_unfinished_paid_upgrade_tasks_once(phase: str) -> None:
+    kind = EntityKind.RESOURCE_GENERATOR
+    world, site_id, _ = unfinished_income_world(kind)
+    for _ in range(2):
+        assert world.execute(UpgradeEntityCommand(site_id, queued=True)).accepted
+    site = world.entities[site_id]
+    if phase != "unfinished":
+        while not site.upgrade.remaining_ticks:
+            world.advance()
+        if phase == "running-second":
+            world.advance(kind.upgrades[0].duration_ticks)
+            assert site.upgrade.tier == 2
+    balance = world.resources["player"]
+    tier = site.upgrade.tier
+    refund = sum(item.cost for item in kind.upgrades[tier - 1 :])
+    assert world.execute(CancelUpgradeCommand(site_id)).accepted
+    assert world.resources["player"] == balance + refund
+    assert site.upgrade.queued_count == site.upgrade.remaining_ticks == 0
+    assert not world.execute(CancelUpgradeCommand(site_id)).accepted
+    assert world.resources["player"] == balance + refund
+    world.advance(1000)
+    assert site.upgrade.tier == tier
+
+
+def test_destroying_a_scaffold_discards_prepaid_upgrade_tasks_without_refund() -> None:
+    world, site_id, _ = unfinished_income_world(EntityKind.RESOURCE_GENERATOR)
+    assert world.execute(UpgradeEntityCommand(site_id, queued=True)).accepted
+    balance = world.resources["player"]
+    assert world.remove_entity(site_id).accepted
+    assert world.resources["player"] == balance
+    world.advance(350)
+    assert not world.events.query(
+        event_types=frozenset({EventType.UPGRADE_STARTED}), subject_id=site_id
+    )
+
+
+def test_unfinished_selection_queues_maximum_affordable_buildings_and_can_cancel() -> None:
+    world = upgrade_world()
+    for index in range(2):
+        entity = replace(
+            world.entities["extractor"],
+            entity_id=f"extra_{index}",
+            position=Point(4 + index * 2, 2),
+            upgrade=type(world.entities["extractor"].upgrade)(),
+        )
+        world.entities[entity.entity_id] = entity
+        world.occupancy.place(entity.entity_id, entity.occupied_cells)
+    ids = {"extractor", "extra_0", "extra_1"}
+    for key in ids:
+        world.entities[key].construction_progress = 0.5
+    world.resources["player"] = 257
+    app = AirtsApp(world)
+    app.selected_entities = ids
+    app._selection_changed()
+    pygame.font.init()
+    app.ui.font = pygame.font.Font(None, 22)
+    app.ui.small_font = pygame.font.Font(None, 18)
+    surface = pygame.Surface(app.window_size)
+    selection.draw_selection(app, surface)
+    button = next(rect for rect, action in app._command_buttons if action.startswith("upgrade:"))
+    app._handle_command_click(button.center)
+    assert world.resources["player"] == 17
+    assert sum(world.entities[key].upgrade.queued_count for key in ids) == 2
+    assert all(world.entities[key].upgrade.remaining_ticks == 0 for key in ids)
+    app._command_buttons.clear()
+    with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as text:
+        selection.draw_selection(app, surface)
+    assert any("Waiting for construction" in call.args[1] for call in text.call_args_list)
+    button = next(
+        rect for rect, action in app._command_buttons if action.startswith("cancel_upgrade:")
+    )
+    app._handle_command_click(button.center)
+    assert world.resources["player"] == 257
+    assert all(world.entities[key].upgrade.queued_count == 0 for key in ids)
 
 
 @pytest.mark.parametrize("entity_id", ["extractor", "synthesizer"])
@@ -166,6 +346,37 @@ def test_cancellation_refunds_once_and_preserves_global_settlement() -> None:
     assert world.resources["player"] == balance + base_income
 
 
+def test_active_upgrade_can_queue_the_next_tier_without_resetting_paid_progress(
+    tmp_path: Path,
+) -> None:
+    world = upgrade_world()
+    assert world.execute(UpgradeEntityCommand("extractor")).accepted
+    world.advance(7)
+    entity = world.entities["extractor"]
+    remaining = entity.upgrade.remaining_ticks
+    balance = world.resources["player"]
+    assert world.execute(UpgradeEntityCommand("extractor", queued=True)).accepted
+    assert world.resources["player"] == balance - EntityKind.RESOURCE_GENERATOR.upgrades[1].cost
+    assert entity.upgrade.remaining_ticks == remaining and entity.upgrade.queued_count == 1
+    assert not world.execute(UpgradeEntityCommand("extractor", queued=True)).accepted
+    path = tmp_path / "active-upgrade-queue.json"
+    save_simulation(world, path)
+    restored = load_simulation(path)
+    assert restored.export_state() == world.export_state()
+    for instance in (world, restored):
+        instance.advance(remaining)
+        second = instance.entities["extractor"]
+        assert second.upgrade.tier == 2 and second.upgrade.queued_count == 0
+        assert (
+            second.upgrade.remaining_ticks
+            == EntityKind.RESOURCE_GENERATOR.upgrades[1].duration_ticks
+        )
+        instance.advance(second.upgrade.remaining_ticks)
+        assert second.upgrade.tier == 3 and second.upgrade.remaining_ticks == 0
+    assert restored.export_state() == world.export_state()
+    assert run_replay(capture_replay(world)).export_state() == world.export_state()
+
+
 def test_destruction_does_not_refund_or_finish_an_upgrade() -> None:
     world = upgrade_world()
     assert world.execute(UpgradeEntityCommand("extractor")).accepted
@@ -179,14 +390,12 @@ def test_destruction_does_not_refund_or_finish_an_upgrade() -> None:
     assert not world.execute(CancelUpgradeCommand("extractor")).accepted
 
 
-@pytest.mark.parametrize("invalid", ["missing", "enemy", "unfinished", "poor", "unsupported"])
+@pytest.mark.parametrize("invalid", ["missing", "enemy", "poor", "unsupported"])
 def test_rejections_preserve_resources_and_existing_progress(invalid: str) -> None:
     world = upgrade_world()
     entity_id = "extractor"
     if invalid in {"missing", "enemy"}:
         entity_id = invalid
-    elif invalid == "unfinished":
-        world.entities[entity_id].construction_progress = 0.5
     elif invalid == "poor":
         world.resources["player"] = 119
     else:
@@ -233,6 +442,9 @@ def test_partial_cycle_and_paid_upgrades_save_continue_cancel_and_replay(
         ("remaining_ticks", -1),
         ("remaining_ticks", 301),
         ("remaining_ticks", True),
+        ("queued_count", -1),
+        ("queued_count", True),
+        ("queued_count", 3),
     ],
 )
 def test_saves_reject_invalid_upgrade_state(field: str, value: object) -> None:
@@ -245,7 +457,7 @@ def test_saves_reject_invalid_upgrade_state(field: str, value: object) -> None:
         )
 
 
-@pytest.mark.parametrize("case", ["max_tier", "unfinished", "missing"])
+@pytest.mark.parametrize("case", ["max_tier", "unfinished", "missing", "missing_queue"])
 def test_saves_reject_incoherent_upgrade_state(case: str) -> None:
     world = upgrade_world()
     entity = world.entities["extractor"]
@@ -258,6 +470,8 @@ def test_saves_reject_incoherent_upgrade_state(case: str) -> None:
     state = world.export_state()
     if case == "missing":
         del state["entities"]["extractor"]["upgrade"]  # type: ignore[index,attr-defined]
+    elif case == "missing_queue":
+        del state["entities"]["extractor"]["upgrade"]["queued_count"]  # type: ignore[index,attr-defined]
     with pytest.raises(PersistenceError):
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": world.game_map.to_dict(), "state": state}
@@ -265,7 +479,12 @@ def test_saves_reject_incoherent_upgrade_state(case: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "command", [UpgradeEntityCommand("extractor"), CancelUpgradeCommand("extractor", "enemy")]
+    "command",
+    [
+        UpgradeEntityCommand("extractor"),
+        UpgradeEntityCommand("extractor", queued=True),
+        CancelUpgradeCommand("extractor", "enemy"),
+    ],
 )
 def test_upgrade_command_codec(command: UpgradeEntityCommand | CancelUpgradeCommand) -> None:
     assert command_from_dict(command_to_dict(command)) == command
@@ -360,7 +579,11 @@ def test_box_selected_buildings_upgrade_affordable_idle_members_while_peers_are_
     def draw() -> list[pygame.Rect]:
         app._command_buttons.clear()
         selection.draw_selection(app, screen)
-        return [rect for rect, action in app._command_buttons if action.startswith("upgrade:")]
+        return [
+            rect
+            for rect, action in app._command_buttons
+            if action.startswith("upgrade:") and '"income_0"' not in action
+        ]
 
     buttons = draw()
     assert len(buttons) == bool(affordable)

@@ -130,7 +130,7 @@ def draw_help(view: MenusView, screen: pygame.Surface) -> None:
     lines = (
         "1 Select   2 Line   3 Rectangle   4 Freehand",
         "Right-click Move/Attack or finish a line   Middle-drag Pan",
-        "Single right-click preserves formation; double right-click gathers.",
+        "Right-click gathers; Keep formation ON/OFF toggles strict move/attack formation.",
         "WASD Camera   T Patrol   Y Defend   X Stop   H Hold",
         "R Repair   Space Pause   Wheel Zoom",
         "Minimap click/drag: Camera",

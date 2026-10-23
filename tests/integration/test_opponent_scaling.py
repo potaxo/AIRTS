@@ -101,7 +101,8 @@ def test_committed_mass_army_survives_losses_and_load_without_regrouping() -> No
     simulation = fragmented_army()
     simulation.advance(10)
     assert all(
-        squad.target_id == "player_factory" and squad.phase is SquadPhase.ADVANCING
+        squad.target_id == "player_factory"
+        and squad.phase in {SquadPhase.ADVANCING, SquadPhase.ATTACKING}
         for squad in simulation.opponents["ai"].squads
     )
     for index in range(400, 600):
@@ -117,9 +118,10 @@ def test_committed_mass_army_survives_losses_and_load_without_regrouping() -> No
     restored.advance(30)
     groups = restored.opponents["ai"].squads
     assert 250 <= sum(len(squad.entity_ids) for squad in groups) < 500
-    assert all(squad.phase is SquadPhase.ADVANCING for squad in groups)
+    assert all(squad.phase in {SquadPhase.ADVANCING, SquadPhase.ATTACKING} for squad in groups)
     assert {squad.target_id for squad in groups} == {"player_factory"}
     assert all(restored.entities[key].pursue_target for squad in groups for key in squad.entity_ids)
+    assert len(restored.opponents["ai"].field_armies) == opponent_ai.FIELD_ARMY_COUNT
 
 
 def test_rich_background_production_respects_manual_pauses_and_saved_standing_orders() -> None:

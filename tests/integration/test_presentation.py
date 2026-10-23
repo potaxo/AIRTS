@@ -60,7 +60,10 @@ def test_repair_shortcut_only_sends_selected_units_below_half_health(health: int
     app = AirtsApp(simulation)
     simulation.entities["unit_02"].health = health
     simulation.entities["unit_01"].health = 1  # An unselected wounded unit stays untouched.
-    app.selected_entities = {"unit_02", "factory"}
+    app.selected_entities = {"unit_02", "unit_03", "factory"}
+    app._selection_changed()
+    assert simulation.execute(MoveCommand(("unit_03",), Point(3.5, 6.5))).accepted
+    retained_path = list(simulation.entities["unit_03"].path)
 
     app._handle_key(pygame.K_r)
 
@@ -71,9 +74,41 @@ def test_repair_shortcut_only_sends_selected_units_below_half_health(health: int
         assert automation.entity_ids == ["unit_02"]
         assert isinstance(automation.parameters, RepairParameters)
         assert automation.parameters.health_threshold == 0.5
+        assert app.selected_entities == {"unit_03", "factory"}
+        assert set(simulation.selection.entity_ids) == app.selected_entities
+        assert simulation.entities["unit_03"].path == retained_path
+        app._handle_key(pygame.K_x)
+        assert not simulation.entities["unit_03"].path
+        assert simulation.assignments["unit_02"] == automation.automation_id
     else:
         assert "unit_02" not in simulation.assignments
         assert not simulation.live_automations
+        assert app.selected_entities == {"unit_02", "unit_03", "factory"}
+        assert set(simulation.selection.entity_ids) == app.selected_entities
+        assert simulation.entities["unit_03"].path == retained_path
+
+
+@pytest.mark.parametrize("service_available", [False, True])
+def test_repair_shortcut_only_deselects_units_after_success(service_available: bool) -> None:
+    data = runtime_map().to_dict()
+    if not service_available:
+        data["entities"] = [
+            entity for entity in data["entities"] if entity["id"].startswith("unit_")
+        ]
+    simulation = Simulation(load_map_data(data))
+    app = AirtsApp(simulation)
+    simulation.entities["unit_02"].health = 1
+    app.selected_entities = {"unit_02"}
+    app._selection_changed()
+    app._handle_key(pygame.K_r)
+    if service_available:
+        assert not app.selected_entities and not simulation.selection.entity_ids
+        assert app.inspected_entity_id is None and app.inspected_kind is None
+        assert "unit_02" in simulation.assignments
+    else:
+        assert app.selected_entities == {"unit_02"}
+        assert simulation.selection.entity_ids == ("unit_02",)
+        assert not simulation.assignments
 
 
 def test_extractor_selection_has_no_manual_income_action() -> None:

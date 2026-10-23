@@ -80,7 +80,6 @@ from airts.systems import (
     automation_runtime,
     combat_geometry,
     command_handlers,
-    formations,
     opponent_ai,
     production_orders,
     spatial_commands,
@@ -437,7 +436,7 @@ class Simulation:
         if isinstance(command, MoveCommand):
             return command_handlers.move(self, command)
         if isinstance(command, SetFormationCommand):
-            return formations.set_formation(self, command)
+            return command_handlers.set_formation(self, command)
         if isinstance(command, StopCommand):
             return command_handlers.stop(self, command, hold=False)
         if isinstance(command, HoldPositionCommand):
@@ -690,7 +689,10 @@ class Simulation:
                 entity.order_queue = retained_orders
             if entity.attack_target_id in removed_ids:
                 if entity.attack_gather_point is not None:
-                    if not entity.order_queue:
+                    if entity.formation_leg is not None:
+                        if entity.order_queue:
+                            entity.formation_goal = entity.formation_leg = None
+                    elif not entity.order_queue:
                         gatherings.setdefault(
                             (entity.owner_id, entity.attack_gather_point), []
                         ).append(entity.entity_id)

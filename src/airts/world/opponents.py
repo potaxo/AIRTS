@@ -43,12 +43,23 @@ class Squad:
 
 
 @dataclass(slots=True)
+class FieldArmy:
+    """Disposable grouping; durable missions remain on the constituent squads."""
+
+    squads: list[Squad] = field(default_factory=list)
+    objective_id: str | None = None
+    plan_tick: int = -1
+    update_tick: int = -1
+
+
+@dataclass(slots=True)
 class OpponentState:
     reserve: Squad = field(default_factory=Squad)
     squads: list[Squad] = field(default_factory=list)
     budget_paused_ids: list[str] = field(default_factory=list)
     growth_credit: float = 0.0
     budget_tick: int = 0
+    field_armies: list[FieldArmy] = field(default_factory=list, compare=False, repr=False)
 
     def remove_entity(self, entity_id: str) -> None:
         for squad in (self.reserve, *self.squads):

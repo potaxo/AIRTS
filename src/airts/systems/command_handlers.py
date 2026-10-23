@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from airts.contracts.automations import (
@@ -38,6 +39,7 @@ from airts.contracts.commands import (
     ResumeAutomationCommand,
     SetAIIncomeMultiplierCommand,
     SetDeveloperModeCommand,
+    SetFormationCommand,
     StopCommand,
     ValidationFailure,
     ValidationPhase,
@@ -429,6 +431,47 @@ def modify_automation(simulation: Simulation, command: ModifyAutomationCommand) 
     return simulation._accept("modify_automation", automation.automation_id)
 
 
+def set_formation(simulation: Simulation, command: SetFormationCommand) -> CommandResult:
+    failure = validate_entities(
+        simulation, command.entity_ids, command.owner_id, require_movable=True
+    )
+    if failure is not None:
+        return simulation._reject_validation("set_formation", failure)
+    if type(command.enabled) is not bool:
+        return simulation._reject_validation(
+            "set_formation",
+            ValidationFailure(ValidationPhase.SCHEMA, "ENABLED_MUST_BE_BOOLEAN", "enabled"),
+        )
+    members = [simulation.entities[key] for key in command.entity_ids]
+    center = Point(
+        sum(e.position.x for e in members) / len(members),
+        sum(e.position.y for e in members) / len(members),
+    )
+    group = f"{simulation.tick}:{simulation.command_count}:{min(command.entity_ids)}"
+    used = {e.formation_group for e in simulation.entities.values()}
+    while group in used:
+        group += ":"
+    for entity in members:
+        entity.formation_group = group if command.enabled else None
+        entity.formation_offset = (
+            Point(entity.position.x - center.x, entity.position.y - center.y)
+            if command.enabled
+            else None
+        )
+        entity.formation_goal = entity.formation_leg = None
+        entity.order_queue = [
+            replace(order, formation_goal=None, formation_leg=None) for order in entity.order_queue
+        ]
+    if command.enabled:
+        for entity in members:
+            if entity.pursue_target and entity.attack_gather_point is not None:
+                entity.path.clear()
+                entity.move_target = None
+                movement.reset_movement_liveness(entity)
+        formations.begin_attack(simulation, command.entity_ids)
+    return simulation._accept("set_formation")
+
+
 def move(simulation: Simulation, command: MoveCommand) -> CommandResult:
     failure = validate_entities(
         simulation, command.entity_ids, command.owner_id, require_movable=True
@@ -575,6 +618,7 @@ def attack(simulation: Simulation, command: AttackCommand) -> CommandResult:
         entity.attack_gather_point = target.selection_position if entity.is_movable else None
         entity.pursue_target = entity.is_movable
         entity.state = UnitState.ATTACKING
+    formations.begin_attack(simulation, attackers)
     return simulation._accept("attack")
 
 

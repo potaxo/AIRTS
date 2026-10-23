@@ -148,6 +148,7 @@ class ReclaimBuildingCommand:
 class UpgradeEntityCommand:
     entity_id: str
     owner_id: str = "player"
+    queued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +433,11 @@ def command_to_dict(command: Command) -> dict[str, object]:
             else "cancel_upgrade",
             "entity_id": command.entity_id,
             "owner_id": command.owner_id,
+            **(
+                {"queued": True}
+                if isinstance(command, UpgradeEntityCommand) and command.queued
+                else {}
+            ),
         }
     if isinstance(command, SetDeveloperModeCommand):
         return {
@@ -707,7 +713,13 @@ def command_from_dict(raw_data: object) -> Command:
         upgrade_class = (
             UpgradeEntityCommand if command_type == "upgrade_entity" else CancelUpgradeCommand
         )
-        return upgrade_class(_string(data.get("entity_id"), "entity_id"), owner_id)
+        if upgrade_class is UpgradeEntityCommand:
+            return UpgradeEntityCommand(
+                _string(data.get("entity_id"), "entity_id"),
+                owner_id,
+                queued=_boolean(data.get("queued", False), "queued"),
+            )
+        return CancelUpgradeCommand(_string(data.get("entity_id"), "entity_id"), owner_id)
     if command_type == "move":
         return MoveCommand(
             _entity_ids(data.get("entity_ids")),
