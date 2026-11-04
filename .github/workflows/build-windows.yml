@@ -40,7 +40,8 @@ jobs:
       - name: Build Windows debug package
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --console --collect-data airts --name AIRTS src/airts/__main__.py
+          # Both packages are imported dynamically at runtime; include their native extensions.
+          python -m PyInstaller --noconfirm --clean --onedir --console --collect-data airts --collect-all moderngl --collect-all glcontext --name AIRTS src/airts/__main__.py
 
       - name: Verify executable
         shell: pwsh
