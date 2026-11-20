@@ -7,13 +7,17 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
 from math import ceil, floor, sqrt
+from operator import attrgetter
 
 import numpy as np
 
 from airts.contracts.spatial import Point
-from airts.world._numeric import FloatArray, WordArray, compile_numeric
+from airts.world._numeric import FloatArray, WordArray, compile_numeric, point_coordinates
 from airts.world.entities import Entity
 from airts.world.map import Cell, GameMap
+
+PACKED_VISIBILITY_MIN_SOURCES = 1_024
+_VisibilitySignature = bytes | tuple[tuple[float, float, float], ...]
 
 
 class VisibilityState(StrEnum):
@@ -140,17 +144,21 @@ class VisibilitySystem:
         self.game_map = game_map
         _visibility_words(np.empty((0, 3), dtype=np.float64), game_map.width, game_map.height)
         self.players: dict[str, PlayerVisibility] = {}
-        self._grouped_masks: dict[
-            str, tuple[tuple[tuple[float, float, float], ...], list[int]]
-        ] = {}
+        self._grouped_masks: dict[str, tuple[_VisibilitySignature, list[int]]] = {}
         self._source_masks: dict[
             str,
             tuple[str, Point, float, tuple[tuple[int, int], ...]],
         ] = {}
 
-    def update(self, entities: dict[str, Entity], tick: int) -> dict[str, tuple[int, int, int]]:
+    def update(
+        self,
+        entities: dict[str, Entity],
+        tick: int,
+        *,
+        positions_by_owner: dict[str, dict[str, Point]] | None = None,
+    ) -> dict[str, tuple[int, int, int]]:
         if len(entities) > 128:
-            return self._update_grouped(entities, tick)
+            return self._update_grouped(entities, tick, positions_by_owner)
         self._grouped_masks.clear()
         sources: dict[str, list[tuple[tuple[int, int], ...]]] = {}
         for entity_id, entity in entities.items():
@@ -186,26 +194,58 @@ class VisibilitySystem:
         self,
         entities: dict[str, Entity],
         tick: int,
+        positions_by_owner: dict[str, dict[str, Point]] | None,
     ) -> dict[str, tuple[int, int, int]]:
         """Compute exact circle unions without rebuilding Python masks for every unit."""
         self._source_masks.clear()
+        packed_positions = (
+            positions_by_owner if len(entities) >= PACKED_VISIBILITY_MIN_SOURCES else None
+        )
+        if packed_positions is None and len(entities) >= PACKED_VISIBILITY_MIN_SOURCES:
+            packed_positions = {}
+            for key, entity in entities.items():
+                packed_positions.setdefault(entity.owner_id, {})[key] = entity.selection_position
         sources: dict[str, list[tuple[float, float, float]]] = {}
-        for entity in entities.values():
-            position = entity.selection_position
-            sources.setdefault(entity.owner_id, []).append(
-                (position.x, position.y, entity.vision_range)
-            )
+        if packed_positions is None:
+            for entity in entities.values():
+                center = entity.selection_position
+                sources.setdefault(entity.owner_id, []).append(
+                    (center.x, center.y, entity.vision_range)
+                )
         changes: dict[str, tuple[int, int, int]] = {}
-        for player_id in sorted(set(self.players).union(sources)):
-            signature = tuple(sources.get(player_id, []))
+        owners = sources if packed_positions is None else packed_positions
+        for player_id in sorted(set(self.players).union(owners)):
+            signature: _VisibilitySignature
+            if packed_positions is None:
+                signature = tuple(sources.get(player_id, ()))
+                array = None
+            else:
+                points = packed_positions.get(player_id, {})
+                array = np.empty((len(points), 3), dtype=np.float64)
+                point_coordinates(tuple(points.values()), array[:, :2])
+                array[:, 2] = np.fromiter(
+                    map(attrgetter("vision_range"), map(entities.__getitem__, points)),
+                    np.float64,
+                    len(points),
+                )
+                signature = array.tobytes()
             cached = self._grouped_masks.get(player_id)
             if cached is None or cached[0] != signature:
-                array = np.asarray(signature, dtype=np.float64).reshape((-1, 3))
+                if array is None:
+                    array = np.asarray(signature, dtype=np.float64).reshape((-1, 3))
                 words = _visibility_words(array, self.game_map.width, self.game_map.height)
-                row_masks = [
-                    int.from_bytes(row.astype("<u8", copy=False).tobytes(), "little")
-                    for row in words
-                ]
+                if packed_positions is None:
+                    row_masks = [
+                        int.from_bytes(row.astype("<u8", copy=False).tobytes(), "little")
+                        for row in words
+                    ]
+                else:
+                    packed = words.astype("<u8", copy=False).tobytes()
+                    stride = words.shape[1] * words.itemsize
+                    row_masks = [
+                        int.from_bytes(packed[offset : offset + stride], "little")
+                        for offset in range(0, len(packed), stride)
+                    ]
                 self._grouped_masks[player_id] = signature, row_masks
             else:
                 row_masks = cached[1]

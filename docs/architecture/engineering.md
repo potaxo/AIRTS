@@ -108,6 +108,13 @@ commands, duplicate resource transactions, invalid references and partial saves 
 Numerical approximations need bounded error and relevant finite-value, clearance, speed and gameplay
 checks. Measure responsiveness and complete workloads instead of assuming optimizations are faster.
 
+The native frontend hands one complete tick to its simulation worker and applies queued UI input
+only after joining it. GPU drawing during execution uses published buffers and camera-only inputs;
+it does not clone, serialize or read a partially advanced world. Numeric query workers only read
+position-stable arrays and produce disjoint row results. The shared numeric adapter bounds workers,
+releases the GIL and joins all readers before returning or propagating an error. The command facade
+and system-specific mutation owners remain unchanged.
+
 ## Test ownership
 
 | Suite | Contract |

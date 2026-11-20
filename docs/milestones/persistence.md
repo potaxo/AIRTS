@@ -28,6 +28,23 @@ must define its own synchronization and determinism requirements.
 
 ## Authoritative and derived data
 
+AI decision snapshots, numeric placement terrain, prepared path goals and dense/sparse spatial
+query storage are derived caches. They rebuild from current map/world state; none changes the save
+layout or needs migration. Query and scan deduplication retains current replay diagnostics and
+format tags. Presentation-only incremental birth records, facing seeds and the slow-tick publication
+gate are not saved world state.
+Grouped query arrays, native worker outputs, pre-tick click references and published GPU buffers
+are derived as well. The frontend joins its single tick writer and applies earlier input before
+capturing a save or replacing the world; query readers finish before their caller can return.
+Headless save/replay APIs remain synchronous. This execution change retains the current format
+tags and diagnostics; cross-worker exact reproduction remains diagnostic under the policy above.
+Reused combat grid/storage and per-AI-pass capability/perception snapshots are rebuilt on load.
+Exact firing-ring caches, combat-pass inventories and connectivity bitmaps are derived as well.
+They do not change authoritative fields, save/replay tags or the diagnostic policy above.
+Entity selection centers cache immutable kind/origin geometry; a different position object or kind
+refreshes the center. This cache is excluded from equality, representation and save fields, and
+does not introduce authoritative state or change the current save/replay format tags.
+
 Saves include map/team configuration, results, opponent memory, resources, entities, selections,
 queues, automation assignments/lifecycle, damage, projectile/trace state and ID counters.
 The existing events/command-history arrays are empty when recording is off; Debug saves retain
@@ -63,6 +80,9 @@ Spatial buckets, numeric scratch, contact graphs/directions/leaders, navigation 
 diagnostics and unfinished-automation query indexes rebuild from authoritative state. Presentation
 history is not saved. Mobile bodies may share occupancy cells; real buildings remain exclusive.
 Movement feedback masks/work lists and AI decision-position batches are derived scratch as well.
+Reusable dynamic movement records and cached mobile profile rows rebuild from entities after load;
+they add no saved fields or second authoritative copy of movement state. This input-pipeline change
+retains the existing save/replay tags and diagnostic policy.
 Restoration shares equal immutable entity path/recovery waypoints within a load; each entity keeps
 its own mutable path list. No process-wide point cache or coordinate approximation is introduced.
 Large file loads drain decoding garbage after restoration at the load boundary; automatic GC
@@ -94,8 +114,12 @@ diagnostic, without automatic migration.
 | --- | --- |
 | Sandbox save v32 | Current write/read format |
 | Match save v26 | Current write/read format |
-| Sandbox replay v43 / match replay v47 | Current diagnostic formats and exact verification |
+| Sandbox replay v46 / match replay v52 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
+
+Match v52 uses a wider interval for extra macro planning in large worlds. Its
+command schedule can change construction and production timing after a match is loaded.
+Current save formats still restore their stored routes and production queues.
 
 Upgrade state includes a required nonnegative paid queue count. Running plus queued transitions
 cannot exceed configured tiers. An unfinished building may retain paid queued upgrades at T1 with
@@ -142,9 +166,9 @@ Entity profiles supply immutable mass, weapon, economy and capability data from 
 forecasts, spawn clearance, navigation fields and query caches are rebuilt. Reclaim and repair targets
 remain authoritative references and cannot conflict with each other or automation control.
 
-Turret footprint/display size and repair-hub range balance changes use the current profiles
+Turret footprint/display size, repair-hub range and command-center income balance changes use the current profiles
 when loading existing current-format saves. Stored fields and format tags are unchanged;
-recordings from before the balance change may produce different combat or repair results.
+recordings from before the balance change may produce different combat, repair or resource results.
 Current command recording and replay verification remain available.
 
 Defense parameters carry a required boolean marking production-managed groups. Several production
@@ -176,6 +200,15 @@ Direct movement and pending FIFO work now exclude automatic combat-support recru
 human and AI orders. Saved paths, queues and existing pursuits retain their representation; current
 saves resume under this priority rule. Replay tags change because regenerated support events and
 trajectories can differ. Current-format continuation and exact replay diagnostics remain enabled.
+
+Shared-group attack admission, batched FIFO activation and elastic formation start-up replace
+individual pursuit-route admission. Paths, target IDs, queues and formation metadata keep their
+existing representation; current saves, including battles with pending pursuit, load without
+migration. Per-tick search/materialization budgets and route fields remain derived and rebuild on
+load. Gathering after a kill reuses the queued move's existing shared-goal field. Existing
+queues resume with their saved goals. The revised pursuit dispatch order and gathering paths
+change the replay tags because trajectories and combat outcomes can differ;
+current command replay and failure diagnostics remain available.
 
 Strict direct formations add required nullable membership, relative-offset, active goal and leg-ID
 fields to entities, and goal/leg-ID metadata to queued moves. The leg identity separates repeated

@@ -7,12 +7,22 @@ from dataclasses import replace
 
 import pytest
 
-from airts.contracts.automations import ConstructionParameters, ProductionParameters
-from airts.contracts.commands import CreateConstructionCommand, SetAIIncomeMultiplierCommand
+from airts.contracts.automations import (
+    AutomationStatus,
+    ConstructionParameters,
+    ProductionParameters,
+)
+from airts.contracts.commands import (
+    CreateConstructionCommand,
+    CreateProductionCommand,
+    MoveCommand,
+    SetAIIncomeMultiplierCommand,
+)
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
 from airts.simulation import Simulation
 from airts.systems import economy, opponent_ai
+from airts.systems.spawning import factory_exit_cells
 from airts.world.map import Terrain, footprint_cells, load_map_data
 from airts.world.opponents import SquadPhase
 from airts.world.skirmish import create_skirmish_map
@@ -91,6 +101,95 @@ def developed_base(*, battle: bool = False) -> Simulation:
     economy.rebuild_income(simulation)
     simulation.resources["ai"] = 30000
     return simulation
+
+
+def test_decision_queries_refresh_after_construction_override_and_production() -> None:
+    simulation = developed_base()
+    home = Point(154, 120)
+    decision = opponent_ai._Decision(
+        simulation,
+        "ai",
+        simulation.opponents["ai"],
+        opponent_ai._DecisionWorld(simulation),
+        home,
+        home,
+    )
+    pending = opponent_ai._pending_construction(decision)
+    assert not pending
+    before = opponent_ai._economy_forecast(decision)
+    builders = list(decision.builders)
+    site = opponent_ai._construction_site(
+        decision, EntityKind.TURRET, Point(148, 140), builders, pending
+    )
+    assert site is not None
+    builder, point = site
+    result = decision.submit(
+        CreateConstructionCommand(builder.entity_id, EntityKind.TURRET, point, owner_id="ai")
+    )
+    assert result is not None and result.accepted
+    pending = opponent_ai._pending_construction(decision)
+    assert len(pending) == 1 and pending[0].position == point
+    other = opponent_ai._construction_site(
+        decision, EntityKind.TURRET, Point(148, 140), builders, pending
+    )
+    assert other is None or other[1] != point
+    result = decision.submit(MoveCommand((builder.entity_id,), Point(140.5, 145.5), "ai"))
+    assert result is not None and result.accepted
+    assert not opponent_ai._pending_construction(decision)
+    result = decision.submit(
+        CreateProductionCommand("factory_0", EntityKind.HEAVY_TANK, target_count=1, owner_id="ai")
+    )
+    assert result is not None and result.accepted
+    assert opponent_ai._economy_forecast(decision) != before
+
+
+def test_economic_production_uses_kind_counts_without_constructing_tactical_sensors() -> None:
+    simulation = developed_base()
+    assert simulation.execute(
+        CreateProductionCommand("factory_0", EntityKind.LIGHT_TANK, target_count=2, owner_id="ai")
+    ).accepted
+    world = opponent_ai._DecisionWorld(simulation)
+    decision = opponent_ai._Decision(
+        simulation, "ai", simulation.opponents["ai"], world, Point(154, 120), Point(154, 120)
+    )
+    counts, committed = opponent_ai._production_demand(decision)
+    income, capacity = opponent_ai._economy_forecast(decision)
+    assert counts[EntityKind.LIGHT_TANK] == 2
+    assert committed > 0 and income > 0 and capacity > 0
+    assert opponent_ai._available_cash(decision) < simulation.resources["ai"]
+    assert not world._enemies
+    assert not world._armed_indexes
+    assert opponent_ai._production_demand(decision)[0][EntityKind.BUILDER] >= len(decision.builders)
+
+
+@pytest.mark.parametrize("near,complete", ((False, True), (True, False), (True, True)))
+def test_economic_threat_alarm_matches_tactical_ranking_without_selecting_a_target(
+    near: bool, complete: bool
+) -> None:
+    data = developed_base().game_map.to_dict()
+    data["entities"].extend(
+        [
+            {
+                "id": "raider",
+                "kind": "scout",
+                "owner": "player",
+                "position": [150.5, 130.5] if near else [90.5, 140.5],
+            },
+            {"id": "ally", "kind": "heavy_tank", "owner": "friend", "position": [150.5, 132.5]},
+        ]
+    )
+    data["match_slots"].append({"owner": "friend", "controller": "ai", "team": 2})
+    simulation = Simulation(load_map_data(data))
+    if not complete:
+        simulation.entities["raider"].construction_progress = 1.0
+    world = opponent_ai._DecisionWorld(simulation)
+    decision = opponent_ai._Decision(
+        simulation, "ai", simulation.opponents["ai"], world, Point(154, 120), Point(154, 120)
+    )
+    alarm = opponent_ai._base_threatened(decision)
+    assert alarm == (near and complete)
+    assert not world._enemies
+    assert alarm == (opponent_ai._base_threat(decision) is not None)
 
 
 @pytest.mark.parametrize("battle", [False, True], ids=["peaceful", "combat"])
@@ -203,6 +302,75 @@ def test_base_rescue_and_occupied_blueprint_do_not_starve_funded_macro() -> None
         >= 2
     )
     assert simulation._opponent_command_count <= opponent_ai.MAX_ORDERS
+
+
+def test_large_match_spaces_out_extra_macro_without_skipping_tactical_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    simulation = developed_base()
+    monkeypatch.setattr(opponent_ai, "_LARGE_MATCH_ENTITY_COUNT", len(simulation.entities))
+    # Give the first AI an odd tactical turn to distinguish it from extra macro.
+    monkeypatch.setattr(opponent_ai, "DECISION_TICKS", 3)
+    macro_turns = []
+    tactical_turns = []
+    monkeypatch.setattr(
+        opponent_ai,
+        "_plan_growth",
+        lambda decision, **_: macro_turns.append(decision.simulation.tick),
+    )
+    monkeypatch.setattr(
+        opponent_ai,
+        "_drive_army",
+        lambda decision, *_: tactical_turns.append(decision.simulation.tick),
+    )
+    for tick in (1, 2, 3):
+        simulation.tick = tick
+        opponent_ai.drive_opponents(simulation)
+    assert macro_turns == [2]
+    assert tactical_turns == [3]
+
+
+def test_ai_clears_one_blocked_factory_exit_and_resumes_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = developed_base()
+    data = base.game_map.to_dict()
+    cells = factory_exit_cells(base.entities["factory_0"])
+    other_exit = factory_exit_cells(base.entities["factory_1"])[0]
+    data["entities"].extend(
+        {"id": f"blocker_{i}", "kind": "scout", "position": [x + 0.5, y + 0.5], "owner": "ai"}
+        for i, (x, y) in enumerate((*cells, other_exit))
+    )
+    simulation = Simulation(load_map_data(data))
+    simulation.resources["ai"] = 1000
+    # Exercise one clearance decision independently of routine recruitment and growth.
+    monkeypatch.setattr(opponent_ai, "drive_opponents", lambda _: None)
+    result = simulation.execute(
+        CreateProductionCommand("factory_0", EntityKind.SCOUT, 1, owner_id="ai")
+    )
+    assert result.accepted and result.automation_id is not None
+    job = simulation.automations[result.automation_id]
+    assert isinstance(job.parameters, ProductionParameters)
+    simulation.advance(job.parameters.build_ticks)
+    assert job.reason_code == "SPAWN_BLOCKED"
+
+    home = Point(154, 120)
+    decision = opponent_ai._Decision(
+        simulation,
+        "ai",
+        simulation.opponents["ai"],
+        opponent_ai._DecisionWorld(simulation),
+        home,
+        home,
+    )
+    opponent_ai._clear_production_exits(decision)
+    shifted = [unit for unit in simulation.entities.values() if unit.move_target is not None]
+    assert len(shifted) == 1
+    assert shifted[0].entity_id != f"blocker_{len(cells)}"
+    assert shifted[0].move_target is not None
+    assert shifted[0].position.distance_to(shifted[0].move_target) < 8
+    simulation.advance(20)
+    assert job.status is AutomationStatus.COMPLETED
 
 
 @pytest.mark.parametrize(

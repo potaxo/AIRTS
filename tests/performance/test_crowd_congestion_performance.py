@@ -23,6 +23,7 @@ from airts.contracts.commands import (
     MoveCommand,
     SetFormationCommand,
 )
+from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, rectangle_region
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.spatial_index import SpatialIndex
@@ -507,12 +508,27 @@ def test_large_bridge_queue_fully_crosses_without_deep_overlap() -> None:
     )
 
 
+@pytest.mark.parametrize("queued", [False, True])
 def test_thousand_entity_focus_attack_holds_range_and_fits_realtime_budget(
+    queued: bool,
     check_timing: bool,
 ) -> None:
     simulation, entity_ids = _crowd_simulation(999, enemy_position=Point(70.5, 30.5))
-    assert simulation.execute(AttackCommand(entity_ids, "focus_target")).accepted
-    simulation.advance(200)
+    starts = {key: simulation.entities[key].position for key in entity_ids}
+    assert simulation.execute(AttackCommand(entity_ids, "focus_target", queued=queued)).accepted
+    startup_times = []
+    for tick in range(200):
+        started = perf_counter()
+        simulation.advance()
+        if tick < 3:
+            startup_times.append(perf_counter() - started)
+        if tick == 0:
+            assert sum(bool(simulation.entities[key].path) for key in entity_ids) >= 500
+        if tick == 2:
+            assert all(
+                simulation.entities[key].position.distance_to(starts[key]) > 0.01
+                for key in entity_ids
+            )
     tick_times: list[float] = []
 
     for _ in range(20):
@@ -533,6 +549,7 @@ def test_thousand_entity_focus_attack_holds_range_and_fits_realtime_budget(
     assert len(in_range) >= 24
     assert all(not entity.path and entity.move_target is None for entity in in_range)
     if check_timing:
+        assert max(startup_times) < Simulation.TICK_SECONDS
         assert p95 < Simulation.TICK_SECONDS, (
             f"focus ticks had median {median(tick_times) * 1_000:.1f} ms, "
             f"p95 {p95 * 1_000:.1f} ms, max {max(tick_times) * 1_000:.1f} ms, and "
@@ -545,18 +562,40 @@ def test_thousand_entity_strict_attack_keeps_layout_with_bounded_shared_routes(
     queued: bool, check_timing: bool
 ) -> None:
     simulation, ids = _crowd_simulation(999, enemy_position=Point(70.5, 30.5))
+    starts = {key: simulation.entities[key].position for key in ids}
     assert simulation.execute(SetFormationCommand(ids, True)).accepted
     assert simulation.execute(AttackCommand(ids, "focus_target", queued=queued)).accepted
-    for _ in range(200):
+    startup_times = []
+    for tick in range(200):
+        started = perf_counter()
         simulation.advance()
+        if tick < 3:
+            startup_times.append(perf_counter() - started)
+        if tick == 0:
+            assert sum(bool(simulation.entities[key].path) for key in ids) >= 500
+        if tick == 2:
+            assert all(
+                simulation.entities[key].position.distance_to(starts[key]) > 0.01 for key in ids
+            )
         assert simulation._routes.combat_route_count <= Simulation.COMBAT_PATH_BUDGET
     times = []
     for _ in range(20):
         started = perf_counter()
         simulation.advance()
         times.append(perf_counter() - started)
-    assert len({simulation.entities[key].formation_goal for key in ids}) == 1
-    for key in ids:
+    # Earlier engagement lets the armed focus target inflict real casualties;
+    # layout ownership follows live members rather than requiring immortality.
+    live_ids = tuple(key for key in ids if key in simulation.entities)
+    removed = set(ids) - set(live_ids)
+    combat_deaths = {
+        event.subject_id
+        for event in simulation.events.query(event_types=frozenset({EventType.ENTITY_REMOVED}))
+        if event.details.get("reason") == "COMBAT_DESTROYED"
+    }
+    assert removed <= combat_deaths
+    assert live_ids
+    assert len({simulation.entities[key].formation_goal for key in live_ids}) == 1
+    for key in live_ids:
         unit = simulation.entities[key]
         assert unit.formation_goal is not None and unit.formation_offset is not None
         assert not unit.path
@@ -572,4 +611,5 @@ def test_thousand_entity_strict_attack_keeps_layout_with_bounded_shared_routes(
         assert unit.pursue_target and unit.attack_target_id == "focus_target"
     assert simulation.projectiles or simulation.entities["focus_target"].health < 1_000_000
     if check_timing:
+        assert max(startup_times) < Simulation.TICK_SECONDS
         assert sorted(times)[int(len(times) * 0.95) - 1] < Simulation.TICK_SECONDS

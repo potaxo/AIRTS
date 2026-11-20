@@ -10,6 +10,7 @@ import numpy as np
 from airts.contracts.spatial import Point
 from airts.world._numeric import BoolArray, FloatArray, compile_numeric
 from airts.world.entities import Entity
+from airts.world.units.schema import EntityCategory
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -59,8 +60,15 @@ def firing_approach_points(
 ) -> tuple[Point, ...]:
     """Return a passable firing ring instead of four congested adjacent cells."""
 
-    center = target.selection_position
     attack_range = attacker.profile.attack_range
+    key = target.kind, target.position, attack_range
+    cache = simulation._firing_approaches
+    static = target.kind.profile.category is EntityCategory.BUILDING
+    points = cache.get(key) if static else None
+    if points is not None:
+        cache.move_to_end(key)
+        return points or simulation._interaction_points(target)
+    center = target.selection_position
     outer_radius = max(0.5, attack_range - 0.25)
     inner_radius = max(0.0, outer_radius - 1.0)
     width, height = target.kind.profile.footprint
@@ -76,6 +84,10 @@ def firing_approach_points(
         height,
     )
     points = tuple(Point(x, y) for x, y in coordinates.tolist())
+    if static:
+        cache[key] = points
+        if len(cache) > 128:
+            cache.popitem(last=False)
     return points or simulation._interaction_points(target)
 
 

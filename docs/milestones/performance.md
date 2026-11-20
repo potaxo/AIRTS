@@ -15,17 +15,31 @@ Commands, scheduled ticks, drawing and per-frame GPU completion stay inside cons
 setup/JIT warm-up is outside timing. Tick budgets are separate. Never adjust thresholds/percentiles
 to pass a run. Offscreen/app FPS does not establish physical monitor scan-out.
 
-Current simulation uses serial CPU kernels at 10 Hz; this is a baseline rather than a required
-execution strategy. Optimizations follow [engineering policy](../architecture/engineering.md#change-policy)
+Simulation advances at 10 Hz with one authoritative writer. Numeric kernels release the GIL;
+independent dense query batches of at least 1,024 rows use at most four native calls (three sleeping
+pool workers plus the caller). Small batches and sparse queries retain serial execution. Each
+reader owns its output rows and joins before state submission, including exceptional exits.
+Optimizations follow [engineering policy](../architecture/engineering.md#change-policy)
 and preserve gameplay safety and these gates. Large-scene construction drains old garbage before
 live frames, including completed file restoration. Automatic GC remains enabled. The interactive
 session raises the generation-zero allocation threshold to at least 20,000 so transient army
 query batches can expire before promotion, retaining generation ratios and restoring the caller's
 thresholds on exit, including failure. Headless simulations retain the caller's GC policy.
-Frontend ceiling is 1,000 FPS with VSync requested off.
-The interactive loop presents and polls input after at most one complete fixed tick, retaining
-admitted time debt for later frames. Pause/menu boundaries clear that debt. This bounds consecutive
-tick blocking, not an individual tick's duration, and does not certify faster simulation throughput.
+Frontend ceiling is 1,000 FPS with VSync requested off. Native OpenGL runs one complete tick and
+then updates visual headings on a dedicated worker while the main thread redraws completed entity, feedback, overlay and minimap
+buffers, capped at 120 FPS during worker execution to avoid starving simulation. Camera-key panning
+remains live. Rendering never traverses the mutable world during a tick. Input events retain FIFO,
+Shift transitions and their original map transform; commands, pause, save/load and resize execute
+only after joining the current tick. Target clicks use pre-tick hit positions, retaining attack
+intent when the target moves or dies; canonical validation rejects a missing target. Removed
+selection members are pruned before input dispatch. Exit joins and drains already queued input,
+then completes pending atomic saves. Worker failures propagate through normal resource cleanup.
+At least one completed-world publication occurs before another tick starts. All admitted time
+debt remains owed; pause/menu boundaries clear it. This separates display responsiveness from
+simulation throughput and does not certify real-time progression. Simulation timing measures the
+authoritative tick on the worker and excludes visual heading updates. Headless callers and the explicit software backend
+retain synchronous stepping; a synchronous tick costing at least 100 ms reserves the following
+presentation call for publication/input.
 Native OpenGL 3.3 uses `OPENGL | DOUBLEBUF | RESIZABLE`, never `SCALED` or silent fallback. Hardware
 evidence uses native WGL, excluding llvmpipe, softpipe, SwiftShader, GDI Generic and Microsoft Basic
 Render Driver. WSLg/Wayland compatibility is not native-Windows acceptance evidence.
@@ -52,9 +66,13 @@ changes retain terrain/contact sources and world buffers. Map replacement releas
 Sidebar status updates upload the populated selection area rather than its empty lower portion;
 selection replacement, scrolling and changing upgrade groups refresh the full selection viewport.
 
-OpenGL uploads one 32-float record per entity. Its 3.3 geometry shader expands body/weapon layers,
+OpenGL uploads one 32-float record per entity. Packing reuses layout, sprite, team color and
+selection-style bytes across entities of the same kind. Position, heading, health and active
+building progress come from the published world. Its 3.3 geometry shader expands body/weapon layers,
 health/progress bars and selection outlines, including fixed-pixel thickness and interpolated
-positions/headings. The same entity buffer supplies minimap contact projection, team colors and
+positions/headings. The shader discards fully offscreen entities before emitting their world
+quads, conservatively including rotated sprites, bars and outlines in the bounds.
+The same entity buffer supplies minimap contact projection, team colors and
 selection borders on the GPU; buildings precede mobile contacts, and the camera rectangle is drawn
 last. Terrain/resource backgrounds and UI text remain cached surfaces. Modal overlays suppress the
 GPU contacts. The explicit software renderer retains its CPU contacts and sprites. Camera-only
@@ -63,14 +81,20 @@ changes update uniforms without repacking entity records or rasterizing contacts
 Artillery prediction reads original positions by binary search of the existing sorted movement
 workspace rows, allocating no per-army velocity/index table. It solves one scalar intercept per actual
 shot; ordinary weapons and in-flight shells do no prediction work. It performs no extra spatial query,
-pathfinding or simulated future ticks. Shared blast expiry limits both backends' active effect geometry.
+pathfinding or simulated future ticks. At impact, the occupancy grid supplies local candidates.
+Damage uses the exact distance to each entity center and resolves in entity ID order.
+Shared blast expiry limits both backends' active effect geometry.
 
 GPU interpolation mixes previous/current centers and visual headings without per-frame rebuilds
 or simulation feedback and resets on load/reset. New world-batch packing can stage for one
 presentation call after a tick: that call displays the previous current endpoint, and the next
 publishes the complete new snapshot. This adds at most one presentation interval to the 100 ms
 interpolation delay and separates tick work from batch assembly. Commands, selection changes,
-births, resets and skipped ticks bypass staging. A removed entity may retain its old endpoint for
+resets and skipped ticks bypass staging. Up to 64 non-worker births append their complete entity
+records immediately to the staged snapshot, without repacking survivors on the tick's frame;
+workers and larger birth batches rebuild immediately. The next presentation publishes the full
+snapshot. New entities remain visible, including minimap contacts, health and progress. A removed
+entity may retain its old endpoint for
 the staged call; every survivor is still rendered. Inspection world markers can follow on the next
 call. Tick-driven overlays stage on the first interpolation frame after a tick (at most one frame
 text delay). Software caches composed Surfaces, rebuilds on the following presentation call and
@@ -88,6 +112,14 @@ pathfinding or relax collision, route-admission or frame gates.
 The crowd workload also covers immediate and FIFO strict attacks by 999 scouts against one target,
 retaining translated slots, shared route limits and the existing 100 ms p95 tick gate. Ordinary
 focus-attack coverage and its minimum in-range population remain unchanged.
+Both ordinary and strict immediate/FIFO attack variants require at least 500 routed members after
+the first tick and all 999 to start moving by the third. Each of those first three ticks must stay
+below 100 ms in timing variants; sustained gates retain the complete original battle. Earlier
+engagement permits real casualties from the armed target; strict layout checks cover all survivors
+and require removed originals to have explicit combat-death diagnostics. Route claims now count
+shared pursuit groups; search, path-attempt and materialized-cell limits bound follower work as
+specified by [movement](movement.md#orders-and-routing). These gates do not certify arbitrary
+save sizes or native-4K rendering.
 
 Behavior and timing variants retain identical full workloads; only timing enforces wall-clock
 budgets. Software and GPU gates measure different costs and remain separate.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event as ThreadEvent
 from unittest.mock import Mock, call, patch
@@ -27,6 +28,7 @@ from airts.contracts.commands import (
     CreateDefendCommand,
     CreateProductionCommand,
     MoveCommand,
+    RemoveEntityCommand,
     SetDeveloperModeCommand,
 )
 from airts.contracts.spatial import Point, rectangle_region
@@ -39,6 +41,138 @@ from airts.systems.movement import position_clear
 from airts.world.entities import Projectile
 from airts.world.map import load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+@pytest.mark.parametrize("exit_with_pending_input", (False, True))
+def test_worker_defers_shift_fifo_and_save_until_complete_world(
+    tmp_path: Path, exit_with_pending_input: bool
+) -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
+    app.selected_entities = {"unit"}
+    app.ui.font = Mock()
+    app._selection_changed()
+    app._published_world = True
+    started, release = ThreadEvent(), ThreadEvent()
+    original = simulation.advance
+
+    def step() -> None:
+        started.set()
+        assert release.wait(5)
+        original()
+
+    app._tick_executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with patch.object(simulation, "advance", side_effect=step):
+            app._advance_simulation_frame(0.1)
+            assert started.wait(5)
+        count = simulation.command_count
+        targets = (Point(9.5, 5.5), Point(10.5, 5.5))
+        app._accept_frame_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LSHIFT, mod=0))
+        for target in targets:
+            app._accept_frame_event(
+                pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=app.screen_point(target))
+            )
+        app._accept_frame_event(
+            pygame.event.Event(pygame.KEYUP, key=pygame.K_LSHIFT, mod=pygame.KMOD_LSHIFT)
+        )
+        # Camera motion must not change the world coordinates of queued clicks.
+        app.camera.offset = Point(25, 0)
+        destination = tmp_path / "boundary.json"
+        app.quick_save_path = destination
+        app._accept_frame_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F5, mod=0))
+        app._advance_simulation_frame(0.3)
+        assert simulation.command_count == count
+        assert app._simulation_accumulator == pytest.approx(0.3)
+        assert not app._input_modifiers() & pygame.KMOD_SHIFT
+        release.set()
+        assert app._tick_future is not None
+        app._tick_future.result(timeout=5)
+        if exit_with_pending_input:
+            app._finish_simulation_tick()
+        else:
+            app._poll_simulation_tick()
+        app._finish_save()
+        entity = simulation.entities["unit"]
+        assert entity.move_target is not None
+        assert entity.move_target.distance_to(targets[0]) < 0.1
+        assert len(entity.order_queue) == 1
+        assert entity.order_queue[0].position.distance_to(targets[1]) < 0.1
+        assert not app._input_modifiers() & pygame.KMOD_SHIFT
+        assert load_simulation(destination).tick == simulation.tick
+    finally:
+        release.set()
+        app._finish_simulation_tick()
+        app._finish_save()
+
+
+def test_worker_failure_propagates_and_releases_executor() -> None:
+    app = AirtsApp(interaction_simulation())
+    app._published_world = True
+    app._tick_executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with patch.object(app.simulation, "advance", side_effect=RuntimeError("tick failed")):
+            app._advance_simulation_frame(0.1)
+            assert app._tick_future is not None
+            with pytest.raises(RuntimeError, match="tick failed"):
+                app._tick_future.result(timeout=5)
+            with pytest.raises(RuntimeError, match="tick failed"):
+                app._poll_simulation_tick()
+    finally:
+        app._finish_simulation_tick()
+    assert app._tick_executor is None
+
+
+@pytest.mark.parametrize("destroyed", (False, True))
+def test_deferred_enemy_click_retains_attack_intent_when_target_moves_or_dies(
+    destroyed: bool,
+) -> None:
+    simulation = interaction_simulation()
+    app = AirtsApp(simulation)
+    app.ui.font = Mock()
+    app.selected_entities = {"unit"}
+    app._input_entities = tuple(simulation.entities.values())
+    app._tick_future = Future()
+    app._accept_frame_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LSHIFT, mod=0))
+    app._accept_frame_event(
+        pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            button=3,
+            pos=app.screen_point(simulation.entities["enemy"].position),
+        )
+    )
+    if destroyed:
+        assert simulation.execute(RemoveEntityCommand("enemy")).accepted
+    else:
+        simulation.entities["enemy"].position = Point(1.5, 14.5)
+    app._tick_future.set_result(123.0)
+    app._poll_simulation_tick()
+    unit = simulation.entities["unit"]
+    if destroyed:
+        assert not unit.order_queue
+    else:
+        assert unit.order_queue[0].target_entity_id == "enemy"
+    assert unit.move_target is None
+    assert app._completed_tick_ms == 123.0
+
+
+def test_worker_mouse_event_captures_modifier_state_before_sdl_changes() -> None:
+    app = AirtsApp(interaction_simulation())
+    app._tick_future = Future()
+    app._event_modifiers = None
+    mouse = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=(500, 300))
+    with patch("airts.presentation.app.pygame.key.get_mods", return_value=pygame.KMOD_SHIFT):
+        app._accept_frame_event(mouse)
+    app._tick_future.set_result(1.0)
+    observed: list[int] = []
+    with (
+        patch("airts.presentation.app.pygame.key.get_mods", return_value=0),
+        patch.object(
+            app, "_handle_event", side_effect=lambda _: observed.append(app._input_modifiers())
+        ),
+    ):
+        app._poll_simulation_tick()
+    assert observed == [pygame.KMOD_SHIFT]
 
 
 def test_commands_refresh_paused_render_caches_without_recording_history() -> None:
@@ -547,6 +681,20 @@ def test_slow_frames_retain_tick_debt_but_yield_between_steps_and_pause_clears_i
     app._reset_presentation_history()
     app._advance_simulation_frame(0)
     assert app.simulation.tick == 9  # A replacement world must not inherit another game's debt.
+
+
+def test_expensive_tick_publishes_one_frame_without_discarding_simulation_debt() -> None:
+    app = AirtsApp(interaction_simulation())
+    with patch("airts.presentation.app.perf_counter", side_effect=(0.0, 0.15)):
+        app._advance_simulation_frame(0.25)
+    assert app.simulation.tick == 1
+    app._advance_simulation_frame(0.05)
+    assert app.simulation.tick == 1 and app.render_alpha == 1
+    app._advance_simulation_frame(0)
+    assert app.simulation.tick == 2
+    app._advance_simulation_frame(0)
+    assert app.simulation.tick == 3
+    assert app._simulation_accumulator == pytest.approx(0)
 
 
 @pytest.mark.parametrize("size", [(1280, 720), AirtsApp.WINDOW_SIZE, (3840, 2160)])

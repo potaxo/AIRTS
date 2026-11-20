@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from airts.contracts.commands import MoveCommand
 from airts.contracts.spatial import Point
 from airts.simulation import Simulation
@@ -99,7 +101,10 @@ def test_large_visibility_union_matches_cell_center_geometry_across_word_boundar
         assert simulation.visibility.for_player(owner).visible == expected
 
 
-def test_grouped_visibility_reuses_static_unions_but_refreshes_observation_and_ownership() -> None:
+@pytest.mark.parametrize("sources", [130, 1_040])
+def test_grouped_visibility_reuses_static_unions_but_refreshes_observation_and_ownership(
+    sources: int,
+) -> None:
     simulation = Simulation(
         load_map_data(
             {
@@ -110,7 +115,7 @@ def test_grouped_visibility_reuses_static_unions_but_refreshes_observation_and_o
                 "terrain": {"default": "grass"},
                 "entities": [
                     {"id": f"u{i}", "kind": "scout", "position": [2.5 + i % 65, 2.5 + i // 65]}
-                    for i in range(130)
+                    for i in range(sources)
                 ],
             }
         )
@@ -120,8 +125,7 @@ def test_grouped_visibility_reuses_static_unions_but_refreshes_observation_and_o
     with patch.object(
         visibility_module, "_visibility_words", wraps=visibility_module._visibility_words
     ) as calculate:
-        visibility.update(simulation.entities, 1)
-        visibility.update(simulation.entities, 2)
+        simulation.advance(2)
         assert calculate.call_count == 0
         assert visibility.for_player("player").visible == expected
         assert set(visibility.for_player("player").last_observed_tick.values()) == {2}

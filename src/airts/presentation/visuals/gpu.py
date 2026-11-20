@@ -1,6 +1,9 @@
 """One entity record; the GPU expands sprites, bars, selections and minimap contacts."""
 
-from array import array
+from collections.abc import Mapping
+from dataclasses import dataclass
+from itertools import product
+from struct import Struct
 from typing import Protocol
 
 from airts.contracts.spatial import Point
@@ -9,14 +12,20 @@ from airts.presentation.palette import (
     PROGRESS_COLOR,
     PROGRESS_TRACK,
     TEAM_COLORS,
-    match_color,
 )
 from airts.presentation.progress import building_progress
 from airts.presentation.visuals.catalog import APPEARANCES, COMPOSITE_PATHS, SPRITE_INDICES
 from airts.presentation.visuals.facing import FacingHistory
 from airts.simulation import Simulation
+from airts.world.units.catalog import EntityKind
 
 ENTITY_FLOATS = 32
+# Position, headings and health vary per entity. Selection and layout come
+# from a fixed set of GPU-ready records per unit kind and owner color.
+_ENTITY_RECORD = Struct("=4f40s5f52s")
+_STYLE_PREFIX = Struct("=10f")
+_STYLE_TAIL = Struct("=13f")
+_PROGRESS = Struct("=2f")
 ENTITY_ATTRIBUTES = (
     "in_centers",
     "in_layout",
@@ -27,24 +36,68 @@ ENTITY_ATTRIBUTES = (
     "in_progress",
     "in_minimap_tint",
 )
-_LAYOUTS = {
-    kind: (
-        art.size[0] / 2,
-        art.size[1] / 2,
-        7.0 if kind.profile.movable else 0.0,
-        7.0 if kind.profile.movable else 0.0,
-    )
-    for kind, art in APPEARANCES.items()
-}
-_INDICES = {
-    kind: (
-        float(SPRITE_INDICES[art.body]),
-        -1.0 if art.weapon is None else float(SPRITE_INDICES[art.weapon]),
-        -1.0 if art.weapon is None else float(SPRITE_INDICES[COMPOSITE_PATHS[kind]]),
-    )
-    for kind, art in APPEARANCES.items()
-}
 _COLORS = {kind: (*[value / 255 for value in color], 1.0) for kind, color in ENTITY_COLORS.items()}
+_TEAM_TINTS = {team: (*[v / 255 for v in color], 1.0) for team, color in TEAM_COLORS.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class _Style:
+    prefix: bytes
+    tails: tuple[bytes, ...]
+    movable: bool
+    base_health: int
+
+
+def _entity_styles(
+    tint: tuple[float, ...] | None, contact: tuple[float, ...]
+) -> dict[EntityKind, _Style]:
+    styles = {}
+    for kind, art in APPEARANCES.items():
+        minimum = 7.0 if kind.profile.movable else 0.0
+        weapon = SPRITE_INDICES[art.weapon] if art.weapon is not None else -1
+        combined = SPRITE_INDICES[COMPOSITE_PATHS[kind]] if art.weapon is not None else -1
+        movable = kind.profile.movable
+        width, height = kind.profile.footprint
+        tails = []
+        for large, selected, inspected in product((False, True), repeat=3):
+            if selected:
+                outline = (-1.0 if large else 1.0) if movable else 2.0
+            else:
+                outline = float(inspected and movable)
+            tails.append(
+                _STYLE_TAIL.pack(
+                    not large or inspected,
+                    width / 2,
+                    height / 2,
+                    outline,
+                    selected,
+                    -1.0,
+                    -1.0,
+                    not movable,
+                    combined,
+                    *contact,
+                )
+            )
+        styles[kind] = _Style(
+            _STYLE_PREFIX.pack(
+                art.size[0] / 2,
+                art.size[1] / 2,
+                minimum,
+                minimum,
+                *(tint or _COLORS[kind]),
+                SPRITE_INDICES[art.body],
+                weapon,
+            ),
+            tuple(tails),
+            movable,
+            kind.profile.max_health,
+        )
+    return styles
+
+
+_MATCH_STYLES = {team: _entity_styles(tint, tint) for team, tint in _TEAM_TINTS.items()}
+_PLAYER_STYLES = _entity_styles(None, _TEAM_TINTS[1])
+_ENEMY_STYLES = _entity_styles((218 / 255, 78 / 255, 78 / 255, 1.0), _TEAM_TINTS[2])
 
 
 class EntityView(Protocol):
@@ -59,91 +112,72 @@ class EntityView(Protocol):
     @property
     def inspected_entity_id(self) -> str | None: ...
 
-    def previous_entity_position(self, entity_id: str) -> Point: ...
+    @property
+    def previous_entity_positions(self) -> Mapping[str, Point]: ...
 
 
-def pack_entities(view: EntityView) -> tuple[bytes, int, int, int]:
+def pack_entities(
+    view: EntityView, *, entity_ids: tuple[str, ...] | None = None
+) -> tuple[bytes, int, int, int]:
     """Upload state once, without CPU expansion into per-sprite/per-bar primitives."""
-    values = array("f")
+    values = bytearray()
+    pack = _ENTITY_RECORD.pack
     simulation = view.simulation
     selected = view.selected_entities
-    large = len(selected) > 128
-    colors = {
-        slot.owner_id: (
-            *[value / 255 for value in match_color(simulation.game_map, slot.owner_id)],
-            1.0,
-        )
-        for slot in simulation.game_map.match_slots
-    }
-    minimap_colors = {
-        owner: colors[owner]
-        if colors
-        else (*[v / 255 for v in TEAM_COLORS[1 if owner == "player" else 2]], 1.0)
-        for owner in {entity.owner_id for entity in simulation.entities.values()}
-    }
-    view.facing.sync(simulation)
+    selection_offset = 4 if len(selected) > 128 else 0
+    inspected = view.inspected_entity_id
+    previous_position = view.previous_entity_positions.get
+    styles = {slot.owner_id: _MATCH_STYLES[slot.team] for slot in simulation.game_map.match_slots}
+    items = (
+        simulation.entities.items()
+        if entity_ids is None
+        else ((key, simulation.entities[key]) for key in entity_ids)
+    )
+    if entity_ids is None:
+        view.facing.sync(simulation)
+    else:
+        view.facing.seed_births(simulation, entity_ids)
     units = buildings = selected_units = 0
-    for key, entity in simulation.entities.items():
+    for key, entity in items:
         kind = entity.kind
-        movable = entity.is_movable
-        building = not movable
-        center = entity.selection_position
-        previous = view.previous_entity_position(key) if movable else center
+        style = (
+            styles[entity.owner_id]
+            if styles
+            else (_PLAYER_STYLES if entity.owner_id == "player" else _ENEMY_STYLES)
+        )[kind]
+        movable = style.movable
+        center = entity.position if movable else entity.selection_position
+        previous = previous_position(key, center) if movable else center
         is_selected = key in selected
-        outline = (
-            -1.0
-            if is_selected and large and movable
-            else 2.0
-            if is_selected and building
-            else 1.0
-            if is_selected or key == view.inspected_entity_id and movable
-            else 0.0
-        )
-        pose = view.facing.pose(key)
-        body, weapon, combined = _INDICES[kind]
-        color = (
-            colors.get(entity.owner_id)
-            if colors
-            else (
-                _COLORS[kind]
-                if entity.owner_id == "player"
-                else (218 / 255, 78 / 255, 78 / 255, 1.0)
+        tail = style.tails[selection_offset + 2 * is_selected + (key == inspected)]
+        if not movable and (progress := building_progress(simulation, entity)):
+            # Replace the two progress floats following the five selection floats.
+            tail = (
+                tail[:20]
+                + _PROGRESS.pack(progress[0], progress[1] if len(progress) > 1 else -1.0)
+                + tail[28:]
             )
-        )
-        assert color is not None
-        progress = building_progress(simulation, entity) if building else ()
-        width, height = kind.profile.footprint
+        pose = view.facing.pose(key)
+        max_health = style.base_health if entity.upgrade.tier == 1 else entity.profile.max_health
         values.extend(
-            (
+            pack(
                 center.x,
                 center.y,
                 previous.x,
                 previous.y,
-                *_LAYOUTS[kind],
-                *color,
-                body,
-                weapon,
+                style.prefix,
                 pose.previous_body,
                 pose.body,
                 pose.previous_weapon,
                 pose.weapon,
-                entity.health / entity.profile.max_health,
-                float(not large or key == view.inspected_entity_id),
-                width / 2,
-                height / 2,
-                outline,
-                float(is_selected),
-                progress[0] if progress else -1.0,
-                progress[1] if len(progress) > 1 else -1.0,
-                float(building),
-                combined,
-                *minimap_colors[entity.owner_id],
+                entity.health / max_health,
+                tail,
             )
         )
         units += movable
-        buildings += building
+        buildings += not movable
         selected_units += movable and is_selected
-    return values.tobytes(), units, buildings, selected_units
+    return bytes(values), units, buildings, selected_units
 
 
 ENTITY_VERTEX_SHADER = """
@@ -234,18 +268,28 @@ void main() {
     }
     vec2 center=terrain_origin+mix(centers.zw,centers.xy,interpolation_alpha)*terrain_tile_size;
     vec2 size=max(art.xy*terrain_tile_size,art.zw);
+    float anchor=max(art.y*terrain_tile_size,7.0);
+    vec2 outline=selected.z>1.5 ? (selected.xy+vec2(3.0))*terrain_tile_size
+                 : max(vec2(0.42*terrain_tile_size),vec2(5.0))+vec2(3.0);
+    // Bound the rotated sprite, health/progress bars, and selection together.
+    // Keep even a partial intersection, including sprites behind translucent UI.
+    float bar_width=max(0.7*terrain_tile_size,6.0);
+    float fraction=max(abs(weapon.z),max(abs(progress.x),abs(progress.y)));
+    vec2 extent=max(vec2(size.x+size.y),
+                    vec2(bar_width*max(1.0,2.0*fraction+1.0),anchor+13.0));
+    if (selected.z>0.5) extent=max(extent,outline);
+    extent+=vec2(1.0);
+    if (any(lessThan(center+extent,vec2(0.0))) ||
+        any(greaterThan(center-extent,viewport_size))) return;
     if (selected.z < -0.5) tint.rgb=min(vec3(1.0),tint.rgb+vec3(45.0/255.0));
     bool combined=progress.w>=0.0 && sprites.z==weapon.x && sprites.w==weapon.y;
     quad(center,size,tint,3.0,combined ? progress.w:sprites.x,vec4(0.0),mix(sprites.z,sprites.w,interpolation_alpha));
     if (!combined && sprites.y>=0.0)
         quad(center,size,tint,3.0,sprites.y,vec4(0.0),mix(weapon.x,weapon.y,interpolation_alpha));
     if (selected.z>0.5) {
-        vec2 outline=selected.z>1.5 ? (selected.xy+vec2(3.0))*terrain_tile_size
-                     : max(vec2(0.42*terrain_tile_size),vec2(5.0))+vec2(3.0);
         quad(center,outline,vec4(0.0),building ? 0.0:1.0,2.0,
              selected.w>0.5 ? vec4(1.0):vec4(1.0,210.0/255.0,90.0/255.0,1.0),0.0);
     }
-    float anchor=max(art.y*terrain_tile_size,7.0);
     if (weapon.w>0.5) {
         bar(center,-anchor,-4.5,1.0,vec4(70.0/255.0,35.0/255.0,35.0/255.0,1.0));
         bar(center,-anchor,-4.5,weapon.z,vec4(74.0/255.0,218.0/255.0,111.0/255.0,1.0));

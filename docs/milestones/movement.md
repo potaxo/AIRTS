@@ -45,9 +45,11 @@ may wait. Groups share an approach route before branching.
 Strict attacks reuse cohort offsets, minimum terrain-adjusted speed and narrow-passage coordination.
 Combat chooses a translated firing station for the front rank using a bounded set of whole-cohort
 placements; rear ranks outside range retain their slots instead of surrounding the target. Tracking
-refreshes when the target leaves that station's weapon envelope. Routes share a goal and consume the
-existing combat/global route and queued-search allowances. The cohort waits for pending member
-admission before advancing, including FIFO attacks. In-range members may shoot while the formation
+refreshes when the target leaves that station's weapon envelope. Routes share a goal and consume
+the common pursuit search/materialization allowance. Ready members advance while other routes
+are pending; minimum terrain-adjusted speed and bounded longitudinal stretching preserve cohesion.
+Exact translated steering resumes once members have routes or occupy their arrival slots, avoiding
+a stationary member pinning the common steering anchor. In-range members may shoot while the formation
 settles; individual weapon range does not stop their approach. Failure retains the target with a
 `formation_attack` path diagnostic. Target destruction releases the next task, or retains the firing
 layout when no task remains. Turning formation off immediately restores ordinary independent pursuit.
@@ -64,16 +66,79 @@ changes its speed allowance on the next tick. Travel, collision yielding and Hol
 share this adjusted allowance, with the existing lower cap for passive movement. Static terrain
 clearance remains mandatory; water and rock remain impassable.
 
+Movement packs position, waypoint, goal and motion flags for every mobile body. Hold and
+arrived defenders also supply return steering, request state and tolerance when needed.
+Immutable mobile radius, base speed and mass rows refresh when membership or kinds change;
+terrain and formation speed adjustments are recomputed each step. One native preparation pass
+feeds the existing collision solver, including passive and recovering bodies. Entity fields remain
+the authoritative movement/intent state, and movement alone submits positions, occupancy and
+completion events. Numeric buffers retain the original centers for same-tick artillery prediction.
+Route lookahead tests up to sixteen waypoints per unit. Large batches reuse packed
+coordinates. Each step checks the current starts, body radii and obstacle snapshot, and submits
+results in unit order. These buffers are derived from entity fields
+after load. Their layout does not change saved routes or replay commands.
+
+Spatial queries share one stable-ID numeric index and reusable nearby-result storage. Compact
+bucket extents use a dense grid (at most 262,144 buckets and bounded by population density);
+widely separated points use sparse buckets. Both retain exact radius inclusion and ID tie rules.
+Coordinates and bounds are packed once per index and rebuilt after movement. Large-world
+visibility uses the same owner-grouped positions as combat, after projectile deaths. The
+combat pass collects formation attacks and recent player input during that same traversal. Combat packs all
+owners once into a bounded grouped grid and filters hostile groups inside the numeric batch,
+retaining global distance/ID ordering without Python merging. Sparse grouped extents use the
+existing per-group sparse queries. Exact existence-only batches stop at the first radius match;
+large independent dense batches share the bounded workers described by [performance](performance.md).
+The combat grouped index persists between steps: canonical membership/owner rows refresh on
+membership changes, position/link storage grows geometrically, and small bucket-aligned margins
+reuse grid storage within the existing density/cell cap. Movement, births, deaths, owner changes,
+and dense/sparse transitions refresh before queries; readers finish before reuse. No index is
+constructed if all eligible weapons already have in-range locks. Cooling locked weapons still
+update target validity, pursuit and locomotion, but skip the firing allocation/sort until ready.
+New-target acquisition and out-of-range explicit pursuit remain active during cooldown.
+AI and combat share a bounded per-world cache of exact building-target firing rings,
+keyed by target position, footprint kind and weapon range. Geometry/range changes select new
+entries; mobile-target rings retain per-pass reuse to avoid cross-step cache churn. Terrain belongs
+to that world's immutable map. Other buildings remain
+obstacles in connectivity and route checks, rather than part of the terrain-only ring cache.
+Group connectivity classifies exact static components in one numeric call using a compact
+component-membership bitmap, retaining blocked, disconnected and out-of-map rejection.
+Shared path followers reuse the most recent prepared goal set, including exact endpoints and
+building obstacles. Identity checks avoid comparing an unchanged large obstacle set per follower;
+consecutive followers also retain the most recently touched search field without rehashing its
+goal ring. Goal/obstacle changes and explicit clearing invalidate the prepared snapshot, retaining
+bounded LRU eviction. Combat updates weapon and
+target state in one scan, then visits only firing candidates or route failures in stable ID order.
+
 Static routing uses four-neighbor weighted reverse Dijkstra fields and a bounded LRU cache keyed
 by destinations and building obstacles. Fields retain an indexed-heap frontier and expand until
 the requested start is settled. Connectivity validation avoids materializing unused paths.
+When an individual unit stalls, recovery reuses a resident field for its goal. A cold,
+single-unit repair uses A* with a Manhattan lower bound and the same weighted route and
+predecessor tie rules. The temporary search stays out of the shared field cache.
+Placing or removing a building preserves fields whose explored cells and frontiers are
+clear of the changed footprint and its four-neighbor boundary. The next search uses the
+new obstacle mask. Full world restoration clears derived navigation state. Reuse can
+advance a waiting group earlier and change subsequent combat. Existing saved routes and
+intent remain authoritative, with updated [replay tags](persistence.md#supported-formats).
 Gathering caches complete expanding disks, connected reachability and clearance; eviction must
 not lose established valid stations. Cache limits bound targets, candidate slots and region references.
 An unreachable firing ring remains queued in `WAITING`, with one failure diagnostic until its
 target/obstacles change or the order is replaced; eviction/load must not preserve a stale failure.
 Combat groups pursuers by target and weapon range for batch connectivity against the same exact
-static component labels. Every requester remains eligible; route admission, rotation and failure
-diagnostics retain their existing budgets and stable ordering.
+static component labels. One combat route claim admits a shared target/range group or strict cohort,
+instead of one follower. Both pursuit modes share a per-tick allowance of 256 path attempts,
+32,768 materialized cells and 8,192 search expansions. The first two ticks after player attack
+control permit 1,024 attempts for prompt initial response, then return to the steady allowance.
+One admitted path/search completes atomically
+before further cold work defers; settled fields and cheap clear segments remain usable. The existing
+16 combat claims bound group admission. Groups and their first member rotate. Ordinary pursuit
+then tries followers nearest the target first so they can use the settled part of the reverse field
+after its search allowance runs out. A player
+order issued since the preceding tick receives first response among ordinary pursuit groups.
+Ordinary attack travel uses a common clear approach or a weighted multi-goal field to the firing
+ring; disconnected starts retain component-correct reachability and diagnostics. Existing paths
+continue until replacement routes are ready. Target tracking refreshes after at least one second
+of route travel when its destination no longer covers the target's weapon envelope.
 
 The current implementation shares cell centers and preserves compensated path-prefix sums and
 cost/index ties. Group branches scan numeric shared coordinates in one compiled pass and materialize
@@ -185,8 +250,9 @@ gameplay contracts or hardware-performance evidence for AIRTS.
   diagnostic and retain the pending destination. Removed, fully repaired or otherwise invalid
   queued targets are skipped with an `order_skipped` diagnostic, preserving the FIFO tail.
   After an attack with pending orders, units continue that queue instead of inserting an extra
-  gathering move at the destroyed target. Existing target gathering remains for attacks without
-  subsequent orders. An ordinary replacement or Stop/Hold clears every pending order kind.
+  gathering move at the destroyed target. Without subsequent orders, survivors queue distinct
+  stations with one shared approach. If that approach becomes unreachable, a compact march can
+  route to its own reachable station. An ordinary replacement or Stop/Hold clears every pending order kind.
 - In the current combat pass, route admission rotates with the tick and firing uses stable entity
   order. Same-target/range firing rings are shared only within that pass. Projectile impacts remove
   casualties immediately in projectile-ID order; references, affected defense stations and builder

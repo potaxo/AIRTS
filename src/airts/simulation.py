@@ -71,7 +71,7 @@ from airts.contracts.spatial import (
 from airts.navigation.collision.geometry import collision_radius
 from airts.navigation.collision.solver import warm_collision_kernel
 from airts.navigation.pathfinding import PathfindingError, PathResult, RoutingService
-from airts.navigation.spatial_index import SpatialIndex, warm_spatial_index
+from airts.navigation.spatial_index import GroupedSpatialIndex, SpatialIndex, warm_spatial_index
 from airts.systems import (
     automation_assignments,
     automation_control,
@@ -109,7 +109,7 @@ from airts.world.map import Cell, GameMap, OccupancyGrid, Terrain
 from airts.world.opponents import OpponentState
 from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory
-from airts.world.visibility import VisibilitySystem
+from airts.world.visibility import PACKED_VISIBILITY_MIN_SOURCES, VisibilitySystem
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +239,11 @@ class Simulation:
             automation_budget=self.TOTAL_AUTOMATION_ROUTE_BUDGET,
             combat_budget=self.COMBAT_PATH_BUDGET,
         )
+        self._opponent_placement_terrain = opponent_ai.PlacementTerrain(game_map)
+        self._combat_index: GroupedSpatialIndex | None = None
+        self._firing_approaches: OrderedDict[tuple[EntityKind, Point, float], tuple[Point, ...]] = (
+            OrderedDict()
+        )
         self._gathering_slot_cache: OrderedDict[
             tuple[SpatialTarget, float, bool], _GatheringSlots
         ] = OrderedDict()
@@ -333,9 +338,14 @@ class Simulation:
 
     @property
     def navigation_field_build_count(self) -> int:
-        """Expose shared-navigation work for deterministic performance regression tests."""
+        """Count new grid searches, including temporary single-unit repair fields."""
 
         return self._routes.field_build_count
+
+    @property
+    def navigation_expanded_cell_count(self) -> int:
+        """Cells expanded by weighted grid searches since this world was created."""
+        return self._routes.expanded_cell_count
 
     @property
     def automation_route_count(self) -> int:
@@ -500,8 +510,11 @@ class Simulation:
             movement_system.move_entities(self)
             combat_system.drive_projectiles(self)
             repair_system.drive_hubs(self)
-            combat_system.drive_combat(self)
-            self._update_visibility()
+            self._update_visibility(
+                combat_system.drive_combat(
+                    self, share_positions=len(self.entities) >= PACKED_VISIBILITY_MIN_SOURCES
+                )
+            )
             if self.game_map.match_slots:
                 self.match_result = skirmish_system.evaluate_result(self)
 
@@ -619,7 +632,7 @@ class Simulation:
         for opponent in self.opponents.values():
             opponent.remove_entity(entity_id)
         if removed_entity.category is EntityCategory.BUILDING:
-            self._invalidate_navigation_cache()
+            self._invalidate_navigation_cache(removed=removed_entity.occupied_cells)
         if entity_id in self.selection.entity_ids:
             self.selection = GroundingSelection(
                 tuple(item for item in self.selection.entity_ids if item != entity_id),
@@ -670,7 +683,19 @@ class Simulation:
 
     def _clear_removed_references(self, removed_ids: set[str]) -> None:
         gatherings: dict[tuple[str, Point], list[str]] = {}
-        for key in sorted(self.entities):
+        affected = [
+            entity.entity_id
+            for entity in self.entities.values()
+            if entity.attack_target_id in removed_ids
+            or entity.repair_target_id in removed_ids
+            or entity.reclaim_target_id in removed_ids
+            or entity.last_attacker_id in removed_ids
+            or (
+                entity.order_queue
+                and any(order.target_entity_id in removed_ids for order in entity.order_queue)
+            )
+        ]
+        for key in sorted(affected):
             entity = self.entities[key]
             if entity.order_queue:
                 retained_orders = []
@@ -735,8 +760,13 @@ class Simulation:
                         reason=str(error),
                     )
                 continue
+            # Keep the common approach in the FIFO just as a queued group move does.
+            # The individual stations still determine where each survivor finishes.
+            anchor = min(destinations.values(), key=lambda p: (p.distance_to(point), p.y, p.x))
             for key in ids:
-                self.entities[key].order_queue[:] = [UnitOrder(OrderKind.MOVE, destinations[key])]
+                self.entities[key].order_queue[:] = [
+                    UnitOrder(OrderKind.MOVE, destinations[key], group_goal=anchor)
+                ]
                 self.entities[key].state = UnitState.MOVING
 
     def snapshot(self) -> dict[str, object]:
@@ -802,9 +832,17 @@ class Simulation:
             "movement_blocked": sorted(self._movement_blocked),
         }
 
-    def _invalidate_navigation_cache(self) -> None:
-        self._building_cells_cache = None
-        self._routes.clear()
+    def _invalidate_navigation_cache(
+        self, *, added: frozenset[Cell] = frozenset(), removed: frozenset[Cell] = frozenset()
+    ) -> None:
+        previous = self._building_cells_cache
+        if previous is not None and (added or removed):
+            current = previous.difference(removed).union(added)
+            self._routes.update_buildings(previous, current)
+            self._building_cells_cache = current
+        else:
+            self._building_cells_cache = None
+            self._routes.clear()
         self._gathering_slot_cache.clear()
         self._gathering_reachable_cache.clear()
 
@@ -879,19 +917,22 @@ class Simulation:
             ):
                 return translated
             raise PathfindingError("FORMATION_DESTINATION_BLOCKED")
-        slots = self._gathering_slots(
+        if (
+            len(entity_ids) == 1
+            and self.game_map.is_passable(target)
+            and movement_system.position_clear(
+                target, maximum_radius, self.game_map.width, self.game_map.height, static_obstacles
+            )
+        ):
+            return {entity_ids[0]: target}
+        available = self._gathering_slots(
             PointTarget(target),
             len(entity_ids),
             maximum_radius,
             require_count=False,
         )
-        available = slots
         if len(available) != len(entity_ids):
             raise PathfindingError("INSUFFICIENT_DESTINATIONS")
-        if len(entity_ids) == 1 and movement_system.position_clear(
-            target, maximum_radius, self.game_map.width, self.game_map.height, static_obstacles
-        ):
-            available = (target,)
         return assign_formation_slots(positions, available, target)
 
     def _gathering_slots(
@@ -1082,9 +1123,9 @@ class Simulation:
             )
         return self._building_cells_cache
 
-    def _update_visibility(self) -> None:
+    def _update_visibility(self, positions: dict[str, dict[str, Point]] | None = None) -> None:
         for player_id, (newly_visible, newly_explored, no_longer_visible) in self.visibility.update(
-            self.entities, self.tick
+            self.entities, self.tick, positions_by_owner=positions
         ).items():
             if newly_visible or newly_explored or no_longer_visible:
                 self.events.record(

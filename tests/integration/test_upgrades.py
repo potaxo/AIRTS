@@ -327,7 +327,8 @@ def test_cancellation_refunds_once_and_preserves_global_settlement() -> None:
     world = upgrade_world()
     definition = EntityKind.RESOURCE_GENERATOR.upgrades[0]
     base_income = (
-        EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+        EntityKind.COMMAND_CENTER.profile.income_per_second
+        + EntityKind.RESOURCE_GENERATOR.profile.income_per_second
         + EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
     )
     assert world.execute(UpgradeEntityCommand("extractor")).accepted

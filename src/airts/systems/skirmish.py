@@ -14,20 +14,18 @@ if TYPE_CHECKING:
 def owner_status(
     simulation: Simulation, owner_id: str, *, command_centers_produce: bool = True
 ) -> str:
-    assets = [entity for entity in simulation.entities.values() if entity.owner_id == owner_id]
-    if not assets:
-        return "out"
-    if any(
-        (
+    status = "out"
+    for entity in simulation.entities.values():
+        if entity.owner_id != owner_id:
+            continue
+        status = "eliminated"
+        if entity.is_complete and (
             entity.profile.can_build
             or bool(entity.kind.production_kinds)
             and (command_centers_produce or entity.kind is not EntityKind.COMMAND_CENTER)
-        )
-        and entity.is_complete
-        for entity in assets
-    ):
-        return "active"
-    return "eliminated"
+        ):
+            return "active"
+    return status
 
 
 def evaluate_result(simulation: Simulation, *, command_centers_produce: bool = True) -> int | None:

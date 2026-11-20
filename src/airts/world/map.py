@@ -117,7 +117,7 @@ class GameMap:
         return self.terrain[cell[1]][cell[0]]
 
     def is_passable(self, point: Point) -> bool:
-        return self.contains(point) and self.terrain_at(point).passable
+        return self.contains(point) and self.terrain[int(point.y)][int(point.x)].passable
 
     def is_cell_passable(self, cell: Cell) -> bool:
         return self.contains_cell(cell) and self.terrain_at_cell(cell).passable
@@ -398,7 +398,17 @@ class OccupancyGrid:
                 del self._cells[cell]
 
     def occupants(self, cell: Cell) -> frozenset[str]:
-        return frozenset(self._cells.get(cell, set()))
+        return frozenset(self._cells.get(cell, ()))
+
+    def occupants_in(self, left: int, top: int, right: int, bottom: int) -> set[str]:
+        """Collect distinct IDs in a half-open cell rectangle, clipped to the map."""
+        ids: set[str] = set()
+        columns = range(max(0, left), min(self.width, right))
+        for y in range(max(0, top), min(self.height, bottom)):
+            for x in columns:
+                if occupants := self._cells.get((x, y)):
+                    ids.update(occupants)
+        return ids
 
     def cells_for(self, entity_id: str) -> frozenset[Cell]:
         return self._entity_cells.get(entity_id, frozenset())

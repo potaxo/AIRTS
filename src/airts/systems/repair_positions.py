@@ -34,11 +34,12 @@ def repair_position_clear(simulation: Simulation, entity: Entity, point: Point) 
     """Use local occupancy as broadphase; never scan every unit for each candidate."""
     radius = collision_radius(entity.kind)
     reach = radius + _MAX_MOBILE_RADIUS
-    nearby: set[str] = set()
-    for y in range(floor(point.y - reach), floor(point.y + reach) + 1):
-        for x in range(floor(point.x - reach), floor(point.x + reach) + 1):
-            if simulation.game_map.contains_cell((x, y)):
-                nearby.update(simulation.occupancy.occupants((x, y)))
+    nearby = simulation.occupancy.occupants_in(
+        floor(point.x - reach),
+        floor(point.y - reach),
+        floor(point.x + reach) + 1,
+        floor(point.y + reach) + 1,
+    )
     for key in sorted(nearby):
         other = simulation.entities[key]
         if key == entity.entity_id or not other.is_movable:

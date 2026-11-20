@@ -27,9 +27,13 @@ def work_sources(simulation: Simulation) -> Iterator[tuple[Entity, Entity]]:
     """Yield only active, in-range construction/repair sources and their targets."""
     source: Entity | None
     for worker in simulation.entities.values():
-        if not worker.profile.can_repair or not worker.is_complete:
+        if (
+            worker.repair_target_id is None
+            or not worker.profile.can_repair
+            or not worker.is_complete
+        ):
             continue
-        target = simulation.entities.get(worker.repair_target_id or "")
+        target = simulation.entities.get(worker.repair_target_id)
         if (
             target is not None
             and target.owner_id == worker.owner_id

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from enum import StrEnum
@@ -95,6 +96,7 @@ class InputMode(StrEnum):
 
 class AirtsApp:
     FRAME_RATE_LIMIT = 1_000
+    WORKER_FRAME_RATE_LIMIT = 120
     OPENGL_OVERLAY_REFRESH_TICKS = 3
     MAX_SELECTED_PATHS = 32
     AUTOMATION_ROW_HEIGHT = automations.AUTOMATION_ROW_HEIGHT
@@ -135,6 +137,13 @@ class AirtsApp:
         debug_mode: bool | None = None,
     ) -> None:
         self.simulation = simulation
+        self._tick_executor: ThreadPoolExecutor | None = None
+        self._tick_future: Future[float] | None = None
+        self._completed_tick_ms = 0.0
+        self._input_entities: tuple[Entity, ...] = ()
+        self._deferred_events: list[tuple[pygame.event.Event, tuple[int, int], float, int]] = []
+        self._deferred_transform: tuple[tuple[int, int], float] | None = None
+        self._published_world = False
         self.debug_mode = (
             simulation.events.enabled if debug_mode is None and not show_lobby else bool(debug_mode)
         )
@@ -170,6 +179,7 @@ class AirtsApp:
         self.show_ai_income = False
         self.game_speed = 1.0
         self._simulation_accumulator = 0.0
+        self._presentation_publish_pending = False
         self.help_open = False
         self.placement_kind: EntityKind | None = None
         self.building_line_draft: BuildingLineDraft | None = None
@@ -276,6 +286,8 @@ class AirtsApp:
         """Make the current authoritative state both interpolation endpoints."""
 
         self._simulation_accumulator = 0.0
+        self._presentation_publish_pending = False
+        self._input_entities = ()
         self._previous_entity_positions = {
             entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
         }
@@ -289,7 +301,15 @@ class AirtsApp:
     def _advance_presentation_tick(self) -> None:
         """Capture the previous state before advancing the authoritative simulation."""
 
+        self._prepare_presentation_tick()
+        self.simulation.advance()
+
+    def _prepare_presentation_tick(self) -> None:
+        """Capture endpoints before handing exclusive world ownership to a worker."""
+
         self.facing.sync(self.simulation)
+        if self._tick_executor is not None:
+            self._input_entities = tuple(self.simulation.entities.values())
         self._previous_entity_positions = {
             entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
         }
@@ -297,7 +317,10 @@ class AirtsApp:
             projectile_id: projectile.position
             for projectile_id, projectile in self.simulation.projectiles.items()
         }
-        self.simulation.advance()
+
+    @property
+    def previous_entity_positions(self) -> Mapping[str, Point]:
+        return self._previous_entity_positions
 
     def previous_entity_position(self, entity_id: str) -> Point:
         entity = self.simulation.entities[entity_id]
@@ -385,11 +408,16 @@ class AirtsApp:
 
     def _pick_entity(self, point: Point, *, owned_buildings_only: bool = False) -> Entity | None:
         """Prefer direct hits; shrink distant-view assistance to zero in close views."""
-        tile = self.tile_size
+        tile = self.tile_size if self._deferred_transform is None else self._deferred_transform[1]
         assistance = max(0.0, min(1.0, (24.0 - tile) / 8.0))
         best: tuple[bool, float, str] | None = None
         picked: Entity | None = None
-        for entity in self.simulation.entities.values():
+        # Deferred clicks refer to the completed world the player saw. These
+        # references are read only after the writer joins; hit positions were
+        # captured before it started, including targets destroyed during the tick.
+        snapshot = self._deferred_transform is not None and bool(self._input_entities)
+        entities = self._input_entities if snapshot else self.simulation.entities.values()
+        for entity in entities:
             building = entity.category is EntityCategory.BUILDING
             if owned_buildings_only and (not building or entity.owner_id != "player"):
                 continue
@@ -399,7 +427,8 @@ class AirtsApp:
             padding = assistance * (
                 self.ENEMY_CLICK_RADIUS if entity.owner_id != "player" else self.ENTITY_CLICK_RADIUS
             )
-            distance = _entity_hit_distance(entity, point)
+            position = self._previous_entity_positions[entity.entity_id] if snapshot else None
+            distance = _entity_hit_distance(entity, point, position)
             if distance > max(direct_radius, padding):
                 continue
             key = (distance > direct_radius, distance, entity.entity_id)
@@ -447,6 +476,9 @@ class AirtsApp:
                         f"{error}"
                     ) from error
                 opengl_renderer = OpenGLRenderer.from_active_context()
+                self._tick_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="airts-tick"
+                )
                 self._scaled_display_active = False
             else:
                 screen = pygame.display.set_mode(self.window_size, self.DISPLAY_FLAGS)
@@ -458,22 +490,29 @@ class AirtsApp:
             clock = pygame.time.Clock()
             profiler = PresentationProfiler()
             self._simulation_accumulator = 0.0
+            self._presentation_publish_pending = False
             running = True
             frames = 0
             last_presented_at = perf_counter()
             previous_loop_at = last_presented_at
             while running and (max_frames is None or frames < max_frames):
-                clock.tick(self.FRAME_RATE_LIMIT)
+                clock.tick(
+                    self.WORKER_FRAME_RATE_LIMIT
+                    if self._tick_future is not None
+                    else self.FRAME_RATE_LIMIT
+                )
                 loop_started_at = perf_counter()
                 elapsed = min(loop_started_at - previous_loop_at, 0.25)
                 previous_loop_at = loop_started_at
+                self._completed_tick_ms = 0.0
+                self._poll_simulation_tick()
                 self._poll_save()
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
                         break
                     else:
-                        self._handle_event(event)
+                        self._accept_frame_event(event)
                 if not running:
                     break
                 if self._pending_window_size is not None:
@@ -495,12 +534,22 @@ class AirtsApp:
                 simulation_started = perf_counter()
                 self._advance_simulation_frame(elapsed)
                 simulation_ms = (perf_counter() - simulation_started) * 1000.0
+                if self._tick_executor is not None:
+                    simulation_ms = self._completed_tick_ms
                 render_started = perf_counter()
                 if opengl_renderer is not None:
-                    opengl_renderer.render(
-                        self,
-                        (self.right_panel_rect.right, self.left_panel_rect.bottom),
-                    )
+                    if self._tick_future is not None:
+                        opengl_renderer.render_cached(
+                            origin=self.map_origin,
+                            tile=self.tile_size,
+                            viewport=self.minimap.viewport_rect(self),
+                        )
+                    else:
+                        opengl_renderer.render(
+                            self,
+                            (self.right_panel_rect.right, self.left_panel_rect.bottom),
+                        )
+                        self._published_world = True
                 else:
                     self._draw(screen)
                 render_ms = (perf_counter() - render_started) * 1000.0
@@ -521,15 +570,21 @@ class AirtsApp:
                 frames += 1
         finally:
             try:
-                self._finish_save()
-                if opengl_renderer is not None:
-                    opengl_renderer.release()
-                self._shutdown_pygame(display_initialized, font_initialized)
+                try:
+                    self._finish_simulation_tick()
+                finally:
+                    self._finish_save()
+                    if opengl_renderer is not None:
+                        opengl_renderer.release()
+                    self._shutdown_pygame(display_initialized, font_initialized)
             finally:
                 gc.set_threshold(*gc_thresholds)
 
     def _advance_simulation_frame(self, elapsed: float) -> None:
         """Present and poll input between fixed ticks, retaining all admitted time debt."""
+        if self._tick_future is not None:
+            self._simulation_accumulator += elapsed * self.game_speed
+            return
         if (
             self.paused
             or self.save_panel.open
@@ -537,15 +592,87 @@ class AirtsApp:
             or self.simulation.match_result is not None
         ):
             self._simulation_accumulator = 0.0
+            self._presentation_publish_pending = False
             self.render_alpha = 1.0
             return
         self._simulation_accumulator += elapsed * self.game_speed
-        if self._simulation_accumulator >= Simulation.TICK_SECONDS:
+        if self._tick_executor is not None and not self._published_world:
+            return
+        if self._presentation_publish_pending:
+            self._presentation_publish_pending = False
+        elif self._simulation_accumulator >= Simulation.TICK_SECONDS:
+            if self._tick_executor is not None:
+                self._prepare_presentation_tick()
+                self._tick_future = self._tick_executor.submit(
+                    _advance_timed_tick, self.simulation, self.facing
+                )
+                self._simulation_accumulator -= Simulation.TICK_SECONDS
+                self.render_alpha = 1.0
+                return
+            started = perf_counter()
             self._advance_presentation_tick()
             self._simulation_accumulator -= Simulation.TICK_SECONDS
+            # A slow tick must publish its staged world before another tick can
+            # invalidate it. Keep all elapsed time owed to the simulation.
+            self._presentation_publish_pending = perf_counter() - started >= Simulation.TICK_SECONDS
         self.render_alpha = max(
             0.0, min(1.0, self._simulation_accumulator / Simulation.TICK_SECONDS)
         )
+
+    def _poll_simulation_tick(self) -> None:
+        future = self._tick_future
+        if future is None or not future.done():
+            return
+        self._tick_future = None
+        self._completed_tick_ms = future.result()
+        self._prune_removed_entities()
+        self._presentation_publish_pending = True
+        self._published_world = False
+        events, self._deferred_events = self._deferred_events, []
+        for event, origin, tile, modifiers in events:
+            self._deferred_transform = origin, tile
+            self._event_modifiers = modifiers
+            try:
+                self._handle_event(event)
+            finally:
+                self._deferred_transform = None
+
+    def _accept_frame_event(self, event: pygame.event.Event) -> None:
+        if self._tick_future is None:
+            self._handle_event(event)
+            return
+        self._track_input_modifiers(event)
+        if event.type in {pygame.KEYDOWN, pygame.KEYUP} and event.key in {
+            pygame.K_w,
+            pygame.K_a,
+            pygame.K_s,
+            pygame.K_d,
+        }:
+            if event.type == pygame.KEYDOWN:
+                self._camera_keys.add(event.key)
+            else:
+                self._camera_keys.discard(event.key)
+            return
+        if event.type == pygame.WINDOWFOCUSLOST:
+            self._camera_keys.clear()
+        # Preserve input order, including Shift transitions. Commands and saves
+        # execute at the next complete boundary through the existing handlers.
+        self._deferred_events.append(
+            (event, self.map_origin, self.tile_size, self._input_modifiers())
+        )
+
+    def _finish_simulation_tick(self) -> None:
+        executor, self._tick_executor = self._tick_executor, None
+        try:
+            if executor is not None:
+                executor.shutdown(wait=True)
+            if self._tick_future is not None:
+                self._poll_simulation_tick()
+        finally:
+            self._tick_future = None
+            self._deferred_events.clear()
+            self._published_world = False
+            self._input_entities = ()
 
     @staticmethod
     def _configure_opengl_video_backend() -> None:
@@ -587,7 +714,7 @@ class AirtsApp:
         except pygame.error:
             return 0
 
-    def _handle_event(self, event: pygame.event.Event) -> None:
+    def _track_input_modifiers(self, event: pygame.event.Event) -> None:
         if event.type in {pygame.KEYDOWN, pygame.KEYUP}:
             modifiers = int(event.mod) if hasattr(event, "mod") else self._input_modifiers()
             shift_mask = {
@@ -597,17 +724,22 @@ class AirtsApp:
             self._event_modifiers = (
                 modifiers | shift_mask if event.type == pygame.KEYDOWN else modifiers & ~shift_mask
             )
+        elif event.type == pygame.WINDOWFOCUSLOST:
+            self._event_modifiers = 0
+        elif event.type == pygame.WINDOWFOCUSGAINED:
+            self._event_modifiers = None
+
+    def _handle_event(self, event: pygame.event.Event) -> None:
+        self._track_input_modifiers(event)
         if event.type == pygame.KEYUP:
             self._camera_keys.discard(event.key)
             return
         if event.type == pygame.WINDOWFOCUSLOST:
-            self._event_modifiers = 0
             self._camera_keys.clear()
             self._minimap_dragging = False
             self.building_line_draft = None
             return
         if event.type == pygame.WINDOWFOCUSGAINED:
-            self._event_modifiers = None
             return
         if self.save_panel.open and event.type not in {
             pygame.VIDEORESIZE,
@@ -1030,7 +1162,11 @@ class AirtsApp:
     def _select_entities(self, start: Point, end: Point, additive: bool = False) -> None:
         if start.distance_to(end) < 0.3:
             hit = self._pick_entity(end)
-            clicked = hit.entity_id if hit is not None else None
+            clicked = (
+                hit.entity_id
+                if hit is not None and hit.entity_id in self.simulation.entities
+                else None
+            )
             if (
                 clicked is not None
                 and self.simulation.entities[clicked].owner_id != "player"
@@ -2530,12 +2666,17 @@ class AirtsApp:
             x += width + 9
 
     def _map_point(self, position: tuple[int, int]) -> Point:
-        origin_x, origin_y = self.map_origin
+        origin, tile = (
+            (self.map_origin, self.tile_size)
+            if self._deferred_transform is None
+            else self._deferred_transform
+        )
+        origin_x, origin_y = origin
         if self.ui.font is None and position[0] < self.canvas_rect.left:
             origin_x -= self.canvas_rect.left
         return Point(
-            (position[0] - origin_x) / self.tile_size,
-            (position[1] - origin_y) / self.tile_size,
+            (position[0] - origin_x) / tile,
+            (position[1] - origin_y) / tile,
         )
 
     def screen_point(self, point: Point) -> tuple[int, int]:
@@ -2553,12 +2694,23 @@ class AirtsApp:
         self.reclaim_mode = False
 
 
-def _entity_hit_distance(entity: Entity, point: Point) -> float:
+def _advance_timed_tick(simulation: Simulation, facing: FacingHistory) -> float:
+    started = perf_counter()
+    simulation.advance()
+    simulation_ms = (perf_counter() - started) * 1000.0
+    # Cached OpenGL frames only read uploaded endpoints while this worker owns
+    # the world. Finish the next visual headings before publishing it.
+    facing.sync(simulation)
+    return simulation_ms
+
+
+def _entity_hit_distance(entity: Entity, point: Point, position: Point | None = None) -> float:
+    position = entity.position if position is None else position
     if entity.category is not EntityCategory.BUILDING:
-        return entity.selection_position.distance_to(point)
+        return position.distance_to(point)
     width, height = entity.kind.profile.footprint
-    nearest_x = min(max(point.x, entity.position.x), entity.position.x + width)
-    nearest_y = min(max(point.y, entity.position.y), entity.position.y + height)
+    nearest_x = min(max(point.x, position.x), position.x + width)
+    nearest_y = min(max(point.y, position.y), position.y + height)
     return point.distance_to(Point(nearest_x, nearest_y))
 
 

@@ -572,48 +572,6 @@ def drive_defend(
         if parameters.gathering_point
         else simulation.AUTOMATION_ROUTE_BUDGET
     )
-    buildings = simulation._building_cells()
-    if parameters.deployment_slots:
-        anchor = next(
-            (
-                p
-                for p in parameters.deployment_slots
-                if simulation.game_map.cell_for(p) not in buildings
-            ),
-            None,
-        )
-    else:
-        center = target_center(parameters.target)
-        anchor = min(
-            (
-                p
-                for p in parameters.stations.values()
-                if simulation.game_map.cell_for(p) not in buildings
-            ),
-            key=lambda p: (p.distance_to(center), p.y, p.x),
-            default=None,
-        )
-    enemy_indexes = queries.enemy_indexes
-    snapshot = enemy_indexes.get(automation.owner_id)
-    if snapshot is None:
-        enemies = {
-            key: e.position
-            for key, e in simulation.entities.items()
-            if simulation.are_hostile(e.owner_id, automation.owner_id)
-        }
-        enemy_index = SpatialIndex(enemies)
-        enemy_indexes[automation.owner_id] = enemies, enemy_index
-    else:
-        enemies, enemy_index = snapshot
-    attacked = [
-        simulation.entities[other]
-        for other in automation.entity_ids
-        if simulation.entities[other].last_attacker_id in enemies
-        and simulation.entities[other].last_attacked_tick is not None
-        and simulation.tick - (simulation.entities[other].last_attacked_tick or 0)
-        <= simulation.DEFEND_ATTACK_MEMORY_TICKS
-    ]
-    attacked_index = SpatialIndex({e.entity_id: e.position for e in attacked})
     station_distances = {
         key: simulation.entities[key].position.distance_to(parameters.stations[key])
         for key in automation.entity_ids
@@ -623,30 +581,56 @@ def drive_defend(
         for key in automation.entity_ids
         if station_distances[key] <= simulation.DEFEND_RESPONSE_RADIUS
     )
-    enemy_ids = dict(
-        zip(
-            responding,
-            enemy_index.nearest_many(
-                tuple(
-                    (parameters.stations[key], simulation.DEFEND_RESPONSE_RADIUS)
-                    for key in responding
-                )
-            ),
-            strict=True,
+    enemy_ids: dict[str, str | None] = {}
+    if responding:
+        snapshot = queries.enemy_indexes.get(automation.owner_id)
+        if snapshot is None:
+            enemies = {
+                key: e.position
+                for key, e in simulation.entities.items()
+                if simulation.are_hostile(e.owner_id, automation.owner_id)
+            }
+            snapshot = enemies, SpatialIndex(enemies)
+            queries.enemy_indexes[automation.owner_id] = snapshot
+        enemies, enemy_index = snapshot
+        enemy_ids.update(
+            zip(
+                responding,
+                enemy_index.nearest_many(
+                    tuple(
+                        (parameters.stations[key], simulation.DEFEND_RESPONSE_RADIUS)
+                        for key in responding
+                    )
+                ),
+                strict=True,
+            )
         )
-    )
-    victim_ids = dict(
-        zip(
-            responding,
-            attacked_index.nearest_many(
+        attacked = {
+            e.entity_id: e.position
+            for key in automation.entity_ids
+            if (e := simulation.entities[key]).last_attacker_id in enemies
+            and e.last_attacked_tick is not None
+            and simulation.tick - e.last_attacked_tick <= simulation.DEFEND_ATTACK_MEMORY_TICKS
+        }
+        if attacked:
+            victims = SpatialIndex(attacked).nearest_many(
                 tuple(
                     (simulation.entities[key].position, simulation.DEFEND_RESPONSE_RADIUS * 2)
                     for key in responding
                 )
-            ),
-            strict=True,
-        )
-    )
+            )
+            for key, victim in zip(responding, victims, strict=True):
+                if victim is not None:
+                    enemy_ids[key] = simulation.entities[victim].last_attacker_id
+        else:
+            for key, enemy in enemy_ids.items():
+                entity = simulation.entities[key]
+                if (
+                    enemy is not None
+                    and entity.position.distance_to(enemies[enemy])
+                    <= entity.kind.profile.attack_range
+                ):
+                    enemy_ids[key] = None
     # Dispatch front ranks first so early arrivals do not seal off deeper stations.
     ordered = sorted(automation.entity_ids, key=lambda key: (station_distances[key], key))
     destinations: dict[str, Point] = {}
@@ -657,9 +641,6 @@ def drive_defend(
         station = parameters.stations[key]
         station_distance = station_distances[key]
         enemy_id = enemy_ids.get(key)
-        victim_id = victim_ids.get(key)
-        if victim_id is not None:
-            enemy_id = simulation.entities[victim_id].last_attacker_id
         current = simulation.entities.get(entity.attack_target_id or "")
         if (
             entity.pursue_target
@@ -667,12 +648,6 @@ def drive_defend(
             and current.position.distance_to(station) <= simulation.DEFEND_PURSUIT_RADIUS
         ):
             continue
-        if (
-            enemy_id is not None
-            and not attacked
-            and entity.position.distance_to(enemies[enemy_id]) <= entity.kind.profile.attack_range
-        ):
-            enemy_id = None
         if enemy_id is not None:
             if not entity.pursue_target or entity.attack_target_id != enemy_id:
                 entity.clear_recovery_request()
@@ -711,6 +686,27 @@ def drive_defend(
             continue
         destinations[key] = station
     if destinations:
+        buildings = simulation._building_cells()
+        if parameters.deployment_slots:
+            anchor = next(
+                (
+                    p
+                    for p in parameters.deployment_slots
+                    if simulation.game_map.cell_for(p) not in buildings
+                ),
+                None,
+            )
+        else:
+            center = target_center(parameters.target)
+            anchor = min(
+                (
+                    p
+                    for p in parameters.stations.values()
+                    if simulation.game_map.cell_for(p) not in buildings
+                ),
+                key=lambda p: (p.distance_to(center), p.y, p.x),
+                default=None,
+            )
         try:
             paths = movement.plan_group_paths(
                 simulation, tuple(destinations), destinations, shared_goal=anchor

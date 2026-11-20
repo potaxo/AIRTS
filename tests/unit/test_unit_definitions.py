@@ -11,6 +11,7 @@ from airts.world.units.schema import EntityCategory
 @pytest.mark.parametrize(
     "kind,base_income,tiers",
     [
+        (EntityKind.COMMAND_CENTER, 22, ()),
         (EntityKind.RESOURCE_GENERATOR, 4, ((120, 300, 8), (360, 600, 16))),
         (EntityKind.MATTER_SYNTHESIZER, 2, ((200, 450, 4), (600, 900, 8))),
     ],

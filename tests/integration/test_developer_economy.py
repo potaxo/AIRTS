@@ -32,6 +32,19 @@ def world() -> Simulation:
                 "height": 24,
                 "terrain": {"default": "grass"},
                 "entities": [
+                    {"id": "center", "kind": "command_center", "position": [2, 16]},
+                    {
+                        "id": "enemy_center",
+                        "kind": "command_center",
+                        "position": [20, 2],
+                        "owner": "enemy",
+                    },
+                    {
+                        "id": "ally_center",
+                        "kind": "command_center",
+                        "position": [20, 16],
+                        "owner": "ai_ally",
+                    },
                     {"id": "extractor", "kind": "resource_generator", "position": [2, 2]},
                     {"id": "synthesizer", "kind": "matter_synthesizer", "position": [8, 2]},
                     {"id": "builder", "kind": "builder", "position": [10.5, 10.5]},
@@ -54,7 +67,10 @@ def world() -> Simulation:
 
 
 def test_income_is_settled_every_second_and_ai_boost_is_reversible(world: Simulation) -> None:
-    ai_income = EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+    ai_income = (
+        EntityKind.COMMAND_CENTER.profile.income_per_second
+        + EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+    )
     player_income = ai_income + EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
     world.advance(9)
     assert set(world.resources.values()) == {500}
@@ -84,6 +100,7 @@ def test_income_is_settled_every_second_and_ai_boost_is_reversible(world: Simula
 
 
 def test_completion_and_removal_update_income_without_recounting(world: Simulation) -> None:
+    center_income = EntityKind.COMMAND_CENTER.profile.income_per_second
     extractor_income = EntityKind.RESOURCE_GENERATOR.profile.income_per_second
     synthesizer_income = EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
     world.advance(3)
@@ -94,12 +111,16 @@ def test_completion_and_removal_update_income_without_recounting(world: Simulati
     job = world.automations[result.automation_id or ""]
     assert isinstance(job.parameters, ConstructionParameters)
     world.advance()
-    assert income_per_second(world, "player") == extractor_income + synthesizer_income
+    assert (
+        income_per_second(world, "player") == center_income + extractor_income + synthesizer_income
+    )
     balance = world.resources["player"]
     world.advance(6)  # Settle at tick 10 while the physical scaffold is still unfinished.
     assert job.parameters.site_entity_id is not None
     assert not world.entities[job.parameters.site_entity_id].is_complete
-    assert world.resources["player"] == balance + extractor_income + synthesizer_income
+    assert (
+        world.resources["player"] == balance + center_income + extractor_income + synthesizer_income
+    )
     for _ in range(40):
         if job.status.terminal:
             break
@@ -107,7 +128,7 @@ def test_completion_and_removal_update_income_without_recounting(world: Simulati
     entity_id = job.parameters.constructed_entity_id
     assert entity_id is not None
     assert world.entities[entity_id].is_complete
-    completed_income = 2 * extractor_income + synthesizer_income
+    completed_income = center_income + 2 * extractor_income + synthesizer_income
     assert income_per_second(world, "player") == completed_income
     balance = world.resources["player"]
     remaining = 10 - world.tick % 10
@@ -117,6 +138,8 @@ def test_completion_and_removal_update_income_without_recounting(world: Simulati
     assert world.resources["player"] == balance + completed_income
     assert world.remove_entity(entity_id).accepted
     assert world.remove_entity("extractor").accepted
+    assert income_per_second(world, "player") == center_income + synthesizer_income
+    assert world.remove_entity("center").accepted
     assert income_per_second(world, "player") == synthesizer_income
     assert not world.remove_entity(entity_id).accepted
     balance = world.resources["player"]
@@ -137,7 +160,10 @@ def test_only_the_player_can_change_ai_income(world: Simulation) -> None:
 
 
 def test_load_rebuilds_totals_and_preserves_both_income_phases(world: Simulation) -> None:
-    ai_income = EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+    ai_income = (
+        EntityKind.COMMAND_CENTER.profile.income_per_second
+        + EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+    )
     player_income = ai_income + EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
     world.advance(3)
     assert world.execute(SetAIIncomeMultiplierCommand(5)).accepted
@@ -180,7 +206,8 @@ def test_save_rejects_missing_or_invalid_ai_income(world: Simulation, value: obj
 
 def test_resource_header_advertises_total_income_including_bonus(world: Simulation) -> None:
     base_income = (
-        EntityKind.RESOURCE_GENERATOR.profile.income_per_second
+        EntityKind.COMMAND_CENTER.profile.income_per_second
+        + EntityKind.RESOURCE_GENERATOR.profile.income_per_second
         + EntityKind.MATTER_SYNTHESIZER.profile.income_per_second
     )
     app = AirtsApp(world)

@@ -11,7 +11,7 @@ from airts.navigation.pathfinding import PathfindingError
 from airts.navigation.spatial_index import SpatialIndex
 from airts.systems import combat_geometry
 from airts.world._numeric import FloatArray
-from airts.world.entities import Entity, OrderKind
+from airts.world.entities import Entity
 
 if TYPE_CHECKING:
     from airts.simulation import Simulation
@@ -206,15 +206,6 @@ def coordinate(
     """Use existing paths in constrictions; recover translated slots in clear final approaches."""
     groups: dict[tuple[str, str], list[int]] = defaultdict(list)
     pending: set[tuple[str, str]] = set()
-    pending_attacks = {
-        (e.formation_group, e.order_queue[0].target_entity_id)
-        for e in entities
-        if e.formation_group is not None
-        and e.order_queue
-        and e.order_queue[0].kind is OrderKind.ATTACK
-        and not e.pursue_target
-        and not e.path
-    }
     for i, e in enumerate(entities):
         if e.formation_group is None:
             continue
@@ -235,22 +226,6 @@ def coordinate(
                 entities[i].no_progress_ticks = 0
             continue
         members = [entities[i] for i in indices]
-        if members[0].pursue_target and (
-            (members[0].formation_group, members[0].attack_target_id) in pending_attacks
-            or any(
-                not e.path
-                and e.position.distance_to(
-                    Point(e.formation_goal.x + _offset(e).x, e.formation_goal.y + _offset(e).y)
-                )
-                > 0.04
-                for e in members
-                if e.formation_goal is not None
-            )
-        ):
-            for i in indices:
-                speeds[i] = 0
-                entities[i].no_progress_ticks = 0
-            continue
         goal = members[0].formation_goal
         assert goal is not None
         offsets = [_offset(e) for e in members]
@@ -260,7 +235,10 @@ def coordinate(
         fraction = min(1.0, step / distance) if distance > 1e-9 else 1.0
         anchor = Point(cx + (goal.x - cx) * fraction, cy + (goal.y - cy) * fraction)
         desired = [Point(anchor.x + p.x, anchor.y + p.y) for p in offsets]
-        clear = all(
+        ready = not members[0].pursue_target or all(
+            e.path or e.position.distance_to(slot(e)) <= 0.04 for e in members
+        )
+        clear = ready and all(
             len(e.path) <= 1
             and simulation._routes.disc_segment(
                 e.position, p, obstacles, e.profile.collision_radius

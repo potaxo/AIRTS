@@ -1,12 +1,22 @@
 """Constant-velocity artillery aiming, including degenerate and map-edge geometry."""
 
 from math import ceil, floor, hypot, isfinite
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from airts.contracts.spatial import Point
-from airts.systems.combat_geometry import _firing_ring, predicted_impact_point
+from airts.simulation import Simulation
+from airts.systems import combat_geometry
+from airts.systems.combat_geometry import (
+    _firing_ring,
+    firing_approach_points,
+    predicted_impact_point,
+)
+from airts.world.entities import Entity
+from airts.world.map import load_map_data
+from airts.world.units.catalog import EntityKind
 
 
 @pytest.mark.parametrize(
@@ -74,3 +84,72 @@ def test_numeric_firing_ring_matches_complete_geometric_oracle(
     ]
     actual = _firing_ring(terrain, cx, cy, inner, outer, tx, ty, width, height)
     assert actual.tolist() == expected
+
+
+def test_shared_firing_geometry_tracks_position_footprint_range_and_bounded_eviction() -> None:
+    world = Simulation(
+        load_map_data(
+            {
+                "id": "firing_cache",
+                "name": "Firing cache",
+                "width": 32,
+                "height": 32,
+                "terrain": {"default": "grass"},
+                "entities": [{"id": "seed", "kind": "scout", "position": [1.5, 1.5]}],
+            }
+        )
+    )
+    attacker = Entity("gun", EntityKind.LIGHT_TANK, "player", Point(2.5, 2.5), 1)
+    target = Entity("target", EntityKind.FACTORY, "enemy", Point(20, 20), 1)
+    before = world.export_state()
+    with patch.object(combat_geometry, "_firing_ring", wraps=_firing_ring) as calculate:
+        original = firing_approach_points(world, attacker, target)
+        assert original
+        assert firing_approach_points(world, attacker, target) is original
+        target.owner_id = "ally"
+        assert firing_approach_points(world, attacker, target) is original
+        assert calculate.call_count == 1
+        assert world.export_state() == before
+        target.position = Point(20.25, 20)
+        firing_approach_points(world, attacker, target)
+        target.kind = EntityKind.SCOUT
+        firing_approach_points(world, attacker, target)
+        attacker.kind = EntityKind.ARTILLERY
+        firing_approach_points(world, attacker, target)
+        assert calculate.call_count == 4
+        assert firing_approach_points(world, attacker, target) == firing_approach_points(
+            world, attacker, target
+        )
+        assert calculate.call_count == 6, "moving-target geometry uses the per-pass caller cache"
+        target.kind = EntityKind.FACTORY
+        for i in range(129):
+            target.position = Point(2 + i % 16, 2 + i // 16)
+            firing_approach_points(world, attacker, target)
+        assert len(world._firing_approaches) <= 128
+        attacker.kind, target.kind, target.position = (
+            EntityKind.LIGHT_TANK,
+            EntityKind.FACTORY,
+            Point(20, 20),
+        )
+        rebuilt = firing_approach_points(world, attacker, target)
+        assert rebuilt == original and rebuilt is not original
+
+
+def test_empty_cached_ring_keeps_exact_adjacent_fallback() -> None:
+    world = Simulation(
+        load_map_data(
+            {
+                "id": "empty_ring",
+                "name": "Empty ring",
+                "width": 8,
+                "height": 8,
+                "terrain": {"default": "grass"},
+                "entities": [{"id": "seed", "kind": "scout", "position": [1.5, 1.5]}],
+            }
+        )
+    )
+    attacker = Entity("gun", EntityKind.ARTILLERY, "player", Point(1.5, 1.5), 1)
+    target = Entity("target", EntityKind.FACTORY, "enemy", Point(3, 3), 1)
+    expected = world._interaction_points(target)
+    assert firing_approach_points(world, attacker, target) == expected
+    assert firing_approach_points(world, attacker, target) == expected

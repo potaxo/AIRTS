@@ -30,6 +30,7 @@ COMMAND_CENTER = EntityProfile(
     vision_range=7.0,
     footprint=(5, 5),
     collision_radius=0.5,
+    income_per_second=22,
 )
 
 RESOURCE_GENERATOR = EntityProfile(

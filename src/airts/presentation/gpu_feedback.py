@@ -256,6 +256,23 @@ class GPUFeedback:
         if key != self.key:
             self._build(app, pointer)
             self.key = key
+        self.draw_cached(
+            size,
+            app.map_origin,
+            app.tile_size,
+            app.canvas_rect,
+            app.render_alpha if interpolation_alpha is None else interpolation_alpha,
+        )
+
+    def draw_cached(
+        self,
+        size: tuple[int, int],
+        origin: tuple[int, int],
+        tile: float,
+        rect: pygame.Rect,
+        interpolation_alpha: float,
+    ) -> None:
+        """Draw completed feedback buffers without reading the advancing world."""
         for program in (
             self.shape_program,
             self.line_program,
@@ -263,12 +280,9 @@ class GPUFeedback:
             self.text_program,
         ):
             program["viewport"].value = size
-            program["origin"].value = app.map_origin
-            program["tile"].value = app.tile_size
-        self.segment_program["interpolation_alpha"].value = max(
-            0.0, min(1.0, app.render_alpha if interpolation_alpha is None else interpolation_alpha)
-        )
-        rect = app.canvas_rect
+            program["origin"].value = origin
+            program["tile"].value = tile
+        self.segment_program["interpolation_alpha"].value = max(0.0, min(1.0, interpolation_alpha))
         self.context.scissor = (rect.x, size[1] - rect.bottom, rect.width, rect.height)
         try:
             shapes, lines, triangles, text = self.counts

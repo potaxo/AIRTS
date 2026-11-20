@@ -125,9 +125,9 @@ def drive_builders(simulation: Simulation) -> None:
     builders = [
         entity
         for entity in simulation.entities.values()
-        if entity.profile.movable
+        if entity.repair_target_id is not None
+        and entity.profile.movable
         and entity.profile.can_repair
-        and entity.repair_target_id is not None
     ]
     if not builders:
         return

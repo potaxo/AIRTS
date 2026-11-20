@@ -11,6 +11,7 @@ from airts.world.units.catalog import EntityKind
 from airts.world.units.schema import EntityCategory, EntityProfile, UpgradeDefinition
 
 SHELL_BLAST_TICKS = 3
+_UNIT_KINDS = frozenset(kind for kind in EntityKind if kind.profile.category is EntityCategory.UNIT)
 
 
 class UnitState(StrEnum):
@@ -129,6 +130,9 @@ class Entity:
     construction_progress: float | None = None
     upgrade: UpgradeState = field(default_factory=UpgradeState)
     production_deployment: ProductionDeployment | None = None
+    _selection_kind: EntityKind | None = field(default=None, init=False, repr=False, compare=False)
+    _selection_origin: Point | None = field(default=None, init=False, repr=False, compare=False)
+    _selection_center: Point | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def profile(self) -> EntityProfile:
@@ -181,11 +185,24 @@ class Entity:
 
     @property
     def selection_position(self) -> Point:
-        profile = self.kind.profile
-        if profile.category is EntityCategory.UNIT:
-            return self.position
-        width, height = profile.footprint
-        return Point(self.position.x + width / 2, self.position.y + height / 2)
+        position, kind = self.position, self.kind
+        if kind in _UNIT_KINDS:
+            return position
+        cached = self._selection_center
+        if (
+            cached is not None
+            and self._selection_origin is position
+            and self._selection_kind is kind
+        ):
+            return cached
+        width, height = kind.profile.footprint
+        center = Point(position.x + width / 2, position.y + height / 2)
+        self._selection_kind, self._selection_origin, self._selection_center = (
+            kind,
+            position,
+            center,
+        )
+        return center
 
     def to_dict(self) -> dict[str, object]:
         return {

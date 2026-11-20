@@ -7,7 +7,8 @@ Spatial queries are shared within a decision; expensive orders have fixed budget
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import defaultdict
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from math import ceil, hypot, inf, sqrt
 from typing import TYPE_CHECKING
@@ -36,9 +37,10 @@ from airts.navigation.spatial_index import SpatialIndex
 from airts.systems.combat_geometry import firing_approach_points
 from airts.systems.construction import validate_building_placement
 from airts.systems.economy import building_income_per_second
-from airts.world._numeric import FloatArray, compile_numeric
+from airts.systems.spawning import factory_exit_cells, spawn_cell_blockers
+from airts.world._numeric import BoolArray, FloatArray, compile_numeric, point_coordinates
 from airts.world.entities import Entity
-from airts.world.map import Cell, Terrain, footprint_cells
+from airts.world.map import Cell, GameMap, Terrain, footprint_cells
 from airts.world.opponents import FieldArmy, OpponentState, Squad, SquadPhase
 from airts.world.units.catalog import EntityKind
 
@@ -47,6 +49,8 @@ if TYPE_CHECKING:
 
 DECISION_TICKS = 10
 ECONOMY_TICKS = 20
+_LARGE_MATCH_ENTITY_COUNT = 4_096
+_LARGE_MATCH_EXTRA_MACRO_INTERVAL = 2
 MAX_ORDERS = 3
 MAX_SQUAD_SIZE = 32
 MAX_SQUAD_UPDATES = 2
@@ -81,6 +85,29 @@ TARGET_VALUES = {
     EntityKind.MATTER_SYNTHESIZER: 300.0,
     EntityKind.TURRET: 180.0,
 }
+
+
+class PlacementTerrain:
+    """Map-lifetime placement facts; dynamic buildings and claims stay decision-local."""
+
+    def __init__(self, game_map: GameMap) -> None:
+        self.resource = np.asarray([[tile.passable for tile in row] for row in game_map.terrain])
+        self.ordinary = np.asarray(
+            [
+                [tile.passable and tile not in {Terrain.ROAD, Terrain.BRIDGE} for tile in row]
+                for row in game_map.terrain
+            ]
+        )
+        self.ordinary &= (np.arange(game_map.width) % BASE_BLOCK_SIZE >= BASE_STREET_WIDTH)[None, :]
+        self.ordinary &= (np.arange(game_map.height) % BASE_BLOCK_SIZE >= BASE_STREET_WIDTH)[
+            :, None
+        ]
+        self.resource_cells = frozenset().union(
+            *(
+                footprint_cells(EntityKind.RESOURCE_GENERATOR, site)
+                for site in game_map.resource_sites or ()
+            )
+        )
 
 
 def _damage_per_exchange(unit: Entity) -> float:
@@ -153,14 +180,66 @@ def engagement_margin(own: Sequence[Entity], enemy: Sequence[Entity]) -> float:
     return 0.5 * (ratio - 1) + own_hp / initial_own - enemy_hp / initial_enemy
 
 
+class _DecisionWorld:
+    """One position-stable AI pass; economic decisions acquire sensors on demand."""
+
+    def __init__(self, simulation: Simulation) -> None:
+        self.owned: dict[str, list[Entity]] = defaultdict(list)
+        self.kinds: dict[str, dict[EntityKind, list[Entity]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for key in sorted(simulation.entities):
+            entity = simulation.entities[key]
+            self.owned[entity.owner_id].append(entity)
+            self.kinds[entity.owner_id][entity.kind].append(entity)
+        self._enemies: dict[tuple[str, ...], list[Entity]] = {}
+        self._armed_indexes: dict[tuple[str, ...], SpatialIndex] = {}
+        self._hostiles = {
+            owner: tuple(other for other in self.owned if simulation.are_hostile(owner, other))
+            for owner in self.owned
+        }
+
+    def hostile_owners(self, owner: str) -> tuple[str, ...]:
+        return self._hostiles[owner]
+
+    def enemies(self, owner: str) -> list[Entity]:
+        owners = self.hostile_owners(owner)
+        if owners not in self._enemies:
+            self._enemies[owners] = sorted(
+                (entity for other in owners for entity in self.owned[other]),
+                key=lambda entity: entity.entity_id,
+            )
+        return self._enemies[owners]
+
+    def hostile_kind(self, owner: str, kind: EntityKind) -> Iterator[Entity]:
+        for other in self.hostile_owners(owner):
+            yield from self.kinds[other].get(kind, ())
+
+    def hostile_kind_count(self, owner: str, kind: EntityKind) -> int:
+        return sum(len(self.kinds[other].get(kind, ())) for other in self.hostile_owners(owner))
+
+    def armed_index(self, owner: str) -> SpatialIndex:
+        owners = self.hostile_owners(owner)
+        if owners not in self._armed_indexes:
+            self._armed_indexes[owners] = SpatialIndex(
+                {
+                    unit.entity_id: unit.selection_position
+                    for other in owners
+                    for kind, members in self.kinds[other].items()
+                    if kind.profile.attack_damage > 0
+                    for unit in members
+                    if unit.is_complete
+                }
+            )
+        return self._armed_indexes[owners]
+
+
 @dataclass(slots=True)
 class _Decision:
     simulation: Simulation
     owner_id: str
     memory: OpponentState
-    owned: list[Entity]
-    enemies: list[Entity]
-    hostile_index: SpatialIndex
+    world: _DecisionWorld
     home: Point
     rally: Point
     orders: int = 0
@@ -174,15 +253,82 @@ class _Decision:
     squad_members: dict[int, list[Entity]] = field(default_factory=dict)
     squad_centers: dict[int, Point] = field(default_factory=dict)
     threat_cache: dict[tuple[Point, float], list[Entity]] = field(default_factory=dict)
+    owned_by_kind: dict[EntityKind, list[Entity]] = field(init=False)
+    buildings: tuple[Entity, ...] = field(init=False)
+    builders: tuple[Entity, ...] = field(init=False)
+    producers: tuple[Entity, ...] = field(init=False)
+    income_assets: tuple[Entity, ...] = field(init=False)
+    support_assets: tuple[Entity, ...] = field(init=False)
+    reclaimers: tuple[Entity, ...] = field(init=False)
+    _enemy_producers: tuple[Entity, ...] | None = None
+    pending_builds: list[ConstructionParameters] | None = None
+    claimed_sites: set[Point] | None = None
+    occupied_sites: set[Point] | None = None
+    economy_forecast: tuple[float, float] | None = None
+    reserved_cells: dict[tuple[tuple[EntityKind, Point], ...], frozenset[Cell]] = field(
+        default_factory=dict
+    )
+    placement_masks: dict[tuple[frozenset[Cell], frozenset[Cell]], BoolArray] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        # Command submission cannot move bodies or finish production in this
+        # decision. Keep physical snapshots separate from mutable job queries.
+        self.owned_by_kind = self.world.kinds[self.owner_id]
+        buildings, builders, producers, income, support, reclaimers = [], [], [], [], [], []
+        for kind, members in self.owned_by_kind.items():
+            if not kind.profile.movable:
+                buildings.extend(members)
+            if kind.profile.can_build:
+                builders.extend(members)
+            if kind.production_kinds:
+                producers.extend(members)
+            has_income = kind.profile.income_per_second or any(
+                upgrade.profile.income_per_second for upgrade in kind.upgrades
+            )
+            if has_income:
+                income.extend(members)
+            if has_income or kind.production_kinds:
+                support.extend(members)
+            if kind.profile.can_reclaim:
+                reclaimers.extend(members)
+        (
+            self.buildings,
+            self.builders,
+            self.producers,
+            self.income_assets,
+            self.support_assets,
+            self.reclaimers,
+        ) = (
+            tuple(sorted(members, key=lambda unit: unit.entity_id))
+            for members in (buildings, builders, producers, income, support, reclaimers)
+        )
+
+    @property
+    def owned(self) -> list[Entity]:
+        return self.world.owned[self.owner_id]
+
+    @property
+    def enemies(self) -> list[Entity]:
+        return self.world.enemies(self.owner_id)
+
+    @property
+    def enemy_producers(self) -> tuple[Entity, ...]:
+        if self._enemy_producers is None:
+            self._enemy_producers = tuple(
+                unit
+                for kind in (EntityKind.FACTORY, EntityKind.COMMAND_CENTER)
+                for unit in self.world.hostile_kind(self.owner_id, kind)
+            )
+        return self._enemy_producers
 
     def nearest_enemy(self, point: Point) -> Entity | None:
         """Reuse positions within this decision; commands cannot move hostile bodies here."""
         if self.enemy_positions is None:
-            enemies = tuple(sorted(self.enemies, key=lambda entity: entity.entity_id))
+            enemies = tuple(self.enemies)
             centers = [entity.selection_position for entity in enemies]
-            coordinates = np.asarray([(p.x, p.y) for p in centers], dtype=np.float64).reshape(
-                (-1, 2)
-            )
+            coordinates = point_coordinates(centers)
             self.enemy_positions = enemies, coordinates
         enemies, coordinates = self.enemy_positions
         index = _nearest_enemy_index(coordinates, float(point.x), float(point.y))
@@ -194,6 +340,11 @@ class _Decision:
         self.orders += 1
         self.simulation._opponent_command_count += 1
         self.production_demand = None
+        self.pending_builds = None
+        self.claimed_sites = None
+        self.economy_forecast = None
+        self.reserved_cells.clear()
+        self.placement_masks.clear()
         if isinstance(command, CreateConstructionCommand):
             self.staging_points.clear()
             self.staging_obstacles = None
@@ -203,7 +354,8 @@ class _Decision:
         query = point, radius
         if query not in self.threat_cache:
             self.threat_cache[query] = [
-                self.simulation.entities[key] for key in self.hostile_index.nearby(point, radius)
+                self.simulation.entities[key]
+                for key in self.world.armed_index(self.owner_id).nearby(point, radius)
             ]
         return self.threat_cache[query]
 
@@ -219,66 +371,64 @@ def drive_opponents(simulation: Simulation) -> None:
     due = [
         slot for index, slot in enumerate(slots) if simulation.tick % DECISION_TICKS == index * 3
     ]
-    rich = [slot for slot in slots if _has_surplus(simulation.resources.get(slot.owner_id, 0))]
+    # Spread optional surplus planning across otherwise free turns in large
+    # battles, with the same rotation among owners.
+    large_match = len(simulation.entities) >= _LARGE_MATCH_ENTITY_COUNT
+    macro_interval = _LARGE_MATCH_EXTRA_MACRO_INTERVAL if large_match else 1
+    macro_round, off_turn = divmod(simulation.tick, macro_interval)
+    rich = (
+        [slot for slot in slots if _has_surplus(simulation.resources.get(slot.owner_id, 0))]
+        if not off_turn and (not large_match or not due)
+        else []
+    )
     if not due and not rich:
         return
-    entities = sorted(simulation.entities.values(), key=lambda entity: entity.entity_id)
-    owners = {entity.owner_id for entity in entities}
+    world = _DecisionWorld(simulation)
+    owners = world.owned.keys()
     rich = [slot for slot in rich if slot.owner_id in owners]
-    macro_slot = rich[simulation.tick % len(rich)] if rich else None
+    macro_slot = rich[macro_round % len(rich)] if rich else None
     scheduled = due + ([macro_slot] if macro_slot is not None and macro_slot not in due else [])
     for slot in scheduled:
         if simulation._opponent_command_count >= MAX_ORDERS:
             break
-        owned = [entity for entity in entities if entity.owner_id == slot.owner_id]
+        owned = world.owned.get(slot.owner_id, ())
         if not owned:
             continue
         opening_ids = {entity.entity_id for entity in simulation.game_map.entities}
+        infrastructure = world.kinds[slot.owner_id]
+        anchors = (
+            *infrastructure.get(EntityKind.COMMAND_CENTER, ()),
+            *infrastructure.get(EntityKind.FACTORY, ()),
+        )
         anchor = min(
-            owned,
+            anchors or owned,
             key=lambda entity: (
-                entity.kind not in {EntityKind.COMMAND_CENTER, EntityKind.FACTORY},
                 entity.entity_id not in opening_ids,
                 entity.kind is not EntityKind.FACTORY,
                 entity.entity_id,
             ),
         )
         home = anchor.selection_position
-        enemies = [
-            entity for entity in entities if simulation.are_hostile(slot.owner_id, entity.owner_id)
-        ]
-        armed_enemies = [
-            entity
-            for entity in enemies
-            if entity.kind.profile.attack_damage > 0 and entity.is_complete
-        ]
-        index = SpatialIndex(
-            {entity.entity_id: entity.selection_position for entity in armed_enemies}
-        )
         memory = simulation.opponents[slot.owner_id]
-        decision = _Decision(simulation, slot.owner_id, memory, owned, enemies, index, home, home)
+        decision = _Decision(simulation, slot.owner_id, memory, world, home, home)
         decision.orders = simulation._opponent_command_count
-        decision.production_lanes = _production_lanes(decision)
-        threat = _base_threat(decision)
         if slot not in due:
             if _has_surplus(_available_cash(decision)):
+                decision.production_lanes = _production_lanes(decision)
+                threatened = _base_threatened(decision)
                 _refresh_growth_credit(decision)
-                _plan_production(
-                    decision, threatened=threat is not None, order_limit=decision.orders + 1
-                )
+                _plan_production(decision, threatened=threatened, order_limit=decision.orders + 1)
                 before = decision.orders
-                _plan_growth(
-                    decision, threatened=threat is not None, order_limit=decision.orders + 1
-                )
+                _plan_growth(decision, threatened=threatened, order_limit=decision.orders + 1)
                 if (
                     decision.orders > before
                     and decision.orders < MAX_ORDERS
                     and sum(decision.placement_checks.values()) <= MAX_PLACEMENT_CANDIDATES // 4
                 ):
-                    _plan_growth(
-                        decision, threatened=threat is not None, order_limit=decision.orders + 1
-                    )
+                    _plan_growth(decision, threatened=threatened, order_limit=decision.orders + 1)
             continue
+        decision.production_lanes = _production_lanes(decision)
+        threat = _base_threat(decision)
         frontier = _frontier(decision)
         decision.rally = _staging_point(decision, frontier)
         economy_due = simulation.tick % ECONOMY_TICKS < DECISION_TICKS
@@ -332,6 +482,34 @@ def warm_opponent_queries() -> None:
     _nearest_enemy_index(np.empty((0, 2), dtype=np.float64), 0.0, 0.0)
     _minimum_distances(np.empty((0, 2), dtype=np.float64), np.empty((0, 2), dtype=np.float64), 0.0)
     _producer_nearby(np.empty((0, 4), dtype=np.float64), 0.0, 0.0)
+    _valid_placement_origins(
+        np.empty((0, 2), dtype=np.float64),
+        np.ones((1, 1), dtype=np.bool_),
+        np.zeros((1, 1), dtype=np.bool_),
+        1,
+        1,
+    )
+
+
+@compile_numeric
+def _valid_placement_origins(
+    points: FloatArray, ground: BoolArray, blocked: BoolArray, width: int, height: int
+) -> BoolArray:
+    valid = np.zeros(len(points), dtype=np.bool_)
+    for index in range(len(points)):
+        x, y = int(points[index, 0]), int(points[index, 1])
+        if x < 0 or y < 0 or x + width > ground.shape[1] or y + height > ground.shape[0]:
+            continue
+        clear = True
+        for row in range(y, y + height):
+            for column in range(x, x + width):
+                if blocked[row, column] or not ground[row, column]:
+                    clear = False
+                    break
+            if not clear:
+                break
+        valid[index] = clear
+    return valid
 
 
 @compile_numeric
@@ -342,10 +520,6 @@ def _producer_nearby(boxes: FloatArray, x: float, y: float) -> bool:
         if dx * dx + dy * dy < PRODUCTION_CLEARANCE * PRODUCTION_CLEARANCE:
             return True
     return False
-
-
-def _coordinates(points: Sequence[Point]) -> FloatArray:
-    return np.asarray([(point.x, point.y) for point in points], dtype=np.float64).reshape((-1, 2))
 
 
 @compile_numeric
@@ -367,25 +541,25 @@ def _minimum_distances(queries: FloatArray, references: FloatArray, default: flo
 
 
 def _frontier(decision: _Decision) -> Point:
-    anchors = [
-        entity.selection_position
-        for entity in decision.owned
-        if not entity.is_movable
-        and entity.is_complete
-        and not decision.threats(entity.selection_position, 12)
-    ]
+    anchors = [entity.selection_position for entity in decision.buildings if entity.is_complete]
     anchors.extend(
         job.position
         for job in _pending_construction(decision)
         if job.building_kind is EntityKind.RESOURCE_GENERATOR
-        and not decision.threats(job.position, 12)
     )
     if not anchors or not decision.enemies:
         return decision.home
+    threatened = decision.world.armed_index(decision.owner_id).any_many(
+        tuple((point, 12.0) for point in anchors)
+    )
     nearest = decision.nearest_enemy(decision.home)
     assert nearest is not None
     enemy = nearest.selection_position
-    return min(anchors, key=lambda point: (point.distance_to(enemy), point.x, point.y))
+    return min(
+        (point for point, unsafe in zip(anchors, threatened, strict=True) if not unsafe),
+        key=lambda point: (point.distance_to(enemy), point.x, point.y),
+        default=decision.home,
+    )
 
 
 def _safe_point(decision: _Decision, desired: Point, radius: int) -> Point | None:
@@ -418,9 +592,7 @@ def _safe_point(decision: _Decision, desired: Point, radius: int) -> Point | Non
 
 def _production_lanes(decision: _Decision) -> frozenset[Cell]:
     cells: set[Cell] = set()
-    sources = [
-        (entity.kind, entity.position) for entity in decision.owned if entity.kind.production_kinds
-    ]
+    sources = [(entity.kind, entity.position) for entity in decision.producers]
     sources.extend(
         (job.building_kind, job.position)
         for job in _pending_construction(decision)
@@ -441,8 +613,7 @@ def _near_producer(decision: _Decision, point: Point) -> bool:
         decision.producer_boxes = np.asarray(
             [
                 (source.position.x, source.position.y, *source.kind.profile.footprint)
-                for source in decision.owned
-                if source.kind.production_kinds
+                for source in decision.producers
             ],
             dtype=np.float64,
         ).reshape((-1, 4))
@@ -469,36 +640,64 @@ def _staging_point(decision: _Decision, anchor: Point) -> Point:
 
 
 def _clear_production_exits(decision: _Decision) -> None:
-    blocked = any(
-        job.reason_code == "SPAWN_BLOCKED"
-        for source in decision.owned
-        if source.kind.production_kinds
-        for job in decision.simulation.production_queue(source.entity_id)
-    )
-    clearance = set(decision.production_lanes) if blocked else set()
-    for job in decision.simulation.live_automations:
-        if (
-            job.owner_id == decision.owner_id
-            and job.reason_code == "SITE_OCCUPIED"
-            and isinstance(job.parameters, ConstructionParameters)
-        ):
-            clearance.update(footprint_cells(job.parameters.building_kind, job.parameters.position))
-    if not clearance:
+    simulation = decision.simulation
+    if decision.orders >= MAX_ORDERS:
         return
-    units = tuple(
-        unit.entity_id
-        for unit in decision.owned
-        if unit.is_movable
-        and unit.entity_id not in decision.simulation.assignments
-        and decision.simulation.game_map.cell_for(unit.position) in clearance
-        and not unit.pursue_target
-        and (
-            unit.move_target is None
-            or decision.simulation.game_map.cell_for(unit.move_target) in clearance
-        )
-    )[:MAX_SQUAD_SIZE]
-    if units:
-        decision.submit(MoveCommand(units, decision.rally, owner_id=decision.owner_id))
+    blocked = [
+        (source, job.parameters.current_unit_kind)
+        for source in decision.producers
+        if (job := simulation.automations.get(simulation.assignments.get(source.entity_id, "")))
+        is not None
+        and job.reason_code == "SPAWN_BLOCKED"
+        and isinstance(job.parameters, ProductionParameters)
+    ]
+    if not blocked:
+        return
+    offset = (simulation.tick // DECISION_TICKS) % len(blocked)
+    for source, kind in blocked[offset:] + blocked[:offset]:
+        clearance = _exit_clearance(decision, source, kind)
+        if clearance is not None:
+            units, target = clearance
+            decision.submit(MoveCommand(units, target, owner_id=decision.owner_id))
+            return
+
+
+def _exit_clearance(
+    decision: _Decision, source: Entity, kind: EntityKind
+) -> tuple[tuple[str, ...], Point] | None:
+    """Find the smallest friendly group whose departure can reopen one exit."""
+    simulation = decision.simulation
+    best: tuple[tuple[str, ...], Point] | None = None
+    center = source.selection_position
+    for cell in factory_exit_cells(source):
+        blockers = spawn_cell_blockers(simulation, cell, kind)
+        if blockers is None:
+            continue
+        units = tuple(blockers)
+        if not units:
+            return None
+        if (best is not None and len(units) >= len(best[0])) or any(
+            unit.owner_id != decision.owner_id
+            or unit.entity_id in simulation.assignments
+            or unit.entity_id in simulation.suspended_assignments
+            or unit.path
+            or unit.move_target is not None
+            or unit.order_queue
+            or unit.hold_anchor is not None
+            or unit.pursue_target
+            or unit.repair_target_id is not None
+            or unit.reclaim_target_id is not None
+            for unit in units
+        ):
+            continue
+        x, y = cell[0] + 0.5, cell[1] + 0.5
+        dx, dy = x - center.x, y - center.y
+        factor = 4.0 / hypot(dx, dy)
+        if (
+            target := _safe_point(decision, Point(x + dx * factor, y + dy * factor), 4)
+        ) is not None:
+            best = tuple(unit.entity_id for unit in units), target
+    return best
 
 
 def _members(decision: _Decision, squad: Squad) -> list[Entity]:
@@ -531,7 +730,7 @@ def _repair_wounded(decision: _Decision) -> None:
         and entity.health / entity.kind.profile.max_health < 0.30
         and entity.entity_id not in simulation.assignments
     )[:MAX_SQUAD_SIZE]
-    if wounded and any(not entity.is_movable and entity.is_complete for entity in decision.owned):
+    if wounded and any(entity.is_complete for entity in decision.buildings):
         decision.submit(
             CreateRepairAndReturnCommand(wounded, owner_id=decision.owner_id, title="AI repair")
         )
@@ -630,20 +829,26 @@ def _assign_squads(decision: _Decision) -> None:
         _forget_squad(decision, gathering_squad)
 
 
+def _base_threatened(decision: _Decision) -> bool:
+    """Economic planning needs an exact alarm, not tactical target ranking."""
+    assets = (*decision.buildings, *(unit for unit in decision.builders if unit.is_movable))
+    return decision.world.armed_index(decision.owner_id).intersects(
+        tuple((unit.selection_position, LOCAL_RADIUS) for unit in assets)
+    )
+
+
 def _base_threat(decision: _Decision) -> Entity | None:
-    assets = [
-        entity for entity in decision.owned if not entity.is_movable or entity.profile.can_build
-    ]
+    assets = (*decision.buildings, *(unit for unit in decision.builders if unit.is_movable))
     enemies = [
         unit for unit in decision.enemies if unit.profile.attack_damage > 0 and unit.is_complete
     ]
     assets_index = SpatialIndex(
         {unit.entity_id: unit.selection_position for unit in assets}, bucket_size=LOCAL_RADIUS
     )
-    nearby = assets_index.nearest_many(
+    nearby = assets_index.any_many(
         tuple((unit.selection_position, LOCAL_RADIUS) for unit in enemies)
     )
-    threats = [unit for unit, key in zip(enemies, nearby, strict=True) if key is not None]
+    threats = [unit for unit, present in zip(enemies, nearby, strict=True) if present]
     under_fire: dict[str, int] = {}
     for asset in assets:
         if (
@@ -678,7 +883,7 @@ def _set_phase(decision: _Decision, squad: Squad, phase: SquadPhase) -> None:
 
 
 def _defense_order(decision: _Decision, threat: Entity) -> tuple[Point, bool]:
-    assets = [unit for unit in decision.owned if unit.is_complete and not unit.is_movable]
+    assets = [unit for unit in decision.buildings if unit.is_complete]
     anchor = min(
         assets, key=lambda unit: unit.selection_position.distance_to(threat.position), default=None
     )
@@ -902,7 +1107,7 @@ def _order_groups(
 
 def _assembly_point(decision: _Decision, squad: Squad) -> Point:
     center = _squad_center(decision, squad)
-    sources = [unit for unit in decision.owned if unit.kind.production_kinds and unit.is_complete]
+    sources = [unit for unit in decision.producers if unit.is_complete]
     if not sources:
         return decision.rally
     source = min(
@@ -1575,12 +1780,14 @@ def _drive_campaigns(
 
 
 def _pending_construction(decision: _Decision) -> list[ConstructionParameters]:
-    return [
-        automation.parameters
-        for automation in decision.simulation.live_automations
-        if automation.owner_id == decision.owner_id
-        and isinstance(automation.parameters, ConstructionParameters)
-    ]
+    if decision.pending_builds is None:
+        decision.pending_builds = [
+            automation.parameters
+            for automation in decision.simulation.live_automations
+            if automation.owner_id == decision.owner_id
+            and isinstance(automation.parameters, ConstructionParameters)
+        ]
+    return decision.pending_builds
 
 
 def _production_rate(decision: _Decision, kind: EntityKind) -> float:
@@ -1592,10 +1799,12 @@ def _production_rate(decision: _Decision, kind: EntityKind) -> float:
 
 
 def _economy_forecast(decision: _Decision) -> tuple[float, float]:
+    if decision.economy_forecast is not None:
+        return decision.economy_forecast
     income = building_income_per_second(decision.simulation, decision.owner_id)
     capacity = 0.0
-    for unit in decision.owned:
-        if unit.kind is not EntityKind.FACTORY or not unit.is_complete:
+    for unit in decision.owned_by_kind.get(EntityKind.FACTORY, ()):
+        if not unit.is_complete:
             continue
         costs = ticks = 0
         for job in decision.simulation.production_queue(unit.entity_id):
@@ -1614,7 +1823,8 @@ def _economy_forecast(decision: _Decision) -> tuple[float, float]:
             if ticks
             else _production_rate(decision, EntityKind.LIGHT_TANK)
         )
-    return float(income), capacity
+    decision.economy_forecast = float(income), capacity
+    return decision.economy_forecast
 
 
 def _available_cash(decision: _Decision, committed: int | None = None) -> int:
@@ -1660,13 +1870,13 @@ def _refresh_growth_credit(decision: _Decision) -> None:
 def _income_upgrade_goal(decision: _Decision, *, threatened: bool) -> tuple[Entity, float] | None:
     if (
         threatened
-        or not any(unit.kind.production_kinds and unit.is_complete for unit in decision.owned)
-        or not any(unit.profile.can_build for unit in decision.owned)
+        or not any(unit.is_complete for unit in decision.producers)
+        or not decision.builders
     ):
         return None
-    reclaiming = {unit.reclaim_target_id for unit in decision.owned if unit.reclaim_target_id}
+    reclaiming = {unit.reclaim_target_id for unit in decision.reclaimers if unit.reclaim_target_id}
     candidates: list[tuple[float, str, Entity]] = []
-    for unit in decision.owned:
+    for unit in decision.income_assets:
         upgrade = unit.next_upgrade
         if (
             not unit.is_complete
@@ -1726,13 +1936,7 @@ def _outpost_point(decision: _Decision, frontier: Point) -> Point:
     unsupported = _production_gaps(decision, _pending_construction(decision))
     if unsupported:
         return min(unsupported, key=lambda point: (point.distance_to(frontier), point.x, point.y))
-    occupied = {
-        unit.position for unit in decision.simulation.entities.values() if not unit.is_movable
-    }
-    occupied.update(job.position for job in _pending_construction(decision))
-    sites = [
-        site for site in decision.simulation.game_map.resource_sites or () if site not in occupied
-    ]
+    sites = _open_resource_sites(decision, _pending_construction(decision))
     if sites:
         goal = min(
             sites,
@@ -1742,10 +1946,8 @@ def _outpost_point(decision: _Decision, frontier: Point) -> Point:
                 point.y,
             ),
         )
-    elif decision.enemies:
-        goal = min(
-            decision.enemies, key=lambda unit: frontier.distance_to(unit.selection_position)
-        ).selection_position
+    elif (enemy := decision.nearest_enemy(frontier)) is not None:
+        goal = enemy.selection_position
     else:
         return frontier
     dx, dy = goal.x - frontier.x, goal.y - frontier.y
@@ -1760,16 +1962,16 @@ def _outpost_point(decision: _Decision, frontier: Point) -> Point:
 
 
 def _production_gaps(decision: _Decision, pending: list[ConstructionParameters]) -> list[Point]:
-    producers = [unit.selection_position for unit in decision.owned if unit.kind.production_kinds]
+    producers = [unit.selection_position for unit in decision.producers]
     producers.extend(job.position for job in pending if job.building_kind.production_kinds)
     points = [
         _support_anchor(decision, unit.selection_position)
-        for unit in decision.owned
+        for unit in decision.income_assets
         if unit.is_complete and unit.profile.income_per_second
     ]
     index = SpatialIndex({str(i): point for i, point in enumerate(producers)}, bucket_size=20)
-    coverage = index.nearest_many(tuple((point, 20.0) for point in points))
-    return [point for point, key in zip(points, coverage, strict=True) if key is None]
+    coverage = index.any_many(tuple((point, 20.0) for point in points))
+    return [point for point, covered in zip(points, coverage, strict=True) if not covered]
 
 
 def _support_anchor(decision: _Decision, point: Point) -> Point:
@@ -1798,22 +2000,20 @@ def _support_anchor(decision: _Decision, point: Point) -> Point:
 
 
 def _defense_gaps(decision: _Decision, pending: list[ConstructionParameters]) -> list[Point]:
-    forts = [unit.selection_position for unit in decision.owned if unit.kind is EntityKind.TURRET]
+    forts = [unit.selection_position for unit in decision.owned_by_kind.get(EntityKind.TURRET, ())]
     forts.extend(job.position for job in pending if job.building_kind is EntityKind.TURRET)
     points = [
         _support_anchor(decision, unit.selection_position)
-        for unit in decision.owned
+        for unit in decision.support_assets
         if unit.is_complete and (unit.profile.income_per_second or unit.kind.production_kinds)
     ]
     index = SpatialIndex({str(i): point for i, point in enumerate(forts)}, bucket_size=15)
-    coverage = index.nearest_many(tuple((point, 15.0) for point in points))
-    return [point for point, key in zip(points, coverage, strict=True) if key is None]
+    coverage = index.any_many(tuple((point, 15.0) for point in points))
+    return [point for point, covered in zip(points, coverage, strict=True) if not covered]
 
 
 def _defense_point(decision: _Decision, anchor: Point) -> Point:
-    enemy = min(
-        decision.enemies, key=lambda unit: anchor.distance_to(unit.selection_position), default=None
-    )
+    enemy = decision.nearest_enemy(anchor)
     if enemy is None:
         return anchor
     dx, dy = enemy.selection_position.x - anchor.x, enemy.selection_position.y - anchor.y
@@ -1825,13 +2025,13 @@ def _growth_priorities(
     decision: _Decision, pending: list[ConstructionParameters]
 ) -> list[EntityKind]:
     counts = {
-        kind: sum(unit.kind is kind for unit in decision.owned)
+        kind: len(decision.owned_by_kind.get(kind, ()))
         + sum(job.building_kind is kind and job.site_entity_id is None for job in pending)
         for kind in EntityKind
     }
     income, capacity = _economy_forecast(decision)
     completed_factories = sum(
-        unit.kind is EntityKind.FACTORY and unit.is_complete for unit in decision.owned
+        unit.is_complete for unit in decision.owned_by_kind.get(EntityKind.FACTORY, ())
     )
     rate = (
         capacity / completed_factories
@@ -1898,6 +2098,22 @@ def _region_window(
     return near
 
 
+def _open_resource_sites(decision: _Decision, pending: list[ConstructionParameters]) -> list[Point]:
+    sites = decision.simulation.game_map.resource_sites
+    if not sites:
+        return []
+    if decision.occupied_sites is None:
+        decision.occupied_sites = {
+            unit.position
+            for kinds in decision.world.kinds.values()
+            for kind, units in kinds.items()
+            if not kind.profile.movable
+            for unit in units
+        }
+    reserved = decision.occupied_sites.union(job.position for job in pending)
+    return [site for site in sites if site not in reserved]
+
+
 def _expansion_regions(
     decision: _Decision,
     kind: EntityKind,
@@ -1907,17 +2123,12 @@ def _expansion_regions(
     game_map = decision.simulation.game_map
     span = max(32, ceil(max(game_map.width, game_map.height) / 12))
     sectors: dict[tuple[int, int], int] = {}
-    anchors = [unit.selection_position for unit in decision.owned if not unit.is_movable]
-    coverage = [unit.selection_position for unit in decision.owned if unit.kind is kind]
-    occupied = set()
-    for unit in decision.owned:
-        if not unit.is_movable:
-            key = (int(unit.position.x) // span, int(unit.position.y) // span)
-            width, height = unit.kind.profile.footprint
-            sectors[key] = sectors.get(key, 0) + width * height
-    for unit in decision.simulation.entities.values():
-        if not unit.is_movable:
-            occupied.add(unit.position)
+    anchors = [unit.selection_position for unit in decision.buildings]
+    coverage = [unit.selection_position for unit in decision.owned_by_kind.get(kind, ())]
+    for unit in decision.buildings:
+        key = (int(unit.position.x) // span, int(unit.position.y) // span)
+        width, height = unit.kind.profile.footprint
+        sectors[key] = sectors.get(key, 0) + width * height
     for job in pending:
         if job.site_entity_id is None:
             key = (int(job.position.x) // span, int(job.position.y) // span)
@@ -1926,7 +2137,6 @@ def _expansion_regions(
         anchors.append(job.position)
         if job.building_kind is kind:
             coverage.append(job.position)
-        occupied.add(job.position)
     strategic = (
         _production_gaps(decision, pending)
         if kind is EntityKind.FACTORY
@@ -1940,7 +2150,7 @@ def _expansion_regions(
         limit=MAX_EXPANSION_REGIONS - 1,
     )
     if kind is EntityKind.RESOURCE_GENERATOR and game_map.resource_sites is not None:
-        options = [point for point in game_map.resource_sites if point not in occupied]
+        options = _open_resource_sites(decision, pending)
     else:
         options = [
             Point((x + min(x + span, game_map.width)) / 2, (y + min(y + span, game_map.height)) / 2)
@@ -1964,12 +2174,12 @@ def _expansion_regions(
         if (x, y) not in sectors
         and any((x + dx, y + dy) in sectors for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)))
     }
-    queries = _coordinates(options)
-    anchor_distances = _minimum_distances(queries, _coordinates(anchors), 0.0)
+    queries = point_coordinates(options)
+    anchor_distances = _minimum_distances(queries, point_coordinates(anchors), 0.0)
     builder_distances = _minimum_distances(
-        queries, _coordinates([unit.position for unit in builders]), 0.0
+        queries, point_coordinates([unit.position for unit in builders]), 0.0
     )
-    coverage_distances = _minimum_distances(queries, _coordinates(coverage), 18.0)
+    coverage_distances = _minimum_distances(queries, point_coordinates(coverage), 18.0)
     ranked = sorted(
         enumerate(options),
         key=lambda item: (
@@ -2003,10 +2213,8 @@ def _plan_surplus_growth(
     busy = {key for job in pending for key in job.builder_ids}
     builders = [
         unit
-        for unit in decision.owned
-        if unit.profile.can_build
-        and unit.entity_id not in busy
-        and unit.entity_id not in simulation.assignments
+        for unit in decision.builders
+        if unit.entity_id not in busy and unit.entity_id not in simulation.assignments
     ]
     ceiling = min(order_limit, MAX_ORDERS - 1 if decision.orders == 0 else MAX_ORDERS)
     if builders:
@@ -2073,16 +2281,14 @@ def _plan_growth(decision: _Decision, *, threatened: bool, order_limit: int = MA
     busy = {key for job in pending for key in job.builder_ids}
     builders = [
         unit
-        for unit in decision.owned
-        if unit.profile.can_build
-        and unit.entity_id not in busy
-        and unit.entity_id not in simulation.assignments
+        for unit in decision.builders
+        if unit.entity_id not in busy and unit.entity_id not in simulation.assignments
     ]
     if not builders:
         _start_income_upgrade(decision, upgrade_goal)
         return
     counts = {
-        kind: sum(unit.kind is kind for unit in decision.owned)
+        kind: len(decision.owned_by_kind.get(kind, ()))
         + sum(job.building_kind is kind and job.site_entity_id is None for job in pending)
         for kind in EntityKind
     }
@@ -2125,7 +2331,7 @@ def _plan_growth(decision: _Decision, *, threatened: bool, order_limit: int = MA
     if counts[EntityKind.RESOURCE_GENERATOR] < 2 or income < capacity * 0.8:
         options.append((EntityKind.RESOURCE_GENERATOR, frontier))
     exposed = _defense_gaps(decision, pending)
-    army_size = sum(unit.is_movable and unit.profile.attack_damage > 0 for unit in decision.owned)
+    army_size = len(own_army)
     desired_factories = max(
         2,
         ceil(income * 1.25 / _production_rate(decision, EntityKind.LIGHT_TANK)),
@@ -2202,18 +2408,22 @@ def _construction_site(
     exact_resource_site: bool = False,
 ) -> tuple[Entity, Point] | None:
     simulation = decision.simulation
-    claimed = {
-        job.position
-        for automation in simulation.live_automations
-        if isinstance(job := automation.parameters, ConstructionParameters)
-    }
-    reserved = set().union(*(footprint_cells(job.building_kind, job.position) for job in pending))
-    resource_cells = set().union(
-        *(
-            footprint_cells(EntityKind.RESOURCE_GENERATOR, site)
-            for site in simulation.game_map.resource_sites or ()
+    if decision.claimed_sites is None:
+        decision.claimed_sites = {
+            job.position
+            for automation in simulation.live_automations
+            if isinstance(job := automation.parameters, ConstructionParameters)
+        }
+    claimed = decision.claimed_sites
+    reservation_key = tuple((job.building_kind, job.position) for job in pending)
+    reserved = decision.reserved_cells.get(reservation_key)
+    if reserved is None:
+        reserved = frozenset().union(
+            *(footprint_cells(kind, point) for kind, point in reservation_key)
         )
-    )
+        decision.reserved_cells[reservation_key] = reserved
+    terrain = simulation._opponent_placement_terrain
+    resource_cells = terrain.resource_cells
     if kind is EntityKind.RESOURCE_GENERATOR:
         candidates = (
             [center]
@@ -2234,33 +2444,30 @@ def _construction_site(
             for dy in range(-10, 11, 2)
             for dx in range(-10, 11, 2)
         ]
-    blocked = simulation._building_cells() | reserved | decision.production_lanes
+    mask_key = reserved, decision.production_lanes
+    blocked_mask = decision.placement_masks.get(mask_key)
+    if blocked_mask is None:
+        blocked_mask = simulation._routes.obstacle_mask(
+            simulation._building_cells() | reserved | decision.production_lanes
+        )
+        decision.placement_masks[mask_key] = blocked_mask
     fixed_extractor = (
         kind is EntityKind.RESOURCE_GENERATOR and simulation.game_map.resource_sites is not None
     )
-    candidates = [
-        point
-        for point in candidates
-        if not (footprint_cells(kind, point) & blocked)
-        and all(
-            simulation.game_map.contains_cell(cell)
-            and simulation.game_map.is_cell_passable(cell)
-            and (
-                fixed_extractor
-                or simulation.game_map.terrain_at_cell(cell) not in {Terrain.ROAD, Terrain.BRIDGE}
-                and cell[0] % BASE_BLOCK_SIZE >= BASE_STREET_WIDTH
-                and cell[1] % BASE_BLOCK_SIZE >= BASE_STREET_WIDTH
-            )
-            for cell in footprint_cells(kind, point)
-        )
-    ]
+    width, height = kind.profile.footprint
+    valid = _valid_placement_origins(
+        point_coordinates(candidates),
+        terrain.resource if fixed_extractor else terrain.ordinary,
+        blocked_mask,
+        width,
+        height,
+    )
+    candidates = [point for point, keep in zip(candidates, valid, strict=True) if keep]
     if kind is EntityKind.RESOURCE_GENERATOR:
-        anchors = [
-            unit.selection_position
-            for unit in decision.owned
-            if not unit.is_movable and unit.is_complete
-        ]
-        distances = _minimum_distances(_coordinates(candidates), _coordinates(anchors), 0.0)
+        anchors = [unit.selection_position for unit in decision.buildings if unit.is_complete]
+        distances = _minimum_distances(
+            point_coordinates(candidates), point_coordinates(anchors), 0.0
+        )
         candidates = [
             point
             for _, point in sorted(
@@ -2295,9 +2502,7 @@ def _construction_site(
         ):
             continue
         if any(
-            enemy.kind in {EntityKind.FACTORY, EntityKind.COMMAND_CENTER}
-            and enemy.selection_position.distance_to(point) < 24
-            for enemy in decision.enemies
+            enemy.selection_position.distance_to(point) < 24 for enemy in decision.enemy_producers
         ):
             continue
         blocked = simulation._building_cells() | reserved | footprint_cells(kind, point)
@@ -2326,12 +2531,10 @@ def _production_demand(decision: _Decision) -> tuple[dict[EntityKind, int], int]
         counts, committed = decision.production_demand
         return counts.copy(), committed
     simulation = decision.simulation
-    counts = dict.fromkeys(EntityKind, 0)
-    for entity in decision.owned:
-        counts[entity.kind] += 1
+    counts = {kind: len(decision.owned_by_kind.get(kind, ())) for kind in EntityKind}
     committed = 0
-    for factory in decision.owned:
-        if not factory.kind.production_kinds or not factory.is_complete:
+    for factory in decision.producers:
+        if not factory.is_complete:
             continue
         for job in simulation.production_queue(factory.entity_id):
             parameters = job.parameters
@@ -2373,7 +2576,7 @@ def _plan_production(
         for key in memory.budget_paused_ids
         if key in simulation.automations and not simulation.automations[key].status.terminal
     ]
-    sources = [unit for unit in decision.owned if unit.kind.production_kinds and unit.is_complete]
+    sources = [unit for unit in decision.producers if unit.is_complete]
     centers = [unit for unit in sources if unit.kind is EntityKind.COMMAND_CENTER]
     factories = [unit for unit in sources if unit.kind is not EntityKind.COMMAND_CENTER]
     offset = (simulation.tick // ECONOMY_TICKS) % max(1, len(factories))
@@ -2381,8 +2584,8 @@ def _plan_production(
     sources.sort(key=lambda source: bool(simulation.production_queue(source.entity_id)))
     desired_builders = _desired_builders(counts, len(factories), cash)
     idle_builders = sum(
-        unit.is_movable and unit.profile.can_build and unit.entity_id not in simulation.assignments
-        for unit in decision.owned
+        unit.is_movable and unit.entity_id not in simulation.assignments
+        for unit in decision.builders
     )
     backbone = counts[EntityKind.LIGHT_TANK] + counts[EntityKind.HEAVY_TANK]
     if surplus:
@@ -2549,9 +2752,13 @@ def _composition_goal(
     if counts[EntityKind.SCOUT] < max(1, ceil(front / 24)):
         return EntityKind.SCOUT
     armored = sum(
-        unit.kind in {EntityKind.HEAVY_TANK, EntityKind.TANK_DESTROYER} for unit in decision.enemies
+        decision.world.hostile_kind_count(decision.owner_id, kind)
+        for kind in (EntityKind.HEAVY_TANK, EntityKind.TANK_DESTROYER)
     )
-    defenses = sum(unit.kind is EntityKind.TURRET and unit.is_complete for unit in decision.enemies)
+    defenses = sum(
+        unit.is_complete
+        for unit in decision.world.hostile_kind(decision.owner_id, EntityKind.TURRET)
+    )
     light_cost = EntityKind.LIGHT_TANK.profile.production_cost
     heavy_cost = EntityKind.HEAVY_TANK.profile.production_cost
     investment = sum(

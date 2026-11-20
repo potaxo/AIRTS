@@ -5,7 +5,14 @@ from math import hypot
 import numpy as np
 import pytest
 
-from airts.systems.opponent_ai import _minimum_distances, _nearest_enemy_index, _producer_nearby
+from airts.systems.opponent_ai import (
+    PlacementTerrain,
+    _minimum_distances,
+    _nearest_enemy_index,
+    _producer_nearby,
+    _valid_placement_origins,
+)
+from airts.world.map import load_map_data
 
 
 @pytest.mark.parametrize("point", [(0.0, 0.0), (100.5, 23.7), (319.9, 319.9)])
@@ -47,3 +54,42 @@ def test_numeric_producer_clearance_keeps_rectangles_and_the_strict_boundary(poi
     )
     assert _producer_nearby(boxes, float(x), float(y)) is expected
     assert not _producer_nearby(np.empty((0, 4)), float(x), float(y))
+
+
+@pytest.mark.parametrize("resource", [False, True])
+@pytest.mark.parametrize("footprint", [(1, 1), (2, 4), (5, 5)])
+def test_batched_placement_matches_complete_cell_validation(resource, footprint) -> None:
+    game_map = load_map_data(
+        {
+            "id": "placement",
+            "name": "Placement",
+            "width": 24,
+            "height": 20,
+            "terrain": {
+                "default": "grass",
+                "rectangles": [
+                    [3, 4, 7, 3, "road"],
+                    [14, 6, 3, 8, "water"],
+                    [5, 14, 8, 2, "bridge"],
+                ],
+            },
+            "entities": [{"id": "observer", "kind": "scout", "position": [1.5, 1.5]}],
+        }
+    )
+    terrain = PlacementTerrain(game_map)
+    ground = terrain.resource if resource else terrain.ordinary
+    blocked = np.zeros(ground.shape, dtype=np.bool_)
+    blocked[8:10, 5:12] = True
+    points = np.random.default_rng(83).uniform([-3, -3], [26, 22], (1000, 2))
+    width, height = footprint
+    expected = []
+    for px, py in points:
+        x, y = int(px), int(py)
+        expected.append(
+            all(
+                0 <= cx < 24 and 0 <= cy < 20 and ground[cy, cx] and not blocked[cy, cx]
+                for cy in range(y, y + height)
+                for cx in range(x, x + width)
+            )
+        )
+    assert _valid_placement_origins(points, ground, blocked, width, height).tolist() == expected

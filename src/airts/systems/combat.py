@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from math import ceil, isclose
+from collections import defaultdict
+from dataclasses import dataclass
+from itertools import chain
+from math import ceil, floor, isclose
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,9 +19,10 @@ from airts.contracts.automations import (
 from airts.contracts.commands import RemoveEntityCommand
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point, distance_to_target
-from airts.navigation.pathfinding import PathfindingError, RouteDeferred
-from airts.navigation.spatial_index import SpatialIndex
+from airts.navigation.pathfinding import PathfindingError, PathResult, RouteAllowance, RouteDeferred
+from airts.navigation.spatial_index import GroupedSpatialIndex, SpatialIndex
 from airts.systems import automation_execution, combat_geometry, formations, movement
+from airts.world._numeric import point_coordinates
 from airts.world.entities import (
     SHELL_BLAST_TICKS,
     Entity,
@@ -32,46 +36,75 @@ if TYPE_CHECKING:
     from airts.simulation import Simulation
 
 
-def drive_combat(simulation: Simulation) -> None:
-    """Acquire deterministic targets and launch projectiles for armed entities."""
+@dataclass(slots=True)
+class _AttackRouteBudget:
+    """One bounded search/materialization allowance for all pursuit groups this tick."""
 
-    _drive_formation_attacks(simulation)
-    positions_by_owner: dict[str, dict[str, Point]] = {}
+    search: RouteAllowance
+    attempts: int = 256
+    cells: int = 32_768
+
+    def admit(self) -> bool:
+        if self.attempts <= 0 or self.cells <= 0:
+            return False
+        self.attempts -= 1
+        return True
+
+    def account(self, path: PathResult) -> None:
+        self.cells -= len(path.cells)
+
+
+def drive_combat(
+    simulation: Simulation, *, share_positions: bool = False
+) -> dict[str, dict[str, Point]] | None:
+    """Acquire targets and launch projectiles, optionally retaining their geometry."""
+    positions_by_owner: dict[str, dict[str, Point]] = defaultdict(dict)
+    formation_attacks: dict[tuple[str, str], list[Entity]] = {}
+    recent = simulation.tick - 2
+    fresh_control = False
     for entity_id, entity in simulation.entities.items():
-        positions_by_owner.setdefault(entity.owner_id, {})[entity_id] = entity.selection_position
+        positions_by_owner[entity.owner_id][entity_id] = entity.selection_position
+        if entity.pursue_target:
+            if not fresh_control:
+                stamp = entity.last_player_control_tick
+                fresh_control = stamp is not None and stamp >= recent
+            if entity.formation_leg is not None:
+                assert entity.formation_group is not None and entity.attack_target_id is not None
+                formation_attacks.setdefault(
+                    (entity.formation_group, entity.attack_target_id), []
+                ).append(entity)
+    budget = _AttackRouteBudget(
+        simulation._routes.automation_allowance(simulation.COMBAT_PATH_BUDGET, search_limit=8_192),
+        attempts=1_024 if fresh_control else 256,
+    )
+    if formation_attacks:
+        _drive_formation_attacks(simulation, budget, formation_attacks)
     if len(positions_by_owner) <= 1:
         for entity in simulation.entities.values():
             if entity.attack_cooldown > 0:
                 entity.attack_cooldown -= 1
-        return
-    owner_indexes = {
-        owner_id: SpatialIndex(positions) for owner_id, positions in positions_by_owner.items()
-    }
-    positions = {
-        key: point for owned in positions_by_owner.values() for key, point in owned.items()
-    }
+        return positions_by_owner if share_positions else None
+    owner_index: GroupedSpatialIndex | None = None
+    positions: dict[str, Point] = {}
+    for owned in positions_by_owner.values():
+        positions.update(owned)
     nearest_enemies: dict[str, str] = {}
-    approach_cache: dict[tuple[str, float], tuple[Point, ...]] = {}
+    firing_targets: dict[str, Entity] = {}
     route_groups: dict[tuple[str, float], list[str]] = {}
-    pending_routes: list[str] = []
+    pending_groups: dict[tuple[str, float], tuple[list[str], tuple[Point, ...]]] = {}
     blocked_routes: set[str] = set()
     interaction_cache: dict[str, frozenset[tuple[int, int]]] = {}
     fired: dict[str, str] = {}
     for owner_id, owned in positions_by_owner.items():
+        hostile_owners = tuple(
+            other for other in sorted(positions_by_owner) if simulation.are_hostile(other, owner_id)
+        )
         armed = []
-        query_list = []
-        for key in owned:
+        query_list: list[tuple[float, float, float]] = []
+        for key, point in owned.items():
             entity = simulation.entities[key]
             profile = entity.kind.profile
             if profile.attack_damage <= 0 or not entity.is_complete:
-                continue
-            target = simulation.entities.get(entity.attack_target_id or "")
-            if (
-                target is not None
-                and simulation.are_hostile(target.owner_id, owner_id)
-                and _squared_distance(positions[key], positions[target.entity_id])
-                <= profile.attack_range * profile.attack_range
-            ):
                 continue
             assigned = simulation.assignments.get(key)
             if (
@@ -79,118 +112,147 @@ def drive_combat(simulation: Simulation) -> None:
                 and simulation.automations[assigned].kind is AutomationKind.REPAIR_AND_RETURN
             ):
                 continue
+            if entity.attack_cooldown > 0:
+                entity.attack_cooldown -= 1
+            target = simulation.entities.get(entity.attack_target_id or "")
+            target_position = None if target is None else positions[target.entity_id]
+            if target is not None and entity.attack_gather_point is not None:
+                entity.attack_gather_point = target_position
+            if target is None:
+                if entity.attack_target_id is not None:
+                    entity.attack_target_id = None
+                if entity.pursue_target:
+                    entity.pursue_target = False
+            elif target.owner_id not in hostile_owners:
+                entity.pursue_target = False
+                entity.attack_target_id = None
+                target = None
+            attack_range = profile.attack_range
+            range_squared = attack_range * attack_range
+            in_range = False
+            if target is not None and target_position is not None:
+                dx, dy = point.x - target_position.x, point.y - target_position.y
+                in_range = dx * dx + dy * dy <= range_squared
+            if target is not None and not entity.pursue_target and not in_range:
+                entity.attack_target_id = None
+                target = None
+            if entity.pursue_target and entity.formation_leg is None and in_range:
+                if entity.path or entity.move_target is not None:
+                    entity.path.clear()
+                    entity.move_target = None
+                    movement.reset_movement_liveness(entity)
+                entity.state = UnitState.ATTACKING
+            if (
+                not entity.pursue_target
+                and not entity.path
+                and entity.order_queue
+                and entity.order_queue[0].kind is OrderKind.ATTACK
+            ):
+                continue
+            if target is not None and in_range:
+                # Target validity, pursuit and locomotion were already updated.
+                # A cooling weapon with a valid lock needs no firing candidate
+                # allocation/sort; acquisition of a new lock still runs below.
+                if not entity.attack_cooldown:
+                    firing_targets[key] = target
+                continue
             if (
                 entity.pursue_target
                 and entity.formation_leg is None
                 and target is not None
-                and simulation.are_hostile(target.owner_id, owner_id)
                 and (
                     not entity.path
                     or (
                         entity.route_ticks >= simulation.TICKS_PER_SECOND
                         and entity.move_target is not None
-                        and _squared_distance(entity.move_target, positions[target.entity_id])
-                        > profile.attack_range * profile.attack_range
+                        and target_position is not None
+                        and _squared_distance(entity.move_target, target_position) > range_squared
                     )
                 )
                 and simulation.game_map.cell_for(entity.position)
                 not in _interaction_cells(simulation, target, interaction_cache)
             ):
-                route_groups.setdefault((target.entity_id, profile.attack_range), []).append(key)
+                route_groups.setdefault((target.entity_id, attack_range), []).append(key)
+            # A cooling pursuer retains its ordered target. A nearby alternative
+            # can only be used for a shot once its weapon is ready.
+            if entity.pursue_target and entity.attack_cooldown:
+                continue
             armed.append(key)
-            query_list.append((positions[key], profile.attack_range))
+            query_list.append((point.x, point.y, attack_range))
         if not armed:
             continue
-        queries = np.asarray([(p.x, p.y, radius) for p, radius in query_list], dtype=np.float64)
-        for other_id in sorted(owner_indexes):
-            if not simulation.are_hostile(other_id, owner_id):
-                continue
-            candidates = owner_indexes[other_id].nearest_many_array(queries)
-            for key, candidate in zip(armed, candidates, strict=True):
-                if candidate is None:
-                    continue
-                previous = nearest_enemies.get(key)
-                if previous is None or (
-                    _squared_distance(positions[key], positions[candidate]),
-                    candidate,
-                ) < (_squared_distance(positions[key], positions[previous]), previous):
-                    nearest_enemies[key] = candidate
-    for (target_id, _), members in route_groups.items():
-        goals = _approach_points(
+        if owner_index is None:
+            owner_index = simulation._combat_index
+            if owner_index is None:
+                owner_index = GroupedSpatialIndex(positions_by_owner)
+                simulation._combat_index = owner_index
+            else:
+                owner_index.refresh(positions_by_owner)
+        queries = np.fromiter(chain.from_iterable(query_list), np.float64, len(armed) * 3).reshape(
+            -1, 3
+        )
+        # One nearest query across all hostiles retains the distance/ID tie rule,
+        # without repeated batches or Python merging for each opposing owner.
+        nearest_enemies.update(
+            (key, candidate)
+            for key, candidate in zip(
+                armed, owner_index.nearest_many_array(queries, hostile_owners), strict=True
+            )
+            if candidate is not None
+        )
+    obstacles = simulation._building_cells() if route_groups else frozenset()
+    for group, members in route_groups.items():
+        target_id, _ = group
+        goals = combat_geometry.firing_approach_points(
             simulation,
             simulation.entities[members[0]],
             simulation.entities[target_id],
-            approach_cache,
         )
-        starts = np.asarray([(positions[key].x, positions[key].y) for key in members])
-        reachable = simulation._routes.can_reach_many(starts, goals, simulation._building_cells())
+        starts = point_coordinates(list(map(positions.__getitem__, members)))
+        reachable = simulation._routes.can_reach_many(starts, goals, obstacles)
+        ready = []
         for key, can_reach in zip(members, reachable, strict=True):
             if can_reach:
-                pending_routes.append(key)
+                ready.append(key)
             else:
                 blocked_routes.add(key)
-    # Admission rotates independently of the stable firing/event order. Static
-    # failures never consume route allowance; connectivity is derived and exact
-    # even after save/load or cache eviction.
-    pending_routes.sort()
-    remaining = simulation._routes.combat_budget - simulation._routes.combat_route_count
-    if pending_routes:
-        offset = simulation.tick % len(pending_routes)
-        pending_routes = pending_routes[offset:] + pending_routes[:offset]
-    admitted_routes = frozenset(pending_routes[:remaining])
-    # Persistence deliberately serializes entity mappings by stable ID.  Combat
-    # therefore has to use the same order as a freshly loaded simulation rather
-    # than depending on the construction history of the live dict.
-    for entity_id in sorted(simulation.entities):
-        attacker = simulation.entities.get(entity_id)
-        if attacker is None or attacker.kind.profile.attack_damage <= 0 or not attacker.is_complete:
-            continue
-        attacker_position = positions[entity_id]
-        assigned_id = simulation.assignments.get(entity_id)
-        if (
-            assigned_id is not None
-            and simulation.automations[assigned_id].kind is AutomationKind.REPAIR_AND_RETURN
-        ):
-            continue
-        if attacker.attack_cooldown > 0:
-            attacker.attack_cooldown -= 1
-        ordered_target = simulation.entities.get(attacker.attack_target_id or "")
-        if ordered_target is not None and attacker.attack_gather_point is not None:
-            attacker.attack_gather_point = ordered_target.selection_position
-        if ordered_target is None or not simulation.are_hostile(
-            ordered_target.owner_id, attacker.owner_id
-        ):
-            attacker.pursue_target = False
-            ordered_target = None
-            attacker.attack_target_id = None
-        attack_range = attacker.kind.profile.attack_range
-        attack_range_squared = attack_range * attack_range
-        ordered_target_distance_squared = (
-            _squared_distance(attacker_position, positions[ordered_target.entity_id])
-            if ordered_target is not None
-            else None
+        if ready:
+            pending_groups[group] = ready, goals
+    # A route claim admits a shared target/range group, not a single follower.
+    # Rotate groups for fairness; a newly issued player order gets first response.
+    ordered = sorted(pending_groups)
+    if ordered:
+        offset = simulation.tick % len(ordered)
+        ordered = ordered[offset:] + ordered[:offset]
+        ordered.sort(
+            key=lambda group: (
+                not any(
+                    (stamp := simulation.entities[key].last_player_control_tick) is not None
+                    and stamp >= simulation.tick - 1
+                    for key in pending_groups[group][0]
+                )
+            )
         )
-        if (
-            ordered_target is not None
-            and not attacker.pursue_target
-            and ordered_target_distance_squared is not None
-            and ordered_target_distance_squared > attack_range_squared
-        ):
-            ordered_target = None
-            attacker.attack_target_id = None
-            ordered_target_distance_squared = None
-        if (
-            attacker.pursue_target
-            and attacker.formation_leg is None
-            and ordered_target is not None
-            and ordered_target_distance_squared is not None
-            and ordered_target_distance_squared <= attack_range_squared
-        ):
-            if attacker.path or attacker.move_target is not None:
-                attacker.path.clear()
-                attacker.move_target = None
-                movement.reset_movement_liveness(attacker)
-            attacker.state = UnitState.ATTACKING
+    for group in ordered:
+        if budget.attempts <= 0 or budget.cells <= 0 or not simulation._routes.claim_combat_route():
+            break
+        target_id, _ = group
+        members, goals = pending_groups[group]
+        members.sort()
+        offset = simulation.tick % len(members)
+        # Rotate the first claim so rear units can initiate a search. The reverse
+        # field grows out from the target; nearer followers can often use cells
+        # it has already settled after the cold-search allowance is exhausted.
+        leader = members.pop(offset)
+        center = positions[target_id]
+        members.sort(key=lambda key: _squared_distance(positions[key], center))
+        members.insert(0, leader)
+        _route_attack_group(simulation, members, goals, budget)
+    # Only candidates and failed routes need the firing pass. Stable ID order
+    # retains projectile IDs and diagnostic/event order across save restoration.
+    for entity_id in sorted(firing_targets.keys() | nearest_enemies.keys() | blocked_routes):
+        attacker = simulation.entities[entity_id]
+        attacker_position = positions[entity_id]
         if entity_id in blocked_routes:
             if attacker.state is not UnitState.WAITING:
                 simulation.events.record(
@@ -205,26 +267,8 @@ def drive_combat(simulation: Simulation) -> None:
             attacker.path.clear()
             attacker.move_target = None
             movement.reset_movement_liveness(attacker)
-        elif entity_id in admitted_routes and simulation._routes.claim_combat_route():
-            assert ordered_target is not None
-            chase_target(simulation, attacker, ordered_target, approach_cache)
-        firing_target: Entity | None
-        if (
-            not attacker.pursue_target
-            and not attacker.path
-            and attacker.order_queue
-            and attacker.order_queue[0].kind is OrderKind.ATTACK
-        ):
-            # Bounded FIFO dispatch can leave part of a selection waiting for its
-            # attack to activate. Passive acquisition must not execute another job.
-            firing_target = None
-        elif (
-            ordered_target is not None
-            and ordered_target_distance_squared is not None
-            and ordered_target_distance_squared <= attack_range_squared
-        ):
-            firing_target = ordered_target
-        else:
+        firing_target = firing_targets.get(entity_id)
+        if firing_target is None:
             firing_target = simulation.entities.get(nearest_enemies.get(entity_id, ""))
         if firing_target is None:
             continue
@@ -271,22 +315,19 @@ def drive_combat(simulation: Simulation) -> None:
             position=[projectile.position.x, projectile.position.y],
         )
     _join_nearby_combat(simulation, positions_by_owner, positions, fired)
+    return positions_by_owner if share_positions else None
 
 
-def _drive_formation_attacks(simulation: Simulation) -> None:
-    groups: dict[tuple[str, str], list[Entity]] = {}
-    for entity in simulation.entities.values():
-        if entity.formation_leg is not None and entity.pursue_target:
-            assert entity.formation_group is not None and entity.attack_target_id is not None
-            groups.setdefault((entity.formation_group, entity.attack_target_id), []).append(entity)
-    if not groups:
-        return
-    allowance = simulation._routes.automation_allowance(
-        simulation.COMBAT_PATH_BUDGET, search_limit=8_192
-    )
+def _drive_formation_attacks(
+    simulation: Simulation,
+    budget: _AttackRouteBudget,
+    groups: dict[tuple[str, str], list[Entity]],
+) -> None:
     ordered = sorted(groups.items())
     offset = simulation.tick % len(ordered)
     for (_, target_id), members in ordered[offset:] + ordered[:offset]:
+        if budget.attempts <= 0 or budget.cells <= 0:
+            break
         target = simulation.entities.get(target_id)
         if target is None:
             continue
@@ -298,10 +339,14 @@ def _drive_formation_attacks(simulation: Simulation) -> None:
             formations.slot(e).distance_to(target.selection_position) <= e.profile.attack_range
             for e in members
         )
+        claimed = False
         if not can_fire and (
             not any(e.path for e in members)
             or max(e.route_ticks for e in members) >= simulation.TICKS_PER_SECOND
         ):
+            if not simulation._routes.claim_combat_route():
+                break
+            claimed = True
             try:
                 goal = formations.attack_goal(simulation, members, target)
             except PathfindingError as error:
@@ -336,8 +381,10 @@ def _drive_formation_attacks(simulation: Simulation) -> None:
         if pending:
             offset = simulation.tick % len(pending)
             pending = pending[offset:] + pending[:offset]
+        if pending and not claimed and not simulation._routes.claim_combat_route():
+            break
         for entity in pending:
-            if not allowance.available or not simulation._routes.claim_combat_route():
+            if not budget.admit():
                 break
             assert entity.formation_offset is not None
             destination = Point(
@@ -350,10 +397,10 @@ def _drive_formation_attacks(simulation: Simulation) -> None:
                     {entity.entity_id: destination},
                     shared_goal=goal,
                     compact_approach=False,
-                    allowance=allowance,
+                    allowance=budget.search,
                 )[entity.entity_id]
             except RouteDeferred:
-                break
+                continue
             except PathfindingError as error:
                 if entity.state is not UnitState.WAITING:
                     simulation.events.record(
@@ -366,7 +413,7 @@ def _drive_formation_attacks(simulation: Simulation) -> None:
                     )
                 entity.state = UnitState.WAITING
                 continue
-            allowance.claim()
+            budget.account(route)
             movement.start_path(
                 simulation, entity, destination, route, "formation_attack", UnitState.ATTACKING
             )
@@ -395,13 +442,13 @@ def _join_nearby_combat(
         if not sources:
             continue
         eligible = []
-        for key in sorted(owned):
+        for key in owned:
             entity = simulation.entities[key]
             if (
-                key not in fired
+                not entity.pursue_target
+                and key not in fired
                 and entity.kind.profile.combat_support
                 and entity.is_complete
-                and not entity.pursue_target
                 and entity.formation_leg is None
                 and entity.hold_anchor is None
                 and (
@@ -430,7 +477,7 @@ def _join_nearby_combat(
                     # passive in-range fire above never changes its locomotion.
                     continue
                 eligible.append(key)
-        ids = tuple(eligible)
+        ids = sorted(eligible)
         if not ids:
             continue
         nearby = SpatialIndex(sources).nearest_many(
@@ -484,12 +531,11 @@ def _join_nearby_combat(
 def drive_projectiles(simulation: Simulation) -> None:
     """Advance live projectiles and retain bounded visual traces."""
 
-    splash_index: SpatialIndex | None = None
     with simulation._batch_entity_removals():
         simulation.projectile_traces = [
             trace for trace in simulation.projectile_traces if trace.expires_tick > simulation.tick
         ]
-        for projectile_id in sorted(tuple(simulation.projectiles)):
+        for projectile_id in sorted(simulation.projectiles):
             projectile = simulation.projectiles.get(projectile_id)
             if projectile is None:
                 continue
@@ -510,14 +556,7 @@ def drive_projectiles(simulation: Simulation) -> None:
                 projectile.position = destination
                 projectile.trajectory.append(destination)
                 if splash_radius > 0:
-                    if splash_index is None:
-                        splash_index = SpatialIndex(
-                            {
-                                key: entity.selection_position
-                                for key, entity in simulation.entities.items()
-                            }
-                        )
-                    impact_shell(simulation, projectile, splash_index)
+                    impact_shell(simulation, projectile)
                 elif target is None or not simulation.are_hostile(
                     target.owner_id, projectile.owner_id
                 ):
@@ -550,7 +589,7 @@ def impact_projectile(simulation: Simulation, projectile: Projectile, target: En
     finish_projectile(simulation, projectile)
 
 
-def impact_shell(simulation: Simulation, projectile: Projectile, index: SpatialIndex) -> None:
+def impact_shell(simulation: Simulation, projectile: Projectile) -> None:
     """Explode at the launch-time destination, even if the original target is gone."""
 
     radius = projectile.weapon_kind.profile.splash_radius
@@ -563,7 +602,14 @@ def impact_shell(simulation: Simulation, projectile: Projectile, index: SpatialI
         splash_radius=radius,
         position=[projectile.position.x, projectile.position.y],
     )
-    for entity_id in index.nearby(projectile.destination, radius):
+    center = projectile.destination
+    candidates = simulation.occupancy.occupants_in(
+        floor(center.x - radius),
+        floor(center.y - radius),
+        floor(center.x + radius) + 1,
+        floor(center.y + radius) + 1,
+    )
+    for entity_id in sorted(candidates):
         target = simulation.entities.get(entity_id)
         if target is None or not simulation.are_hostile(target.owner_id, projectile.owner_id):
             continue
@@ -629,52 +675,48 @@ def _squared_distance(first: Point, second: Point) -> float:
     return offset_x * offset_x + offset_y * offset_y
 
 
-def chase_target(
+def _route_attack_group(
     simulation: Simulation,
-    attacker: Entity,
-    target: Entity,
-    approach_cache: dict[tuple[str, float], tuple[Point, ...]] | None = None,
+    members: list[str],
+    goals: tuple[Point, ...],
+    budget: _AttackRouteBudget,
 ) -> None:
-    """Route an ordered attacker to a valid interaction point."""
-
-    goals = _approach_points(simulation, attacker, target, approach_cache)
+    """Start cheap followers together; expensive field expansion stays bounded and shared."""
     if not goals:
         return
-    slot = sum((index + 1) * ord(char) for index, char in enumerate(attacker.entity_id)) % len(
-        goals
+    center = Point(
+        sum(simulation.entities[key].position.x for key in members) / len(members),
+        sum(simulation.entities[key].position.y for key in members) / len(members),
     )
-    approach = goals[slot]
-    direct = simulation._routes.segment_path(
-        attacker.position, approach, simulation._building_cells(), maximum_cost=float("inf")
-    )
-    if direct is not None:
+    approach = min(goals, key=lambda p: (p.distance_to(center), p.y, p.x))
+    blocked = simulation._building_cells()
+    for key in members:
+        if not budget.admit():
+            break
+        attacker = simulation.entities[key]
+        path = simulation._routes.segment_path(attacker.position, approach, blocked)
         point = approach
-        path = direct
-    else:
-        try:
-            point, path = simulation._routes.shared_path_to_any(
-                attacker.position,
-                goals,
-                simulation._building_cells(),
-            )
-        except PathfindingError:
-            return
-    movement.start_path(simulation, attacker, point, path, "combat", UnitState.ATTACKING)
-
-
-def _approach_points(
-    simulation: Simulation,
-    attacker: Entity,
-    target: Entity,
-    cache: dict[tuple[str, float], tuple[Point, ...]] | None,
-) -> tuple[Point, ...]:
-    key = (target.entity_id, attacker.kind.profile.attack_range)
-    goals = cache.get(key) if cache is not None else None
-    if goals is None:
-        goals = combat_geometry.firing_approach_points(simulation, attacker, target)
-        if cache is not None:
-            cache[key] = goals
-    return goals
+        if path is None:
+            try:
+                point, path = simulation._routes.shared_path_to_any(
+                    attacker.position, goals, blocked, allowance=budget.search
+                )
+            except RouteDeferred:
+                continue
+            except PathfindingError as error:
+                if attacker.state is not UnitState.WAITING:
+                    simulation.events.record(
+                        simulation.tick,
+                        EventType.PATHFINDING_FAILED,
+                        key,
+                        operation="combat",
+                        reason=str(error),
+                        target_id=attacker.attack_target_id,
+                    )
+                attacker.state = UnitState.WAITING
+                continue
+        budget.account(path)
+        movement.start_path(simulation, attacker, point, path, "combat", UnitState.ATTACKING)
 
 
 def _interaction_cells(

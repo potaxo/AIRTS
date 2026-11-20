@@ -28,6 +28,23 @@ and offers return to opening configuration.
 
 ## Squad and economy behavior
 
+Each AI pass groups physical membership once by owner and kind, retaining stable ID order.
+Decisions derive producer, builder, reclaim and income/support subsets from capabilities; production
+forecasts, upgrades and support coverage iterate those subsets instead of unrelated armies.
+Hostile lists, producer contacts and armed spatial indexes are acquired only when actual planning
+needs them. Pure economic forecasts need no tactical snapshot; rally/placement may still request
+perception. The surplus-only branch first checks available committed funds, then uses an exact
+early-exit base alarm rather than ranking a tactical target. Tactical decisions retain the complete
+priority-ranked threat query. Physical snapshots last only this position-stable pass; pending jobs
+remain separate and refresh on command submission. Decision intervals, tactical priority, logical
+budgets and command submission remain unchanged; this does not delay AI reactions.
+Pending construction, site claims and economy forecasts are cached only until command submission;
+every submitted command invalidates mutable job queries. Map-lifetime placement terrain retains
+passability, roads/bridges, streets and resource cells. Batched footprint filtering uses that terrain
+and decision-local building/reservation/lane masks; live mobile occupancy, threat, reachability and
+canonical placement validation still run for admitted candidates. Candidate ordering, logical
+placement budgets, spending and tactical decisions remain unchanged.
+
 Small forces share an army objective rather than independent opportunistic squad raids. Persistent cohorts retain
 at most 32 members for membership bookkeeping. Small armies use the first active cohort as their
 assembly reference. The main wave launches with 20 locally assembled combat units. After 90 seconds of assembly,
@@ -141,8 +158,9 @@ terrain and reserves two-cell-wide streets every twelve cells, allowing denser b
 sealing their through routes. Fixed extractor sites are exempt from the lattice and terrain
 preference: the default river map deliberately places strategic resources on wide bridges.
 Existing opening buildings are not relocated to fit that lattice. Ordinary
-and surplus construction use the same layout rules. Obstructed production and construction
-trigger bounded clearance orders.
+and surplus construction use the same layout rules. For blocked production, the AI
+rotates among blocked factories and uses a local move order for eligible friendly
+units physically blocking one exit. Blueprint clearance is handled by construction.
 
 After protecting finite production and unpaid construction, cash of at least eight factory prices
 enables surplus expansion. This is a spending policy, not an income bonus. The worker target then
@@ -239,8 +257,9 @@ without forcing every funded purchase back to light tanks. No prices, production
 multipliers are secretly changed, and no free resources or discounts are granted.
 
 Owners make tactical decisions every ten ticks with staggered slots; ordinary low-budget macro
-work remains every twenty. Rich owners additionally rotate through background macro service on
-other ticks, without waiting for another tactical decision. A service offers one production command
+work remains every twenty. Rich owners additionally rotate through background macro service.
+With at least 4,096 entities that extra service runs every other tick, outside tactical turns.
+A service offers one production command
 and one growth command; a successful growth search using at most sixteen detailed candidates can
 use a second spare growth opportunity. All owners together attempt at most three commands per
 simulation tick, so this is pacing rather than a total queue/building/army limit. Tactical decisions

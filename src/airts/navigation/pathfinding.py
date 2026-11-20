@@ -10,8 +10,17 @@ from math import ceil, floor, inf
 import numpy as np
 
 from airts.contracts.spatial import Point
-from airts.world._numeric import BoolArray, FloatArray, IntArray, compile_numeric
+from airts.world._numeric import (
+    BoolArray,
+    FloatArray,
+    IntArray,
+    compile_numeric,
+    compile_parallel_numeric,
+    point_coordinates,
+)
 from airts.world.map import Cell, GameMap
+
+LOOKAHEAD_WAYPOINT_LIMIT = 16
 
 
 class PathfindingError(ValueError):
@@ -37,6 +46,15 @@ class _SearchField:
     heap: IntArray
     positions: IntArray
     size: int
+
+
+@dataclass(slots=True)
+class _PreparedGoals:
+    goals: tuple[Point, ...]
+    blocked: frozenset[Cell]
+    points: dict[int, Point]
+    key: tuple[tuple[int, ...], frozenset[Cell]]
+    search_field: _SearchField | None = None
 
 
 @dataclass(slots=True)
@@ -85,9 +103,16 @@ class RoutingService:
         self.automation_route_count = 0
         self.combat_route_count = 0
         self.field_build_count = 0
-        self._costs = tuple(t.movement_cost for row in game_map.terrain for t in row)
-        self._cost_grid = np.asarray(self._costs).reshape((game_map.height, game_map.width))
+        self.expanded_cell_count = 0
+        self._cost_grid = np.fromiter(
+            (t.movement_cost for row in game_map.terrain for t in row),
+            np.float64,
+            game_map.height * game_map.width,
+        ).reshape((game_map.height, game_map.width))
         self._terrain_mask = np.isinf(self._cost_grid)
+        # Leave a small margin below the cheapest step. Even along a long road,
+        # every optimal predecessor then settles before its successor despite rounding.
+        self._heuristic_step = float(self._cost_grid.min()) * (1023 / 1024)
         self._obstacle_masks: OrderedDict[frozenset[Cell], BoolArray] = OrderedDict()
         self._connected_regions: OrderedDict[frozenset[Cell], IntArray] = OrderedDict()
         _clear_segment(self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5)
@@ -104,20 +129,20 @@ class RoutingService:
             np.zeros(1, dtype=np.int64),
             1,
             0,
+            0.0,
         )
         _reachable_cells(np.zeros((1, 1), dtype=np.bool_), 0, 0)
         _label_regions(np.zeros((1, 1), dtype=np.bool_))
+        _connected_points(np.zeros((1, 1), dtype=np.int64), np.empty((0, 2)), np.empty((0, 2)))
         _extract_path(np.ones((1, 1)), np.full(1, -1, dtype=np.int64), 0)
         _segment_path(
             self._cost_grid, self.obstacle_mask(frozenset()), 0.5, 0.5, 0.5, 0.5, 1.0, 0.0, 0.0
         )
         _visible_waypoints(
+            np.zeros((1, 5)),
             self._cost_grid,
             self.obstacle_mask(frozenset()),
-            np.zeros((1, 2)),
             np.zeros((0, 2)),
-            np.zeros(2, dtype=np.int64),
-            np.zeros(1),
         )
         _branch_index(
             self._cost_grid, self.obstacle_mask(frozenset()), np.zeros((0, 2)), 0.5, 0.5, inf
@@ -131,16 +156,38 @@ class RoutingService:
         self._arrival_goal_cache: OrderedDict[
             tuple[Point, float, float, frozenset[Cell]], tuple[Point, ...]
         ] = OrderedDict()
+        self._prepared_goals: _PreparedGoals | None = None
 
     @property
     def cached_field_count(self) -> int:
         return len(self._fields)
 
     def clear(self) -> None:
+        self._prepared_goals = None
         self._fields.clear()
         self._obstacle_masks.clear()
         self._connected_regions.clear()
         self._arrival_goal_cache.clear()
+
+    def update_buildings(self, previous: frozenset[Cell], current: frozenset[Cell]) -> None:
+        """Carry untouched reverse searches across a local building placement or removal."""
+        width = self.game_map.width
+        # Newly opened cells could have been entered from an already-expanded
+        # neighbor. A conservative one-cell halo also covers goals and the frontier.
+        affected = {
+            ny * width + nx
+            for x, y in previous ^ current
+            for nx, ny in ((x, y), (x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+            if self.game_map.contains_cell((nx, ny))
+        }
+        retained = [
+            ((goals, current), field)
+            for (goals, blocked), field in self._fields.items()
+            if (blocked is previous or blocked == previous)
+            and all(field.positions[index] == -1 for index in affected)
+        ]
+        self.clear()
+        self._fields.update(retained)
 
     def arrival_goals(
         self, anchor: Point, distance: float, radius: float, blocked: frozenset[Cell]
@@ -217,25 +264,10 @@ class RoutingService:
         """Exact static connectivity for a group sharing one set of destinations."""
         if starts.ndim != 2 or starts.shape[1] != 2:
             raise ValueError("connectivity starts must have x and y columns")
-        result = np.zeros(len(starts), dtype=np.bool_)
         if not len(starts) or not goals:
-            return result
-        regions = self._connection_regions(blocked)
-        goal_regions = {
-            int(regions[int(p.y), int(p.x)]) for p in goals if self.game_map.contains(p)
-        }
-        goal_regions.discard(-1)
-        if not goal_regions:
-            return result
-        valid = (
-            (starts[:, 0] >= 0)
-            & (starts[:, 0] < self.game_map.width)
-            & (starts[:, 1] >= 0)
-            & (starts[:, 1] < self.game_map.height)
-        )
-        cells = starts[valid].astype(np.int64)
-        result[valid] = np.isin(regions[cells[:, 1], cells[:, 0]], tuple(goal_regions))
-        return result
+            return np.zeros(len(starts), dtype=np.bool_)
+        targets = point_coordinates(goals)
+        return _connected_points(self._connection_regions(blocked), starts, targets)
 
     def _connection_regions(self, blocked: frozenset[Cell]) -> IntArray:
         regions = self._connected_regions.get(blocked)
@@ -351,7 +383,16 @@ class RoutingService:
         direct = self.segment_path(start, target, blocked)
         if direct is not None:
             return direct
-        goal, indices, prefixes, cost = self._shared_path_data(start, (anchor,), blocked, allowance)
+        try:
+            goal, indices, prefixes, cost = self._shared_path_data(
+                start, (anchor,), blocked, allowance
+            )
+        except PathfindingError:
+            # A building can cut off a queued march's anchor while its station is
+            # still accessible. The individual's destination remains authoritative.
+            if not compact_approach or target == anchor:
+                raise
+            return self.shared_path_to_any(start, (target,), blocked, allowance=allowance)[1]
         if compact_approach and target == anchor:
             return self._materialize_path(start, goal, indices, prefixes, cost)
         coordinates = _route_coordinates(
@@ -404,31 +445,41 @@ class RoutingService:
         blocked: frozenset[Cell],
         radii: list[float] | None = None,
     ) -> IntArray:
-        """Bounded sixteen-waypoint lookahead in one compiled call per batch."""
-        offsets = np.zeros(len(paths) + 1, dtype=np.int64)
-        for index, path in enumerate(paths):
-            offsets[index + 1] = offsets[index] + min(len(path) - 1, 16)
-        # Flatten coordinate pairs in C, retaining the sixteen-waypoint horizon
-        # without an extra Python yield for every individual coordinate.
-        points = np.fromiter(
-            chain.from_iterable((point.x, point.y) for path in paths for point in path[1:17]),
-            dtype=np.float64,
-            count=int(offsets[-1]) * 2,
-        ).reshape((-1, 2))
-        return _visible_waypoints(
-            self._cost_grid,
-            self.obstacle_mask(blocked),
-            np.asarray([(point.x, point.y) for point in starts], dtype=np.float64),
-            points,
-            offsets,
-            np.zeros(len(starts)) if radii is None else np.asarray(radii, dtype=np.float64),
-        )
+        """Each reader checks up to sixteen candidates against one obstacle snapshot."""
+        windows = [path[1 : 1 + LOOKAHEAD_WAYPOINT_LIMIT] for path in paths]
+        points = point_coordinates(list(chain.from_iterable(windows)))
+        return self.visible_waypoint_rows(starts, list(map(len, windows)), points, blocked, radii)
+
+    def visible_waypoint_rows(
+        self,
+        starts: list[Point],
+        lengths: list[int],
+        points: FloatArray,
+        blocked: frozenset[Cell],
+        radii: list[float] | None,
+    ) -> IntArray:
+        """Check packed candidate rows from the current starts and obstacles."""
+        queries = np.empty((len(starts), 5), dtype=np.float64)
+        point_coordinates(starts, queries[:, :2])
+        queries[:, 2] = 0.0 if radii is None else radii
+        ends = np.cumsum(lengths, dtype=np.int64)
+        queries[:, 4] = ends
+        if len(queries):
+            queries[0, 3] = 0
+            queries[1:, 3] = ends[:-1]
+        return _visible_waypoints(queries, self._cost_grid, self.obstacle_mask(blocked), points)
 
     def nearest_cell(self, point: Point, blocked: frozenset[Cell]) -> Cell:
+        mask = self.obstacle_mask(blocked)
+        if self.game_map.contains(point):
+            x, y = int(point.x), int(point.y)
+            if x < point.x and y < point.y and not mask[y, x]:
+                return x, y
+        # On cell boundaries retain the row-major tie rule across all candidates.
         distances = ((np.arange(self.game_map.width) + 0.5 - point.x) ** 2)[None, :] + (
             (np.arange(self.game_map.height) + 0.5 - point.y) ** 2
         )[:, None]
-        distances[self.obstacle_mask(blocked)] = inf
+        distances[mask] = inf
         index = int(np.argmin(distances))
         if not np.isfinite(distances.flat[index]):
             raise ValueError("gathering point has no passable space")
@@ -441,9 +492,12 @@ class RoutingService:
         mask = self._obstacle_masks.get(blocked)
         if mask is None:
             mask = self._terrain_mask.copy()
-            for x, y in blocked:
-                if self.game_map.contains_cell((x, y)):
-                    mask[y, x] = True
+            if blocked:
+                cells = np.fromiter(chain.from_iterable(blocked), np.intp, 2 * len(blocked))
+                x, y = cells.reshape(-1, 2).T
+                height, width = mask.shape
+                inside = (0 <= x) & (x < width) & (0 <= y) & (y < height)
+                mask[y[inside], x[inside]] = True
             self._obstacle_masks[blocked] = mask
             if len(self._obstacle_masks) > self.maximum_fields:
                 self._obstacle_masks.popitem(last=False)
@@ -472,10 +526,22 @@ class RoutingService:
         return self.shared_path_to_any(start, (goal,), blocked)[1]
 
     def shared_path_to_any(
-        self, start: Point, goals: tuple[Point, ...], blocked: frozenset[Cell] = frozenset()
+        self,
+        start: Point,
+        goals: tuple[Point, ...],
+        blocked: frozenset[Cell] = frozenset(),
+        *,
+        allowance: RouteAllowance | None = None,
     ) -> tuple[Point, PathResult]:
-        goal, indices, prefixes, cost = self._shared_path_data(start, goals, blocked)
+        goal, indices, prefixes, cost = self._shared_path_data(start, goals, blocked, allowance)
         return goal, self._materialize_path(start, goal, indices, prefixes, cost)
+
+    def recovery_path(self, start: Point, goal: Point, blocked: frozenset[Cell]) -> PathResult:
+        """Use a shared field when resident; direct an isolated repair toward its start."""
+        endpoint, indices, prefixes, cost = self._shared_path_data(
+            start, (goal,), blocked, single_use=True
+        )
+        return self._materialize_path(start, endpoint, indices, prefixes, cost)
 
     def _shared_path_data(
         self,
@@ -483,6 +549,8 @@ class RoutingService:
         goals: tuple[Point, ...],
         blocked: frozenset[Cell],
         allowance: RouteAllowance | None = None,
+        *,
+        single_use: bool = False,
     ) -> tuple[Point, IntArray, FloatArray, float]:
         game_map = self.game_map
         if not game_map.is_passable(start):
@@ -492,17 +560,33 @@ class RoutingService:
             raise PathfindingError("START_OCCUPIED")
         if not goals:
             raise PathfindingError("NO_DESTINATIONS")
-        points: dict[int, Point] = {}
-        for point in sorted(goals, key=lambda p: (p.y, p.x)):
-            if not game_map.is_passable(point):
-                continue
-            cell = game_map.cell_for(point)
-            if cell not in blocked:
-                points.setdefault(cell[1] * game_map.width + cell[0], point)
-        if not points:
-            raise PathfindingError("TARGET_NOT_PASSABLE")
-        key = (tuple(sorted(points)), blocked)
-        field = self._fields.get(key)
+        prepared = self._prepared_goals
+        if (
+            prepared is None
+            or prepared.goals is not goals
+            and prepared.goals != goals
+            or prepared.blocked is not blocked
+            and prepared.blocked != blocked
+        ):
+            points: dict[int, Point] = {}
+            for point in sorted(goals, key=lambda p: (p.y, p.x)):
+                if not game_map.is_passable(point):
+                    continue
+                cell = game_map.cell_for(point)
+                if cell not in blocked:
+                    points.setdefault(cell[1] * game_map.width + cell[0], point)
+            if not points:
+                raise PathfindingError("TARGET_NOT_PASSABLE")
+            prepared = _PreparedGoals(goals, blocked, points, (tuple(sorted(points)), blocked))
+            self._prepared_goals = prepared
+        points, key = prepared.points, prepared.key
+        # Consecutive followers use the most recently touched field. No other
+        # method inserts/evicts fields, so it stays resident until goals change
+        # or clear() drops this prepared snapshot. Avoid rehashing a large ring
+        # of goal cells for every member of the same army.
+        field = prepared.search_field
+        if field is None:
+            field = self._fields.get(key)
         index = start_cell[1] * game_map.width + start_cell[0]
         if (
             allowance is not None
@@ -510,12 +594,16 @@ class RoutingService:
             and (field is None or field.positions[index] != -2)
         ):
             raise RouteDeferred
+        directed = field is None and single_use
         if field is None:
-            field = self._build_field(key[0], blocked)
-            self._fields[key] = field
-            if len(self._fields) > self.maximum_fields:
-                self._fields.popitem(last=False)
-        self._fields.move_to_end(key)
+            field = self._build_field(key[0])
+            if not directed:
+                self._fields[key] = field
+                if len(self._fields) > self.maximum_fields:
+                    self._fields.popitem(last=False)
+        if not directed and prepared.search_field is None:
+            self._fields.move_to_end(key)
+            prepared.search_field = field
         costs, following = field.costs, field.following
         if field.positions[index] != -2:
             field.size, expanded = _expand_field(
@@ -527,7 +615,9 @@ class RoutingService:
                 field.positions,
                 field.size,
                 index,
+                self._heuristic_step if directed else 0.0,
             )
+            self.expanded_cell_count += expanded
             if allowance is not None and allowance.search_remaining is not None:
                 # Finish one admitted search atomically, then defer further cold work.
                 # Cached settled paths and cheap direct segments can still dispatch.
@@ -561,16 +651,44 @@ class RoutingService:
             waypoints += (goal,)
         return PathResult(cells, waypoints, cost, prefix_costs)
 
-    def _build_field(self, goals: tuple[int, ...], blocked: frozenset[Cell]) -> _SearchField:
+    def _build_field(self, goals: tuple[int, ...]) -> _SearchField:
         count = self.game_map.width * self.game_map.height
         costs = np.full(count, inf)
         positions = np.full(count, -1, dtype=np.int64)
         heap = np.empty(count, dtype=np.int64)
+        following = np.empty(count, dtype=np.int64)
         for offset, index in enumerate(goals):
             costs[index], positions[index], heap[offset] = 0.0, offset, index
-        field = _SearchField(costs, np.full(count, -1, dtype=np.int64), heap, positions, len(goals))
+            following[index] = -1
+        # Relaxation initializes every reachable non-goal before extraction.
+        field = _SearchField(costs, following, heap, positions, len(goals))
         self.field_build_count += 1
         return field
+
+
+@compile_numeric
+def _connected_points(regions: IntArray, starts: FloatArray, goals: FloatArray) -> BoolArray:
+    """Classify a group against exact component labels without per-group NumPy set setup."""
+    height, width = regions.shape
+    # Labels are bounded by the map size. One bit per possible component avoids
+    # quadratic deduplication on fragmented maps and NumPy's per-query set setup.
+    allowed = np.zeros((regions.size + 63) // 64, dtype=np.uint64)
+    for x, y in goals:
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        label = regions[int(y), int(x)]
+        if label < 0:
+            continue
+        allowed[label // 64] |= np.uint64(1) << np.uint64(label % 64)
+    result = np.zeros(len(starts), dtype=np.bool_)
+    for i in range(len(starts)):
+        x, y = starts[i]
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        label = regions[int(y), int(x)]
+        if label >= 0:
+            result[i] = bool(allowed[label // 64] & (np.uint64(1) << np.uint64(label % 64)))
+    return result
 
 
 @compile_numeric
@@ -705,30 +823,36 @@ def _expand_field(
     positions: IntArray,
     size: int,
     stop: int,
+    heuristic_step: float,
 ) -> tuple[int, int]:
-    """Resume exact Dijkstra until the requested start is settled, then retain its frontier.
-
-    An indexed heap avoids tuple allocations and stale duplicate entries. Comparison
-    remains (cost, cell index); every neighbor of the stopping cell is relaxed before
-    suspension, so later requests and cache eviction cannot affect chosen routes.
-    """
-    height, width = terrain_costs.shape
+    """Expand a shared Dijkstra frontier or an isolated single-goal A* frontier."""
+    width = terrain_costs.shape[1]
+    terrain = terrain_costs.ravel()
+    obstacles = blocked.ravel()
+    ranks = costs
+    stop_x, stop_y = stop % width, stop // width
+    if heuristic_step:
+        ranks = np.empty_like(costs)
+        # The directed search is created with a single goal and never resumed.
+        seed = heap[0]
+        ranks[seed] = heuristic_step * (abs(seed % width - stop_x) + abs(seed // width - stop_y))
     expanded = 0
     while size:
         current = heap[0]
         size -= 1
         if size:
             last = heap[size]
+            last_cost = ranks[last]
             offset = 0
             while offset * 2 + 1 < size:
                 child = offset * 2 + 1
                 if child + 1 < size:
                     left, right = heap[child], heap[child + 1]
-                    if costs[right] < costs[left] or (costs[right] == costs[left] and right < left):
+                    if ranks[right] < ranks[left] or (ranks[right] == ranks[left] and right < left):
                         child += 1
                 candidate_index = heap[child]
-                if costs[last] < costs[candidate_index] or (
-                    costs[last] == costs[candidate_index] and last < candidate_index
+                if last_cost < ranks[candidate_index] or (
+                    last_cost == ranks[candidate_index] and last < candidate_index
                 ):
                     break
                 heap[offset] = candidate_index
@@ -737,14 +861,26 @@ def _expand_field(
             heap[offset], positions[last] = last, offset
         positions[current] = -2
         expanded += 1
-        x, y = current % width, current // width
-        candidate = costs[current] + terrain_costs[y, x]
-        for nx, ny in ((x, y - 1), (x - 1, y), (x + 1, y), (x, y + 1)):
-            if not 0 <= nx < width or not 0 <= ny < height or blocked[ny, nx]:
+        x = current % width
+        candidate = costs[current] + terrain[current]
+        left = current - 1 if x else -1
+        right = current + 1 if x + 1 < width else -1
+        for neighbor in (current - width, left, right, current + width):
+            if not 0 <= neighbor < len(costs) or obstacles[neighbor]:
                 continue
-            neighbor = ny * width + nx
-            if candidate < costs[neighbor]:
+            if heuristic_step and candidate == costs[neighbor]:
+                # Match the predecessor a cost/ID ordered Dijkstra heap visits first.
+                old = following[neighbor]
+                if costs[current] < costs[old] or (costs[current] == costs[old] and current < old):
+                    following[neighbor] = current
+            elif candidate < costs[neighbor]:
                 costs[neighbor] = candidate
+                rank = candidate
+                if heuristic_step:
+                    rank += heuristic_step * (
+                        abs(neighbor % width - stop_x) + abs(neighbor // width - stop_y)
+                    )
+                    ranks[neighbor] = rank
                 following[neighbor] = current
                 offset = positions[neighbor]
                 if offset == -1:
@@ -753,8 +889,8 @@ def _expand_field(
                 while offset:
                     parent = (offset - 1) // 2
                     parent_index = heap[parent]
-                    if costs[parent_index] < candidate or (
-                        costs[parent_index] == candidate and parent_index < neighbor
+                    if ranks[parent_index] < rank or (
+                        ranks[parent_index] == rank and parent_index < neighbor
                     ):
                         break
                     heap[offset], positions[parent_index] = parent_index, offset
@@ -934,24 +1070,22 @@ def _branch_index(
     return -1
 
 
-@compile_numeric
+@compile_parallel_numeric
 def _visible_waypoints(
+    queries: FloatArray,
     costs: FloatArray,
     blocked: BoolArray,
-    starts: FloatArray,
     points: FloatArray,
-    offsets: IntArray,
-    radii: FloatArray,
 ) -> IntArray:
-    result = np.zeros(len(starts), dtype=np.int64)
-    for index in range(len(starts)):
-        ax, ay = starts[index]
-        for candidate in range(offsets[index + 1] - 1, offsets[index] - 1, -1):
+    result = np.zeros(len(queries), dtype=np.int64)
+    for index in range(len(queries)):
+        ax, ay, radius, start, end = queries[index]
+        for candidate in range(int(end) - 1, int(start) - 1, -1):
             bx, by = points[candidate]
             # Forest is slower terrain, not an obstruction. Permit equal-cost
             # shortcuts inside it while retaining the cheaper route around it.
             maximum = max(1.0, costs[floor(ay), floor(ax)], costs[floor(by), floor(bx)])
-            if _clear_segment(costs, blocked, ax, ay, bx, by, maximum, radii[index]):
-                result[index] = candidate - offsets[index] + 1
+            if _clear_segment(costs, blocked, ax, ay, bx, by, maximum, radius):
+                result[index] = candidate - int(start) + 1
                 break
     return result

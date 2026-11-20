@@ -160,23 +160,21 @@ def validate_building_placement(
 def resumable_site(
     simulation: Simulation, kind: EntityKind, position: Point, owner_id: str
 ) -> Entity | None:
-    claimed = {
-        automation.parameters.site_entity_id
-        for automation in simulation.live_automations
-        if isinstance(automation.parameters, ConstructionParameters)
-    }
-    return next(
-        (
-            entity
-            for entity in simulation.entities.values()
-            if entity.kind is kind
+    for key in simulation.occupancy.occupants((floor(position.x), floor(position.y))):
+        entity = simulation.entities[key]
+        if (
+            entity.kind is kind
             and entity.position == position
             and entity.owner_id == owner_id
             and not entity.is_complete
-            and entity.entity_id not in claimed
-        ),
-        None,
-    )
+            and not any(
+                isinstance(job.parameters, ConstructionParameters)
+                and job.parameters.site_entity_id == key
+                for job in simulation.live_automations
+            )
+        ):
+            return entity
+    return None
 
 
 def drive_construction(simulation: Simulation, automation: Automation) -> None:
@@ -212,11 +210,10 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
     for builder_id in active_builders:
         builder = simulation.entities[builder_id]
         inside_footprint = bool(builder.occupied_cells & site_cells)
+        distance = construction_distance(builder.position, parameters)
         if (
             not inside_footprint
-            and construction_distance(builder.position, parameters)
-            >= collision_radius(builder.kind) - 1e-9
-            and construction_distance(builder.position, parameters) <= builder.profile.build_range
+            and collision_radius(builder.kind) - 1e-9 <= distance <= builder.profile.build_range
         ):
             builder.path.clear()
             builder.move_target = None
@@ -312,7 +309,7 @@ def drive_construction(simulation: Simulation, automation: Automation) -> None:
         simulation.occupancy.place(entity_id, building.occupied_cells)
         simulation.entities[entity_id] = building
         parameters.site_entity_id = entity_id
-        simulation._invalidate_navigation_cache()
+        simulation._invalidate_navigation_cache(added=building.occupied_cells)
     if automation.status is AutomationStatus.WAITING:
         automation_lifecycle.transition(
             simulation, automation, AutomationStatus.ACTIVE, "CONSTRUCTION_READY"
@@ -385,16 +382,12 @@ def blueprint_occupants(
     """Include discs crossing an edge even when their center cell is outside the footprint."""
     width, height = parameters.building_kind.profile.footprint
     radius = max(collision_radius(kind) for kind in EntityKind if kind.profile.movable)
-    nearby = {
-        key
-        for y in range(
-            floor(parameters.position.y - radius), ceil(parameters.position.y + height + radius)
-        )
-        for x in range(
-            floor(parameters.position.x - radius), ceil(parameters.position.x + width + radius)
-        )
-        for key in simulation.occupancy.occupants((x, y))
-    }
+    nearby = simulation.occupancy.occupants_in(
+        floor(parameters.position.x - radius),
+        floor(parameters.position.y - radius),
+        ceil(parameters.position.x + width + radius),
+        ceil(parameters.position.y + height + radius),
+    )
     cells = construction_cells(parameters)
     return tuple(
         key
@@ -421,7 +414,7 @@ def clear_idle_site(
     if not occupants:
         return
     allowance = simulation._routes.automation_allowance(simulation.AUTOMATION_ROUTE_BUDGET)
-    candidates = construction_interaction_points(simulation, parameters, 3.0)
+    candidates = None
     blocked = simulation._building_cells()
     reserved: list[tuple[Point, float]] = []
     for key in occupants:
@@ -443,6 +436,8 @@ def clear_idle_site(
             continue
         if not allowance.claim():
             break
+        if candidates is None:
+            candidates = construction_interaction_points(simulation, parameters, 3.0)
         radius = collision_radius(unit.kind)
         goals = tuple(
             point

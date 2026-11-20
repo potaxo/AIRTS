@@ -33,8 +33,14 @@ def heading(start: Point, end: Point) -> float:
 
 
 def turn_towards(current: float, target: float, allowance: float) -> float:
+    if current == target:
+        return current
     delta = (target - current + pi) % tau - pi
-    return current + max(-allowance, min(allowance, delta))
+    if delta > allowance:
+        delta = allowance
+    if delta < -allowance:
+        delta = -allowance
+    return current + delta
 
 
 class FacingHistory:
@@ -66,29 +72,29 @@ class FacingHistory:
             for source, target in self.work_links
             if APPEARANCES[source.kind].work_port is not None
         }
+        body_allowance = tau * elapsed
+        weapon_allowance = tau * 1.5 * elapsed
         for key_id, entity in simulation.entities.items():
             old = self._poses.get(key_id)
+            position = entity.position
             body_target = old.body_target if old is not None else 0.0
-            previous = old.position if old is not None else entity.position
+            previous = old.position if old is not None else position
             destination = entity.path[0] if entity.path else entity.move_target
-            if (
-                old is not None
-                and old.working
-                and key_id not in work_targets
-                and destination is None
-            ):
+            work_target = work_targets.get(key_id)
+            if old is not None and old.working and work_target is None and destination is None:
                 body_target = old.body
             if entity.is_movable:
-                dx, dy = entity.position.x - previous.x, entity.position.y - previous.y
-                if dx * dx + dy * dy > 1e-10 and (
-                    destination is not None or (old is not None and old.traveling)
+                dx, dy = position.x - previous.x, position.y - previous.y
+                if (destination is not None or (old is not None and old.traveling)) and (
+                    dx * dx + dy * dy > 1e-10
                 ):
                     body_target = atan2(dx, -dy)
-                elif destination is not None and entity.position != destination:
-                    body_target = heading(entity.position, destination)
-                work_target = work_targets.get(key_id)
-                if work_target is not None and entity.selection_position != work_target:
-                    body_target = heading(entity.selection_position, work_target)
+                elif destination is not None and position != destination:
+                    body_target = heading(position, destination)
+                if work_target is not None:
+                    center = entity.selection_position
+                    if center != work_target:
+                        body_target = heading(center, work_target)
             else:
                 body_target = 0.0
             if old is None:
@@ -98,7 +104,7 @@ class FacingHistory:
             elif elapsed > 0:
                 # Keep adjacent endpoints unwrapped so the GPU takes the short arc.
                 body = (
-                    turn_towards(old.body, body_target, tau * elapsed)
+                    turn_towards(old.body, body_target, body_allowance)
                     if old.body != body_target
                     else old.body
                 )
@@ -109,7 +115,7 @@ class FacingHistory:
                     target = _weapon_target(simulation, entity, body)
                     old.previous_weapon, old.weapon = (
                         old.weapon,
-                        turn_towards(old.weapon, target, tau * 1.5 * elapsed),
+                        turn_towards(old.weapon, target, weapon_allowance),
                     )
                 # Bound magnitudes without adding a 2pi discontinuity to either pair.
                 if abs(old.body) > pi:
@@ -123,10 +129,10 @@ class FacingHistory:
                 pose = old
             else:
                 pose = old
-            pose.position = entity.position
+            pose.position = position
             pose.traveling = destination is not None
             pose.body_target = body_target
-            pose.working = key_id in work_targets
+            pose.working = work_target is not None
         if len(self._poses) != len(simulation.entities):
             for removed in self._poses.keys() - simulation.entities.keys():
                 del self._poses[removed]
@@ -135,13 +141,40 @@ class FacingHistory:
     def pose(self, entity_id: str) -> Facing:
         return self._poses[entity_id]
 
+    def seed_births(self, simulation: Simulation, entity_ids: tuple[str, ...]) -> None:
+        """Seed non-worker births without advancing existing visual endpoints."""
+        if (
+            self._key is None
+            or self._key[0] != id(simulation)
+            or any(
+                APPEARANCES[simulation.entities[key].kind].work_port is not None
+                for key in entity_ids
+            )
+        ):
+            self.sync(simulation)
+            return
+        for key in entity_ids:
+            if key in self._poses:
+                continue
+            entity = simulation.entities[key]
+            destination = entity.path[0] if entity.path else entity.move_target
+            body = (
+                heading(entity.position, destination)
+                if entity.is_movable and destination is not None and entity.position != destination
+                else 0.0
+            )
+            weapon = _weapon_target(simulation, entity, body)
+            self._poses[key] = Facing(
+                body, body, weapon, weapon, entity.position, destination is not None, body
+            )
+
 
 def _weapon_target(simulation: Simulation, entity: Entity, default: float) -> float:
     target_id = entity.attack_target_id
-    target = simulation.entities.get(target_id or "")
-    if (
-        target is not None
-        and entity.selection_position.distance_to(target.selection_position) > 1e-5
-    ):
-        return heading(entity.selection_position, target.selection_position)
+    target = simulation.entities.get(target_id) if target_id is not None else None
+    if target is not None:
+        start, end = entity.selection_position, target.selection_position
+        dx, dy = end.x - start.x, start.y - end.y
+        if dx * dx + dy * dy > 1e-10:
+            return atan2(dx, dy)
     return default

@@ -17,8 +17,10 @@ from airts.contracts.commands import (
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
+from airts.navigation.pathfinding import RouteDeferred
 from airts.presentation.app import AirtsApp
 from airts.simulation import Simulation
+from airts.systems import movement
 from airts.world.entities import UnitState
 from airts.world.map import load_map_data
 
@@ -444,3 +446,39 @@ def test_saved_attack_leg_rejects_inconsistent_targets() -> None:
     snapshot["state"]["entities"]["c"]["attack_target_id"] = "other"
     with pytest.raises(PersistenceError, match="inconsistent attack targets"):
         load_simulation_data(snapshot)
+
+
+def test_delayed_attack_member_does_not_freeze_ready_cohort_and_rejoins_after_load() -> None:
+    simulation = army()
+    assert simulation.execute(SetFormationCommand(IDS, True)).accepted
+    assert simulation.execute(AttackCommand(IDS, "enemy")).accepted
+    original = movement.plan_group_paths
+    before = {key: simulation.entities[key].position for key in IDS}
+
+    def defer_slow_member(*args, **kwargs):
+        if "c" in args[1]:
+            raise RouteDeferred
+        return original(*args, **kwargs)
+
+    with patch.object(movement, "plan_group_paths", side_effect=defer_slow_member):
+        simulation.advance(8)
+        assert simulation.entities["a"].position.distance_to(before["a"]) > 1
+        assert simulation.entities["b"].position.distance_to(before["b"]) > 1
+        assert simulation.entities["c"].position == before["c"]
+        loaded = load_simulation_data(saved(simulation))
+    for world in (simulation, loaded):
+        world.advance(400)
+        assert "enemy" not in world.entities
+        for key in IDS:
+            entity = world.entities[key]
+            assert entity.formation_goal is not None and entity.formation_offset is not None
+            assert (
+                entity.position.distance_to(
+                    Point(
+                        entity.formation_goal.x + entity.formation_offset.x,
+                        entity.formation_goal.y + entity.formation_offset.y,
+                    )
+                )
+                < 0.05
+            )
+    assert simulation.export_state() == loaded.export_state()

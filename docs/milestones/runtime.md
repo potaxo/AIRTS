@@ -36,6 +36,9 @@ contextual direct movement, attack or builder repair. Finite direct movement, at
 reclamation finish before pending orders start; persistent automation is replaced by the first
 queued direct order. New ordinary orders clear the affected capable units' entire direct-order queues.
 Movement, attack and repair share one ordered queue rather than separate queues per activity.
+Ready FIFO attacks sharing an owner and target activate in one command batch, preserving each
+member's distinct tail. Move/repair dispatch keeps its existing individual allowance; target
+batching does not advance a member whose preceding task is still active.
 Modifier state follows keyboard-event order within each input batch, so releasing Shift later in
 the same frame cannot replace earlier queued clicks. Every Shift click appends a separate task,
 including nearby or repeated ground clicks. An enemy click always names a tracking attack target;
@@ -86,6 +89,7 @@ Initialization and loading rebuild totals from complete entities. Profile rates 
 [economy.py](../../src/airts/systems/economy.py) owns income execution;
 [units/buildings.py](../../src/airts/world/units/buildings.py) owns profile income and upgrade prices.
 Sandbox and match maps use the same production amounts, without a sandbox income override.
+Command centers provide passive income through the same settlement, in addition to producing builders.
 Matter Synthesizers can be built on ordinary valid terrain without a resource site. Their high
 construction price and lower output make them a supplementary economy when sites are exhausted.
 Only completed income buildings earn resources. There is no resource-production action or economy hotkey

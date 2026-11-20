@@ -155,6 +155,28 @@ def test_connectivity_tracks_obstacles_and_does_not_depend_on_cached_searches(
     assert router.field_build_count == 0
 
 
+def test_batch_connectivity_keeps_distinct_components_across_bitmap_words() -> None:
+    game_map = load_map_data(
+        {
+            "id": "isolated_cells",
+            "name": "Isolated cells",
+            "width": 20,
+            "height": 20,
+            "terrain": {"default": "grass"},
+            "entities": [{"id": "seed", "kind": "scout", "position": [1.5, 1.5]}],
+        }
+    )
+    router = RoutingService(game_map)
+    blocked = frozenset((x, y) for y in range(20) for x in range(20) if (x + y) % 2)
+    points = [Point(x + 0.5, y + 0.5) for y in range(20) for x in range(20)]
+    goals = tuple(points[::6]) + (Point(-1, -1), Point(float("nan"), 1), points[-1])
+    starts = np.asarray([(p.x, p.y) for p in points])
+    expected = [router.can_reach_any(p, goals, blocked) for p in points]
+    assert router.can_reach_many(starts, goals, blocked).tolist() == expected
+    assert router.can_reach_many(starts, goals[::-1] * 2, blocked).tolist() == expected
+    assert router.field_build_count == 0
+
+
 def test_branch_cost_continues_python_compensated_sum_without_changing_rounding() -> None:
     game_map = load_map_data(
         {
@@ -248,6 +270,17 @@ def test_search_allowance_defers_cold_routes_but_admits_cached_and_direct_routes
     assert router.group_path(start, other, other, blocked, allowance=renewed).waypoints[-1] == other
 
 
+def test_gathering_route_can_reach_its_station_after_shared_anchor_is_cut_off(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1))
+    start, target, anchor = Point(0.5, 0.5), Point(4.5, 4.5), Point(6.5, 4.5)
+    blocked = frozenset((5, y) for y in range(12)) | {(2, 2)}
+    route = router.group_path(start, anchor, target, blocked, compact_approach=True)
+    assert route.waypoints[-1] == target
+    assert blocked.isdisjoint(route.cells)
+
+
 def test_thousand_routes_share_one_field_and_cache_eviction_preserves_routes(
     make_map: Callable[[int], GameMap],
 ) -> None:
@@ -323,6 +356,7 @@ def test_compiled_fields_preserve_exact_reverse_dijkstra_routes(
                 following[neighbor] = current
                 heappush(queue, (candidate, neighbor))
     router = RoutingService(game_map)
+    repairs = RoutingService(game_map)
     for index in range(64):
         start = Point(index % 8 + 0.5, index // 8 + 0.5)
         if game_map.cell_for(start) in blocked:
@@ -330,6 +364,9 @@ def test_compiled_fields_preserve_exact_reverse_dijkstra_routes(
         if costs[index] == float("inf"):
             with pytest.raises(PathfindingError, match="NO_PATH"):
                 router.shared_path_to_any(start, goals, blocked)
+            if goal_count == 1:
+                with pytest.raises(PathfindingError, match="NO_PATH"):
+                    repairs.recovery_path(start, goals[0], blocked)
             continue
         expected = [index]
         current = index
@@ -339,6 +376,68 @@ def test_compiled_fields_preserve_exact_reverse_dijkstra_routes(
         _, path = router.shared_path_to_any(start, goals, blocked)
         assert path.cells == tuple((i % 8, i // 8) for i in expected)
         assert path.cost == costs[index]
+        if goal_count == 1:
+            assert repairs.recovery_path(start, goals[0], blocked) == path
+            assert repairs.cached_field_count == 0
+
+
+def test_cold_repair_search_stays_directed_and_keeps_the_shared_field() -> None:
+    game_map = load_map_data(
+        {
+            "id": "repair_corridor",
+            "name": "Repair corridor",
+            "width": 96,
+            "height": 64,
+            "terrain": {"default": "grass"},
+            "entities": [{"id": "unit", "kind": "scout", "position": [1.5, 1.5]}],
+        }
+    )
+    start, goal = Point(20.5, 32.5), Point(75.5, 32.5)
+    reference = RoutingService(game_map)
+    expected = reference.shared_path(start, goal)
+    router = RoutingService(game_map, maximum_fields=1)
+    shared_goal = Point(20.5, 34.5)
+    router.shared_path(start, shared_goal)
+    before = router.expanded_cell_count
+    assert router.recovery_path(start, goal, frozenset()) == expected
+    assert router.expanded_cell_count - before == len(expected.cells)
+    assert router.expanded_cell_count - before < reference.expanded_cell_count
+    before = router.expanded_cell_count
+    router.recovery_path(start, shared_goal, frozenset())
+    assert router.expanded_cell_count == before
+
+
+def test_local_building_changes_reuse_only_untouched_frontiers() -> None:
+    game_map = load_map_data(
+        {
+            "id": "local_change",
+            "name": "Local change",
+            "width": 20,
+            "height": 12,
+            "terrain": {"default": "grass"},
+            "entities": [{"id": "unit", "kind": "scout", "position": [1.5, 1.5]}],
+        }
+    )
+    router = RoutingService(game_map)
+    goal, near, far = Point(1.5, 1.5), Point(2.5, 1.5), Point(18.5, 1.5)
+    empty: frozenset[tuple[int, int]] = frozenset()
+    wall = frozenset((10, y) for y in range(12))
+    router.shared_path(near, goal)
+    router.update_buildings(empty, wall)
+    assert router.cached_field_count == 1
+    assert router.recovery_path(near, goal, wall).waypoints == (goal,)
+    with pytest.raises(PathfindingError, match="NO_PATH"):
+        router.shared_path(far, goal, wall)
+    assert router.field_build_count == 1
+    opened = wall - {(10, 1)}
+    router.update_buildings(wall, opened)
+    assert router.cached_field_count == 0
+    assert router.shared_path(far, goal, opened) == RoutingService(game_map).shared_path(
+        far, goal, opened
+    )
+    router.update_buildings(opened, wall)
+    with pytest.raises(PathfindingError, match="NO_PATH"):
+        router.recovery_path(far, goal, wall)
 
 
 @pytest.mark.parametrize(
@@ -348,6 +447,43 @@ def test_segment_rejects_corner_cutting(
     make_map: Callable[[int], GameMap], start: Point, end: Point
 ) -> None:
     assert passable_segment_cells(make_map(1), start, end, frozenset({(1, 0)})) is None
+
+
+def test_multi_goal_search_budget_keeps_settled_paths_available(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1))
+    goals = (Point(9.5, 9.5), Point(10.5, 9.5))
+    allowance = router.automation_allowance(1, search_limit=1)
+    first = router.shared_path_to_any(Point(9.5, 8.5), goals, allowance=allowance)
+    assert allowance.search_remaining == 0
+    assert router.shared_path_to_any(Point(9.5, 8.5), goals, allowance=allowance) == first
+    with pytest.raises(RouteDeferred):
+        router.shared_path_to_any(Point(0.5, 0.5), goals, allowance=allowance)
+    assert router.field_build_count == 1
+    router.begin_tick()
+    router.shared_path_to_any(
+        Point(0.5, 0.5), goals, allowance=router.automation_allowance(1, search_limit=1)
+    )
+    assert router.field_build_count == 1
+
+
+def test_prepared_goals_retain_exact_endpoints_and_refresh_with_obstacles(
+    make_map: Callable[[int], GameMap],
+) -> None:
+    router = RoutingService(make_map(1))
+    start = Point(0.5, 0.5)
+    first, second = Point(8.25, 8.25), Point(8.75, 8.75)
+    assert router.shared_path_to_any(start, (first,))[1].waypoints[-1] == first
+    assert router.shared_path_to_any(start, (second,))[1].waypoints[-1] == second
+    wall = frozenset((4, y) for y in range(8))
+    route = router.shared_path_to_any(start, (second,), wall)[1]
+    assert not set(route.cells) & wall
+    assert route.waypoints[-1] == second
+    with pytest.raises(PathfindingError, match="TARGET_NOT_PASSABLE"):
+        router.shared_path_to_any(start, (second,), frozenset({(8, 8)}))
+    router.clear()
+    assert router.shared_path_to_any(start, (second,))[1].waypoints[-1] == second
 
 
 def test_route_budgets_are_shared_and_reset_per_tick(make_map: Callable[[int], GameMap]) -> None:
@@ -452,6 +588,8 @@ def test_batched_lookahead_matches_individual_checks_on_weighted_corners(
         [Point(0.5, 0.5), Point(1.5, 0.5), Point(2.5, 2.5), Point(10.5, 10.5)],
         [Point(10.5, 9.5), Point(9.5, 9.5), Point(4.5, 3.5)],
     ]
+    starts.extend([Point(2.5, 2.5), Point(0.5, 9.5)])
+    paths.extend([[starts[-2]], [Point(0.5 + i / 4, 9.5) for i in range(30)]])
     blocked = frozenset({(1, 0), (5, 5)})
     expected = []
     for start, path in zip(starts, paths, strict=True):
@@ -466,3 +604,6 @@ def test_batched_lookahead_matches_individual_checks_on_weighted_corners(
             )
         )
     assert router.visible_waypoints(starts, paths, blocked).tolist() == expected
+    # Independent worker slices still address the shared, variable-length waypoint array.
+    assert router.visible_waypoints(starts * 257, paths * 257, blocked).tolist() == expected * 257
+    assert router.visible_waypoints([], [], blocked).tolist() == []

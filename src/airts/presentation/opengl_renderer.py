@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib import import_module
 from typing import Any, Protocol, cast
@@ -30,11 +31,12 @@ from airts.presentation.ui.minimap import Minimap
 from airts.presentation.ui.saves import SavePanelState
 from airts.presentation.ui.theme import BACKGROUND
 from airts.presentation.visuals.assets import atlas_pixels
-from airts.presentation.visuals.catalog import ATLAS_COLUMNS, TILE_PIXELS
+from airts.presentation.visuals.catalog import APPEARANCES, ATLAS_COLUMNS, TILE_PIXELS
 from airts.presentation.visuals.gpu import (
     ENTITY_ATTRIBUTES,
     ENTITY_GEOMETRY_SHADER,
     ENTITY_VERTEX_SHADER,
+    EntityView,
     pack_entities,
 )
 from airts.presentation.visuals.terrain import DETAIL_MIN_TILE, GRID_COLOR, fragment_shader
@@ -70,7 +72,7 @@ _GPU_RESOURCE_ATTRIBUTES = (
 )
 
 
-class OpenGLRenderState(SceneView, FeedbackView, Protocol):
+class OpenGLRenderState(SceneView, FeedbackView, EntityView, Protocol):
     """The UI-owned state needed to build a GPU frame without importing the application."""
 
     render_alpha: float
@@ -128,6 +130,15 @@ class OpenGLFrame:
     shape_buffer: bytes
     line_buffer: bytes
     entity_buffer: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishedFrame:
+    frame: OpenGLFrame
+    canvas: pygame.Rect
+    minimap: pygame.Rect | None
+    world_size: tuple[int, int]
+    viewport: pygame.Rect
 
 
 @dataclass(slots=True)
@@ -196,9 +207,25 @@ class OpenGLFrameBuilder:
             or key[2] != simulation.command_count
             or self._selection_key is None
             or self._selection_key.intersection(simulation.entities) != app.selected_entities
-            or not simulation.entities.keys() <= self._frame_entity_ids
         ):
             return None
+        births = tuple(key for key in simulation.entities if key not in self._frame_entity_ids)
+        if births:
+            # Small production batches must be visible immediately, without
+            # rebuilding every surviving entity on the simulation tick's frame.
+            # Workers need complete work-link geometry; large bursts use a full build.
+            if len(births) > 64 or any(
+                APPEARANCES[simulation.entities[key].kind].work_port is not None for key in births
+            ):
+                return None
+            packed, units, buildings, selected = pack_entities(app, entity_ids=births)
+            frame = replace(
+                frame,
+                entity_buffer=frame.entity_buffer + packed,
+                unit_count=frame.unit_count + units,
+                building_count=frame.building_count + buildings,
+                selected_unit_count=frame.selected_unit_count + selected,
+            )
         self._deferred_tick = simulation.tick
         if (
             frame.framebuffer_size != framebuffer_size
@@ -593,6 +620,7 @@ class OpenGLRenderer:
         self._module = module
         self._context = context
         self._builder = OpenGLFrameBuilder()
+        self._published: _PublishedFrame | None = None
         self._feedback: GPUFeedback | None = None
         self._uploaded_frame: OpenGLFrame | None = None
         self._uploaded_terrain: bytes | None = None
@@ -780,6 +808,73 @@ class OpenGLRenderer:
         frame = self._builder.staged_frame(app, framebuffer_size)
         if frame is None:
             frame = self._builder.build(app, framebuffer_size)
+        alpha = 1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
+        published = _PublishedFrame(
+            frame,
+            app.canvas_rect.copy(),
+            None
+            if app.settings_open or app.help_open or app.save_panel.open or app.lobby is not None
+            else app.minimap.map_rect.copy(),
+            (app.simulation.game_map.width, app.simulation.game_map.height),
+            app.minimap.viewport_rect(app),
+        )
+        assert self._feedback is not None
+        self._submit_frame(
+            published,
+            alpha,
+            framebuffer,
+            lambda: self._feedback.draw(  # type: ignore[union-attr]
+                app,
+                framebuffer_size,
+                interpolation_alpha=0.0 if frame.tick != app.simulation.tick else app.render_alpha,
+            ),
+            lambda: self._draw_overlay(app, frame),
+        )
+        self._published = published
+        return frame
+
+    def render_cached(
+        self,
+        *,
+        origin: tuple[int, int],
+        tile: float,
+        viewport: pygame.Rect,
+        framebuffer: Any | None = None,
+    ) -> OpenGLFrame:
+        """Present completed GPU data while the sole simulation writer advances."""
+        published = self._published
+        if published is None:
+            raise OpenGLRendererError("no completed frame has been published")
+        frame = replace(published.frame, terrain_origin=origin, terrain_tile_size=tile)
+        published = replace(published, frame=frame, viewport=viewport)
+        assert self._feedback is not None
+
+        def overlay() -> None:
+            assert self._overlay_texture is not None
+            self._overlay_texture.use(location=0)
+            self._overlay_vertex_array.render(mode=self._module.TRIANGLE_STRIP, vertices=4)
+
+        self._submit_frame(
+            published,
+            1.0,
+            framebuffer,
+            lambda: self._feedback.draw_cached(  # type: ignore[union-attr]
+                frame.framebuffer_size, origin, tile, published.canvas, 1.0
+            ),
+            overlay,
+        )
+        return frame
+
+    def _submit_frame(
+        self,
+        published: _PublishedFrame,
+        alpha: float,
+        framebuffer: Any | None,
+        feedback: Callable[[], None],
+        overlay: Callable[[], None],
+    ) -> None:
+        frame = published.frame
+        framebuffer_size = frame.framebuffer_size
         target = framebuffer if framebuffer is not None else self._context.screen
         if target is None:
             raise OpenGLRendererError("the OpenGL context has no screen framebuffer")
@@ -789,9 +884,7 @@ class OpenGLRenderer:
             self._context.viewport = (0, 0, width, height)
             self._context.clear(BACKGROUND[0] / 255, BACKGROUND[1] / 255, BACKGROUND[2] / 255, 1.0)
             self._shape_program["viewport_size"].value = framebuffer_size
-            self._shape_program["interpolation_alpha"].value = (
-                1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
-            )
+            self._shape_program["interpolation_alpha"].value = alpha
             self._line_program["viewport_size"].value = framebuffer_size
             self._line_program["origin"].value = frame.terrain_origin
             self._line_program["tile"].value = frame.terrain_tile_size
@@ -814,27 +907,21 @@ class OpenGLRenderer:
                     vertices=frame.line_vertex_count,
                 )
             if frame.shape_count:
-                self._draw_entities(app, frame, framebuffer_size)
+                self._draw_entities(frame, framebuffer_size, alpha)
                 self._shape_vertex_array.render(
                     mode=self._module.TRIANGLE_STRIP,
                     vertices=4,
                     instances=frame.shape_count,
                 )
             else:
-                self._draw_entities(app, frame, framebuffer_size)
-            assert self._feedback is not None
-            self._feedback.draw(
-                app,
-                framebuffer_size,
-                interpolation_alpha=0.0 if frame.tick != app.simulation.tick else app.render_alpha,
-            )
-            self._draw_overlay(app, frame)
-            self._draw_minimap(app, frame, framebuffer_size)
+                self._draw_entities(frame, framebuffer_size, alpha)
+            feedback()
+            overlay()
+            self._draw_minimap(published)
         except OpenGLRendererError:
             raise
         except Exception as error:
             raise OpenGLRendererError(f"OpenGL frame submission failed: {error}") from error
-        return frame
 
     def finish(self) -> None:
         """Wait for submitted GPU work, used only by performance verification."""
@@ -906,16 +993,12 @@ class OpenGLRenderer:
             _replace_buffer(self._entity_buffer, frame.entity_buffer)
         self._uploaded_frame = frame
 
-    def _draw_entities(
-        self, app: OpenGLRenderState, frame: OpenGLFrame, size: tuple[int, int]
-    ) -> None:
+    def _draw_entities(self, frame: OpenGLFrame, size: tuple[int, int], alpha: float) -> None:
         program = self._entity_program
         program["viewport_size"].value = size
         program["terrain_origin"].value = frame.terrain_origin
         program["terrain_tile_size"].value = frame.terrain_tile_size
-        program["interpolation_alpha"].value = (
-            1.0 if frame.tick != app.simulation.tick else max(0.0, min(1.0, app.render_alpha))
-        )
+        program["interpolation_alpha"].value = alpha
         program["minimap_mode"].value = 0
         if frame.unit_count + frame.building_count:
             self._entity_vertex_array.render(
@@ -923,19 +1006,16 @@ class OpenGLRenderer:
                 vertices=frame.unit_count + frame.building_count,
             )
 
-    def _draw_minimap(
-        self, app: OpenGLRenderState, frame: OpenGLFrame, size: tuple[int, int]
-    ) -> None:
-        if app.settings_open or app.help_open or app.save_panel.open or app.lobby is not None:
+    def _draw_minimap(self, published: _PublishedFrame) -> None:
+        if published.minimap is None:
             return
-        rect = app.minimap.map_rect
+        rect = published.minimap
+        frame = published.frame
+        size = frame.framebuffer_size
         program = self._entity_program
         program["minimap_rect"].value = tuple(rect)
-        program["world_size"].value = (
-            app.simulation.game_map.width,
-            app.simulation.game_map.height,
-        )
-        program["minimap_viewport"].value = tuple(app.minimap.viewport_rect(app))
+        program["world_size"].value = published.world_size
+        program["minimap_viewport"].value = tuple(published.viewport)
         self._context.scissor = (rect.x, size[1] - rect.bottom, rect.width, rect.height)
         try:
             for mode in (1, 2):

@@ -303,6 +303,26 @@ def test_scene_staging_keeps_all_survivors_and_publishes_births_immediately() ->
     assert current.unit_count == 2
 
 
+def test_small_combat_births_append_immediately_without_repacking_survivors() -> None:
+    app = visual_app()
+    builder = OpenGLFrameBuilder()
+    old = builder.build(app, app.window_size)
+    app._advance_presentation_tick()
+    newborn = Entity("newborn", EntityKind.LIGHT_TANK, "player", Point(10.5, 10.5), 100)
+    app.simulation.entities[newborn.entity_id] = newborn
+    app.simulation.occupancy.place(newborn.entity_id, newborn.occupied_cells)
+    staged = builder.staged_frame(app, app.window_size)
+    assert staged is not None and staged.tick == old.tick
+    assert staged.unit_count == old.unit_count + 1
+    assert staged.building_count == old.building_count
+    assert staged.entity_buffer.startswith(old.entity_buffer)
+    assert len(staged.entity_buffer) == len(old.entity_buffer) + 32 * 4
+    assert builder.staged_frame(app, app.window_size) is None
+    current = builder.build(app, app.window_size)
+    assert current.tick == app.simulation.tick and current.unit_count == staged.unit_count
+    assert current.entity_buffer[-32 * 4 :] == staged.entity_buffer[-32 * 4 :]
+
+
 @pytest.mark.performance
 def test_native_sprite_turn_interpolation_changes_pixels_without_repacking() -> None:
     """Hardware rasterization checks the texture atlas and continuous rotation."""

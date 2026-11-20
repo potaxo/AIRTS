@@ -32,8 +32,8 @@ def test_deferred_queued_moves_resume_without_losing_fifo_or_restored_intent(
             }
         )
     )
-    # Combat support leaves this exact kind of pending leg: distinct final slots
-    # without a group anchor. Keep a second leg to verify the FIFO tail survives.
+    # Independent destinations and already-saved moves can lack a group anchor.
+    # Keep a second leg to verify the FIFO tail survives.
     first = {key: Point(70.5, 5.5 + index * 2) for index, key in enumerate(ids)}
     tail = UnitOrder(OrderKind.MOVE, Point(75.5, 30.5))
     for key in ids:

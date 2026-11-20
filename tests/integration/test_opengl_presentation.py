@@ -271,6 +271,25 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert programs[0]["terrain_tile_size"].value == app.tile_size
     assert renderer.info["renderer"] == "test renderer"
 
+    # An advancing world is never consulted by the worker-time draw path.
+    # Every completed entity record and feedback buffer remains available.
+    simulation.entities.clear()
+    assert renderer._feedback is not None
+    with (
+        patch.object(renderer._builder, "build", side_effect=AssertionError("live world read")),
+        patch.object(
+            renderer._feedback, "_build", side_effect=AssertionError("live feedback read")
+        ),
+    ):
+        cached = renderer.render_cached(
+            origin=app.map_origin,
+            tile=app.tile_size,
+            viewport=app.minimap.viewport_rect(app),
+        )
+    assert cached.entity_buffer is transformed.entity_buffer
+    assert cached.unit_count == transformed.unit_count
+    assert cached.building_count == transformed.building_count
+
     renderer.release()
 
     texture.release.assert_called_once_with()

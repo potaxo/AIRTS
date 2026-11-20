@@ -41,8 +41,47 @@ from airts.navigation.pathfinding import RouteDeferred
 from airts.simulation import Simulation
 from airts.systems import automation_runtime
 from airts.world.entities import Projectile, UnitState
-from airts.world.map import load_map_data
+from airts.world.map import footprint_cells, load_map_data
 from airts.world.units.catalog import EntityKind
+
+
+def test_cooling_locked_weapons_keep_pursuit_without_building_unused_target_queries() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "locked-cooldown",
+                "name": "Locked cooldown",
+                "width": 24,
+                "height": 16,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": "tank", "kind": "light_tank", "owner": "player", "position": [2.5, 3.5]},
+                    {"id": "target", "kind": "builder", "owner": "enemy", "position": [4.5, 3.5]},
+                ],
+            }
+        )
+    )
+    assert simulation.execute(AttackCommand(("tank",), "target")).accepted
+    tank, target = simulation.entities["tank"], simulation.entities["target"]
+    tank.attack_cooldown = 3
+    simulation.advance()
+    assert tank.attack_cooldown == 2
+    assert tank.pursue_target and tank.attack_target_id == "target"
+    assert not simulation.projectiles
+    assert simulation._combat_index is None
+    simulation.advance(2)
+    assert any(
+        projectile.source_entity_id == "tank" for projectile in simulation.projectiles.values()
+    )
+    # A cooling weapon must still follow an explicit target leaving its range.
+    next_position = Point(18.5, 3.5)
+    simulation.occupancy.move(
+        "target", footprint_cells(target.kind, next_position), frozenset({"target"})
+    )
+    target.position = next_position
+    simulation.advance()
+    assert tank.pursue_target and tank.attack_target_id == "target"
+    assert tank.path
 
 
 def support_world() -> Simulation:
@@ -327,6 +366,14 @@ def test_destroyed_ordered_target_converts_survivors_to_gathering_and_continues_
                 break
         assert "enemy" not in world.entities
         assert all(world.entities[key].order_queue for key in ids)
+        orders = [world.entities[key].order_queue[0] for key in ids]
+        assert len({order.position for order in orders}) == len(ids)
+        assert {order.group_goal for order in orders} == {
+            min(
+                (order.position for order in orders),
+                key=lambda p: (p.distance_to(Point(16.5, 10.5)), p.y, p.x),
+            )
+        }
         assert all(world.entities[key].state is UnitState.MOVING for key in ids)
         world.advance(120)
         assert all(world.entities[key].position.distance_to(Point(16.5, 10.5)) < 2 for key in ids)
@@ -355,16 +402,82 @@ def test_unreachable_attackers_leave_route_allowance_for_reachable_members() -> 
 def test_combat_route_admission_rotates_and_dispatches_every_pending_member() -> None:
     simulation, _, reachable = gated_attack_simulation(0, 48)
     assert simulation.execute(AttackCommand(reachable[::-1], "target")).accepted
-    for _ in range(4):
+    for tick in range(4):
         simulation._routes.clear()
         simulation.advance()
         assert simulation._routes.combat_route_count <= Simulation.COMBAT_PATH_BUDGET
+        if tick == 0:
+            assert all(simulation.entities[key].path for key in reachable)
     dispatched = {
         event.subject_id
         for event in simulation.events.query(event_types=frozenset({EventType.PATH_COMPUTED}))
         if event.details["source"] == "combat"
     }
     assert dispatched == set(reachable)
+
+
+def test_large_ai_attack_starts_the_front_and_admits_rear_units() -> None:
+    ids = tuple(f"unit_{i:03}" for i in range(260))
+    starts = {key: Point(2.5 + i % 16, 2.5 + i // 16) for i, key in enumerate(ids[:-1])}
+    # The closest unit sorts last, beyond the ordinary 256-attempt budget.
+    starts[ids[-1]] = Point(55.5, 10.5)
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "front_dispatch",
+                "name": "Front dispatch",
+                "width": 80,
+                "height": 32,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": key, "kind": "scout", "owner": "enemy", "position": [p.x, p.y]}
+                    for key, p in starts.items()
+                ]
+                + [{"id": "target", "kind": "factory", "position": [68, 8]}],
+            }
+        )
+    )
+    assert simulation.execute(AttackCommand(ids, "target", owner_id="enemy")).accepted
+    simulation.advance()
+    assert simulation.entities[ids[-1]].path
+    assert simulation.entities[ids[1]].path  # First rotating claim on tick one.
+    simulation.advance(2)
+    assert simulation.entities[ids[-1]].position.x > starts[ids[-1]].x
+    assert all(simulation.entities[key].path for key in ids)
+
+
+def test_shared_attack_groups_rotate_without_starving_other_targets() -> None:
+    count = Simulation.COMBAT_PATH_BUDGET + 4
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "attack_groups",
+                "name": "Attack groups",
+                "width": 80,
+                "height": 80,
+                "terrain": {"default": "grass"},
+                "entities": [
+                    {"id": f"a_{i}", "kind": "scout", "position": [2.5, 2.5 + i * 3]}
+                    for i in range(count)
+                ]
+                + [
+                    {
+                        "id": f"b_{i}",
+                        "kind": "builder",
+                        "owner": "enemy",
+                        "position": [60.5, 2.5 + i * 3],
+                    }
+                    for i in range(count)
+                ],
+            }
+        )
+    )
+    for i in range(count):
+        assert simulation.execute(AttackCommand((f"a_{i}",), f"b_{i}")).accepted
+    for _ in range(3):
+        simulation.advance()
+        assert simulation._routes.combat_route_count <= Simulation.COMBAT_PATH_BUDGET
+    assert all(simulation.entities[f"a_{i}"].position.x > 2.5 for i in range(count))
 
 
 def test_economy_tracker_completes_without_controlling_or_capping_passive_income() -> None:

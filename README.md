@@ -85,7 +85,7 @@ Art locations, regeneration and replacement are documented in the
 | Double-click enemy entity | Inspect same-type entities belonging to the clicked enemy player currently inside the canvas |
 | Right-click ground or a friendly entity, once or repeatedly | Gather and move along shared routes; fire in range while continuing to the destination without combat detours; distance and click count do not change the movement mode |
 | **Keep formation: ON/OFF** in the bottom command bar | Toggle strict movement and attack formation; click ON to cancel at any time, including during pursuit or with buildings mixed into the selection |
-| Right-click an enemy, including rapid repeated clicks | Pursue and attack that entity; fire at enemies along the route, prioritize the ordered target in range, and continue queued work after destruction |
+| Right-click an enemy, including rapid repeated clicks | Pursue using shared group routes; fire along the way, prioritize the ordered target in range, and continue queued work after destruction |
 | `X` / `H` | Stop / Hold position; stopped units can yield to traffic, while held units try to return to their anchors |
 | `W` / `A` / `S` / `D` (hold) | Move the camera up / left / down / right, including while paused |
 | Middle-drag | Pan the map |
@@ -311,6 +311,9 @@ multiplier. This local display option starts OFF; turning it OFF hides the AI ro
 **Real FPS** uses rolling p99 completed-frame time; **Submit FPS** is an average diagnostic.
 Neither measures physical monitor scan-out. Performance requirements and acceptance workloads
 are defined in the [performance contract](docs/milestones/performance.md).
+Native OpenGL keeps drawing the last completed world while simulation advances. Camera-key panning
+continues; orders, pause and saves take effect at the next complete simulation boundary. Display FPS
+can therefore remain high while an overloaded battle progresses more slowly than the chosen speed.
 
 ## Windows package
 

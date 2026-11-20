@@ -69,7 +69,26 @@ def drive_order_queues(simulation: Simulation) -> None:
         simulation.GATHERING_PATH_BUDGET, search_limit=QUEUED_SEARCH_CELL_BUDGET
     )
     ordered = pending[offset:] + pending[:offset]
-    for key in ordered[: simulation.GATHERING_PATH_BUDGET]:
+    attacks: dict[tuple[str, str | None], list[str]] = {}
+    batches: list[list[str]] = []
+    for key in ordered:
+        full = len(batches) >= simulation.GATHERING_PATH_BUDGET
+        if full and not attacks:
+            break
+        entity = simulation.entities[key]
+        order = entity.order_queue[0]
+        if order.kind is OrderKind.ATTACK:
+            group = (entity.owner_id, order.target_entity_id)
+            if group not in attacks:
+                if full:
+                    continue
+                attacks[group] = []
+                batches.append(attacks[group])
+            attacks[group].append(key)
+        elif not full:
+            batches.append([key])
+    for batch in batches:
+        key = batch[0]
         entity = simulation.entities[key]
         order = entity.order_queue[0]
         if order.kind is OrderKind.MOVE:
@@ -110,22 +129,24 @@ def drive_order_queues(simulation: Simulation) -> None:
             continue
         assert order.target_entity_id is not None
         command: AttackCommand | RepairBuildingCommand = (
-            AttackCommand((key,), order.target_entity_id, entity.owner_id)
+            AttackCommand(tuple(batch), order.target_entity_id, entity.owner_id)
             if order.kind is OrderKind.ATTACK
             else RepairBuildingCommand((key,), order.target_entity_id, entity.owner_id)
         )
         # Give the canonical command boundary only the active order. Its ordinary
         # replacement cleanup must not cancel the pending FIFO tail.
-        tail = entity.order_queue[1:]
-        entity.order_queue = []
+        tails = {member: simulation.entities[member].order_queue[1:] for member in batch}
+        for member in batch:
+            simulation.entities[member].order_queue = []
         result = simulation._execute_command(command, record=False)
-        entity.order_queue = tail
-        if not result.accepted:
-            simulation.events.record(
-                simulation.tick,
-                EventType.ORDER_SKIPPED,
-                key,
-                kind=order.kind.value,
-                target_entity_id=order.target_entity_id,
-                reason=result.reason,
-            )
+        for member in batch:
+            simulation.entities[member].order_queue = tails[member]
+            if not result.accepted:
+                simulation.events.record(
+                    simulation.tick,
+                    EventType.ORDER_SKIPPED,
+                    member,
+                    kind=order.kind.value,
+                    target_entity_id=order.target_entity_id,
+                    reason=result.reason,
+                )
