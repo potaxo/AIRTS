@@ -15,6 +15,7 @@ from airts.contracts.spatial import Point
 from airts.presentation.gpu_feedback import FeedbackView, GPUFeedback
 from airts.presentation.gpu_shapes import SHAPE_FLOATS, FloatColor, append_shape
 from airts.presentation.lobby import Lobby
+from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.palette import (
     PROJECTILE_COLORS,
     TERRAIN_COLORS,
@@ -81,6 +82,7 @@ class OpenGLRenderState(SceneView, FeedbackView, EntityView, Protocol):
     help_open: bool
     save_panel: SavePanelState
     lobby: Lobby | None
+    presentation_metrics: PresentationMetrics
 
     def previous_entity_position(self, entity_id: str) -> Point: ...
 
@@ -91,6 +93,8 @@ class OpenGLRenderState(SceneView, FeedbackView, EntityView, Protocol):
     def _opengl_overlay_key(self) -> tuple[object, ...]: ...
 
     def _draw_opengl_overlay(self, screen: pygame.Surface) -> None: ...
+
+    def _draw_opengl_metrics(self, screen: pygame.Surface) -> tuple[pygame.Rect, ...]: ...
 
     def _draw_opengl_partial_overlay(
         self,
@@ -114,6 +118,7 @@ class OpenGLFrame:
     framebuffer_size: tuple[int, int]
     pixel_scale: float
     tick: int
+    interpolates: bool
     terrain_count: int
     terrain_shape_count: int
     unit_count: int
@@ -218,7 +223,7 @@ class OpenGLFrameBuilder:
                 APPEARANCES[simulation.entities[key].kind].work_port is not None for key in births
             ):
                 return None
-            packed, units, buildings, selected = pack_entities(app, entity_ids=births)
+            packed, units, buildings, selected, _ = pack_entities(app, entity_ids=births)
             frame = replace(
                 frame,
                 entity_buffer=frame.entity_buffer + packed,
@@ -291,13 +296,16 @@ class OpenGLFrameBuilder:
             return self._frame
 
         shape_buffer, shape_count = self._build_entities(app, (0, 0), 1.0)
-        entity_buffer, unit_count, building_count, selected_unit_count = pack_entities(app)
+        entity_buffer, unit_count, building_count, selected_unit_count, entity_motion = (
+            pack_entities(app)
+        )
         line_buffer, line_vertex_count, path_count = self._build_paths(app, (0, 0), 1.0)
         (
             projectile_shape_buffer,
             projectile_shape_count,
             projectile_line_buffer,
             projectile_line_vertex_count,
+            projectile_motion,
         ) = self._build_projectiles(app, (0, 0), 1.0)
         shape_buffer += projectile_shape_buffer
         shape_count += projectile_shape_count
@@ -309,6 +317,7 @@ class OpenGLFrameBuilder:
             framebuffer_size=framebuffer_size,
             pixel_scale=1.0,
             tick=simulation.tick,
+            interpolates=entity_motion or projectile_motion,
             terrain_count=self._terrain_count,
             terrain_shape_count=self._terrain_shape_count,
             unit_count=unit_count,
@@ -487,13 +496,14 @@ class OpenGLFrameBuilder:
         app: OpenGLRenderState,
         origin: tuple[int, int],
         tile_size: float,
-    ) -> tuple[bytes, int, bytes, int]:
+    ) -> tuple[bytes, int, bytes, int, bool]:
         """Pack projectile feedback into the normal GPU shape and line batches."""
 
         shapes = array("f")
         lines = array("f")
         simulation = app.simulation
         origin_x, origin_y = origin
+        interpolates = False
 
         def append_trajectory(points: tuple[Point, ...] | list[Point], color: FloatColor) -> None:
             for first, second in zip(points, points[1:], strict=False):
@@ -561,6 +571,7 @@ class OpenGLFrameBuilder:
                 origin_y + projectile.position.y * tile_size,
             )
             previous_position = app.previous_projectile_position(projectile.projectile_id)
+            interpolates = interpolates or previous_position != projectile.position
             previous_center = (
                 origin_x + previous_position.x * tile_size,
                 origin_y + previous_position.y * tile_size,
@@ -606,6 +617,7 @@ class OpenGLFrameBuilder:
             len(shapes) // SHAPE_FLOATS,
             line_buffer,
             len(line_buffer) // (4 * LINE_FLOATS),
+            interpolates,
         )
 
 
@@ -621,12 +633,14 @@ class OpenGLRenderer:
         self._context = context
         self._builder = OpenGLFrameBuilder()
         self._published: _PublishedFrame | None = None
+        self.battlefield_frame: tuple[int, float] | None = None
         self._feedback: GPUFeedback | None = None
         self._uploaded_frame: OpenGLFrame | None = None
         self._uploaded_terrain: bytes | None = None
         self._overlay_key: tuple[object, ...] | None = None
         self._overlay_tick: int | None = None
         self._overlay_regions: tuple[pygame.Rect, ...] = ()
+        self._overlay_metrics: PresentationMetrics | None = None
         self._overlay_surface: pygame.Surface | None = None
         self._overlay_texture: Any = None
         self._terrain_texture: Any = None
@@ -833,6 +847,16 @@ class OpenGLRenderer:
         self._published = published
         return frame
 
+    def refresh_metrics(self, app: OpenGLRenderState) -> None:
+        """Update status during cached frames without reading the simulation."""
+        metrics = app.presentation_metrics
+        surface = self._overlay_surface
+        if surface is None or metrics is self._overlay_metrics:
+            return
+        regions = app._draw_opengl_metrics(surface)
+        _write_overlay_regions(self._overlay_texture, surface, regions, surface.get_size())
+        self._overlay_metrics = metrics
+
     def render_cached(
         self,
         *,
@@ -918,6 +942,7 @@ class OpenGLRenderer:
             feedback()
             overlay()
             self._draw_minimap(published)
+            self.battlefield_frame = (frame.tick, alpha if frame.interpolates else 1.0)
         except OpenGLRendererError:
             raise
         except Exception as error:

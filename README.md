@@ -308,9 +308,10 @@ income per game second, including the developer bonus.
 Enable **Developer settings > Show AI income** to list each AI's balance and **(+N)** income
 below the player's resources in the upper-left panel. The displayed rate includes the AI income
 multiplier. This local display option starts OFF; turning it OFF hides the AI rows again.
-**Real FPS** uses rolling p99 completed-frame time; **Submit FPS** is an average diagnostic.
-Neither measures physical monitor scan-out. Performance requirements and acceptance workloads
-are defined in the [performance contract](docs/milestones/performance.md).
+The HUD shows **Real FPS** for battlefield updates and **Sim TPS** for completed simulation steps
+per wall-clock second. Settings also shows **Submit FPS** and simulation speed relative to 1x.
+The [performance contract](docs/milestones/performance.md#fps-and-rendering) defines the measurements
+and acceptance workloads.
 Native OpenGL keeps drawing the last completed world while simulation advances. Camera-key panning
 continues; orders, pause and saves take effect at the next complete simulation boundary. Display FPS
 can therefore remain high while an overloaded battle progresses more slowly than the chosen speed.

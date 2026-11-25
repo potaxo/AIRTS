@@ -7,10 +7,20 @@ native-Windows validation, repeated runs and artifact recording; packaging CI is
 
 ## FPS and rendering
 
-**Real FPS = 1000 / p99 completed-frame milliseconds.** Every 100 Real FPS gate requires p99 <=10 ms;
+The in-game **Real FPS** is 1000 divided by the rolling p99 interval between effective battlefield
+frames after presentation. A frame qualifies when it shows a new world tick or advances the
+interpolation phase of a batch with moving units, headings or projectiles. Camera-only changes and
+repeated cached snapshots do not advance that clock. An ongoing gap bounds the reported FPS until
+the next effective frame. **Sim TPS** uses completed simulation ticks per wall-clock second and
+reports progression relative to the 10 ticks/s of 1x. Pause, menus that suspend play, and world
+replacement clear the battlefield measurement window. **Submit FPS** is the average frame
+submission rate. OpenGL can refresh the metric text in cached frames through small overlay writes.
+
+The controlled rendering workloads' **Real FPS** is 1000 divided by p99 completed-frame
+milliseconds. Every 100 Real FPS gate requires p99 <=10 ms;
 sustained native-4K complex battle requires >=80 Real FPS (p99 <=12.5 ms) and reports 100 FPS as its
 optimization goal. Use [metrics](../../src/airts/presentation/metrics.py) and the
-[completed-frame probe](../../tests/performance/frame_pacing.py). Average Submit FPS is diagnostic.
+[completed-frame probe](../../tests/performance/frame_pacing.py).
 Commands, scheduled ticks, drawing and per-frame GPU completion stay inside consecutive samples;
 setup/JIT warm-up is outside timing. Tick budgets are separate. Never adjust thresholds/percentiles
 to pass a run. Offscreen/app FPS does not establish physical monitor scan-out.

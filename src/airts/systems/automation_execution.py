@@ -575,11 +575,12 @@ def drive_defend(
     station_distances = {
         key: simulation.entities[key].position.distance_to(parameters.stations[key])
         for key in automation.entity_ids
+        if simulation.assignments.get(key) == automation.automation_id
     }
     responding = tuple(
         key
-        for key in automation.entity_ids
-        if station_distances[key] <= simulation.DEFEND_RESPONSE_RADIUS
+        for key, distance in station_distances.items()
+        if distance <= simulation.DEFEND_RESPONSE_RADIUS
     )
     enemy_ids: dict[str, str | None] = {}
     if responding:
@@ -607,7 +608,7 @@ def drive_defend(
         )
         attacked = {
             e.entity_id: e.position
-            for key in automation.entity_ids
+            for key in station_distances
             if (e := simulation.entities[key]).last_attacker_id in enemies
             and e.last_attacked_tick is not None
             and simulation.tick - e.last_attacked_tick <= simulation.DEFEND_ATTACK_MEMORY_TICKS
@@ -632,11 +633,9 @@ def drive_defend(
                 ):
                     enemy_ids[key] = None
     # Dispatch front ranks first so early arrivals do not seal off deeper stations.
-    ordered = sorted(automation.entity_ids, key=lambda key: (station_distances[key], key))
+    ordered = sorted(station_distances, key=lambda key: (station_distances[key], key))
     destinations: dict[str, Point] = {}
     for key in ordered:
-        if simulation.assignments.get(key) != automation.automation_id:
-            continue
         entity = simulation.entities[key]
         station = parameters.stations[key]
         station_distance = station_distances[key]

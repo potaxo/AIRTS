@@ -6,7 +6,7 @@ import numpy as np
 
 from airts.navigation.collision._compile import compile_collision
 from airts.navigation.collision.geometry import _pair_normal, _root, _solve_step, _static_planes
-from airts.navigation.collision.neighbors import _neighbors, _steering_obstacles
+from airts.navigation.collision.neighbors import _BACKWARD, _FORWARD, _neighbors, _opposing_traffic
 from airts.navigation.collision.release import _release_contacts
 from airts.navigation.collision.returning import (
     _probe_opening_return,
@@ -58,10 +58,14 @@ def advance_positions(
     links = np.full(len(positions), -1, dtype=np.int64)
     goal_heads = np.full(columns * rows, -1, dtype=np.int64)
     goal_links = np.full(len(positions), -1, dtype=np.int64)
+    bucket_directions = np.zeros(columns * rows, dtype=np.int64)
+    directions = np.zeros(len(positions), dtype=np.int64)
+    goal_distances = np.empty(len(positions), dtype=np.float64)
     headings = np.zeros_like(positions)
     identity_directions = np.zeros_like(positions)
     preferred = np.zeros_like(positions)
     driven = active.copy()
+    all_directions = 0
     for key in range(len(positions)):
         identity_directions[key, 0] = sqrt(key + 1.0) * cos(key * 2.399963229728653)
         identity_directions[key, 1] = sqrt(key + 1.0) * sin(key * 2.399963229728653)
@@ -75,8 +79,14 @@ def advance_positions(
         )
         goal_links[key], goal_heads[goal_bucket] = goal_heads[goal_bucket], key
         gx, gy = goals[key, 0] - x, goals[key, 1] - y
-        length = max(hypot(gx, gy), 1e-9)
+        goal_distances[key] = hypot(gx, gy)
+        length = max(goal_distances[key], 1e-9)
         headings[key, 0], headings[key, 1] = gx / length, gy / length
+        if active[key] and length > 3.0:
+            direction = _FORWARD if headings[key, direction_axis] >= 0 else _BACKWARD
+            directions[key] = direction
+            bucket_directions[bucket] |= direction
+            all_directions |= direction
     scratch = np.empty(len(positions), dtype=np.int64)
     static_capacity = (ceil((maximum_step + maximum_radius) * 2) + 2) ** 2
     planes = np.empty((len(positions) + static_capacity + 4, 3), dtype=np.float64)
@@ -87,13 +97,13 @@ def advance_positions(
     coincident = np.zeros(len(positions), dtype=np.bool_)
     demands = np.zeros(len(positions), dtype=np.bool_) if stalled is None else stalled.copy()
     yielded = np.zeros(len(positions), dtype=np.bool_)
+    glancing = np.zeros(len(positions), dtype=np.bool_)
     regions = np.arange(len(positions), dtype=np.int64)
     recovery_modes = np.zeros(len(positions), dtype=np.int64)
     recovery_leaders = np.full(len(positions), -1, dtype=np.int64)
     geometric_leaders = np.zeros(len(positions), dtype=np.bool_)
     joint_probe = np.zeros(len(positions), dtype=np.bool_)
     strong = active
-    steering_stationary = stationary
     if (
         recovering is not None
         and recovery_ticks is not None
@@ -163,14 +173,6 @@ def advance_positions(
             elif not active[key]:
                 demands[key] = False
         driven = active.copy()
-    has_stationary = bool(steering_stationary.any())
-    positive = negative = False
-    for key in range(len(positions)):
-        if strong[key]:
-            if headings[key, direction_axis] >= 0:
-                positive = True
-            else:
-                negative = True
     for key in order:
         if recovery_modes[regions[key]] == 2:
             # Joint return owns this body's complete displacement. Its ordinary
@@ -219,32 +221,28 @@ def advance_positions(
         if stationary[key]:
             step = min(step, speeds[key] * 0.5)
         vx, vy = dx / distance * step, dy / distance * step
-        opposing, idle = _steering_obstacles(
-            key,
-            x,
-            y,
-            dx,
-            dy,
-            distance,
-            step,
-            positions,
-            goals,
-            radii,
-            headings,
-            strong,
-            steering_stationary,
-            heads,
-            links,
-            columns,
-            rows,
-            bucket_size,
-            direction_axis,
-            positive and negative,
-            has_stationary,
-        )
-        # A weak return leader is geometric participation, not a new travel
-        # order. Keep its existing route preference through the released lane.
-        if strong[key] and (opposing or idle):
+        direction = directions[key]
+        if (
+            direction
+            and all_directions == _FORWARD | _BACKWARD
+            and _opposing_traffic(
+                key,
+                x,
+                y,
+                dx,
+                dy,
+                positions,
+                headings,
+                directions,
+                bucket_directions,
+                heads,
+                links,
+                columns,
+                rows,
+                bucket_size,
+                all_directions ^ direction,
+            )
+        ):
             vx, vy = (vx - vy) * 0.707106781, (vx + vy) * 0.707106781
         count = _static_planes(x, y, radii[key], speeds[key], obstacles, planes)
         mx, my, feasible = _solve_step(vx, vy, speeds[key], planes, count)
@@ -281,6 +279,7 @@ def advance_positions(
             preferred[key, 0], preferred[key, 1] = mx, my
 
     has_motion = bool(active.any()) or bool(np.any(preferred != 0.0))
+    relay_pressure = False
     # Predict only local contact corrections. Two sweeps transmit pressure along
     # short queues without recursive pushing; longer chains advance over ticks.
     for _iteration in range(2):
@@ -352,17 +351,11 @@ def advance_positions(
                 deficit = required - relative
                 if deficit <= 1e-9:
                     continue
+                if stationary[key] and stationary[other] and (yielded[key] or yielded[other]):
+                    relay_pressure = True
                 # Cancel recovery only under actual approaching contact pressure,
                 # not merely because a moving neighbor is inside the envelope.
                 for member, incoming in ((key, other), (other, key)):
-                    member_offset = hypot(
-                        goals[member, 0] - positions[member, 0],
-                        goals[member, 1] - positions[member, 1],
-                    )
-                    incoming_offset = hypot(
-                        goals[incoming, 0] - positions[incoming, 0],
-                        goals[incoming, 1] - positions[incoming, 1],
-                    )
                     if (
                         stationary[member]
                         and not yielded[member]
@@ -372,52 +365,32 @@ def advance_positions(
                                 driven[incoming]
                                 and (
                                     not driven[member]
-                                    or incoming_offset > member_offset + radii[member]
+                                    or goal_distances[incoming]
+                                    > goal_distances[member] + radii[member]
                                 )
                             )
                         )
                     ):
                         preferred[member, 0] = preferred[member, 1] = 0.0
-                        if driven[incoming]:
-                            # Bounded lateral yielding opens a passing lane instead
-                            # of dragging a resting body along the whole route.
-                            side = (positions[member, 1] - positions[incoming, 1]) * headings[
-                                incoming, 0
-                            ] - (positions[member, 0] - positions[incoming, 0]) * headings[
-                                incoming, 1
-                            ]
-                            side_sign = (
-                                1.0
-                                if side > 1e-9 or (abs(side) <= 1e-9 and member % 2 == 0)
-                                else -1.0
-                            )
-                            # Opening a passing lane is voluntary geometric
-                            # avoidance, not an impact impulse. Mass biases the
-                            # normal correction below; it must not slow this
-                            # maneuver and fold a held formation across anchors.
-                            preferred[member, 0] = (
-                                -headings[incoming, 1] * speeds[member] * 0.4 * side_sign
-                            )
-                            preferred[member, 1] = (
-                                headings[incoming, 0] * speeds[member] * 0.4 * side_sign
-                            )
-                        count = _static_planes(
-                            positions[member, 0],
-                            positions[member, 1],
-                            radii[member],
-                            speeds[member],
-                            obstacles,
-                            planes,
-                        )
-                        mx, my, feasible = _solve_step(
-                            preferred[member, 0],
-                            preferred[member, 1],
-                            speeds[member] * 0.5,
-                            planes,
-                            count,
-                        )
-                        preferred[member, 0] = mx if feasible else 0.0
-                        preferred[member, 1] = my if feasible else 0.0
+                        if strong[incoming]:
+                            # Give a direct hit a deterministic separating
+                            # direction even when both centers are in line.
+                            hx, hy = headings[incoming]
+                            side = (positions[member, 1] - positions[incoming, 1]) * hx - (
+                                positions[member, 0] - positions[incoming, 0]
+                            ) * hy
+                            kick = speeds[member] * 0.4
+                            if side < -1e-9 or (abs(side) <= 1e-9 and member % 2 != 0):
+                                kick = -kick
+                            preferred[member, 0], preferred[member, 1] = -hy * kick, hx * kick
+                            if masses[incoming] < masses[member] and not glancing[incoming]:
+                                # The lighter mover absorbs the deflection
+                                # instead of dragging the heavier body along.
+                                ix, iy = preferred[incoming]
+                                turn = 0.707106781 if kick < 0 else -0.707106781
+                                preferred[incoming, 0] = ix * 0.707106781 - iy * turn
+                                preferred[incoming, 1] = iy * 0.707106781 + ix * turn
+                                glancing[incoming] = True
                         driven[member] = True
                         yielded[member] = True
                         # Successful yielding is still incoming contact pressure.
@@ -521,6 +494,8 @@ def advance_positions(
         geometric_leaders,
         targets,
         strong,
+        pressure,
+        relay_pressure,
     )
     checks += seed_checks
     checks += _return_anchors(
@@ -635,8 +610,9 @@ def advance_positions(
             clearance += nx * (result[other, 0] - positions[other, 0]) + ny * (
                 result[other, 1] - positions[other, 1]
             )
-            planes[count] = (nx, ny, clearance)
-            count += 1
+            if clearance > -limit - 1e-8:
+                planes[count] = (nx, ny, clearance)
+                count += 1
         mx, my, feasible = _solve_step(vx, vy, limit, planes, count)
         if feasible and hypot(vx, vy) > 1e-9 and mx * vx + my * vy < 0.9 * (vx * vx + vy * vy):
             step = hypot(vx, vy)

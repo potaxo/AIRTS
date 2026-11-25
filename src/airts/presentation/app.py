@@ -185,7 +185,6 @@ class AirtsApp:
         self.building_line_draft: BuildingLineDraft | None = None
         self.reclaim_mode = False
         self.paused = False
-        self.real_fps = 0.0
         self.presentation_metrics = PresentationMetrics()
         self.render_alpha = 1.0
         self._previous_entity_positions: dict[str, Point] = {}
@@ -288,6 +287,9 @@ class AirtsApp:
         self._simulation_accumulator = 0.0
         self._presentation_publish_pending = False
         self._input_entities = ()
+        self._software_draw_key = None
+        self._software_draw_tick = None
+        self._software_deferred_tick = None
         self._previous_entity_positions = {
             entity_id: entity.position for entity_id, entity in self.simulation.entities.items()
         }
@@ -489,6 +491,8 @@ class AirtsApp:
             self.ui.small_font = pygame.font.Font(None, 19)
             clock = pygame.time.Clock()
             profiler = PresentationProfiler()
+            sampled_world = self.simulation
+            completed_tick = sampled_world.tick
             self._simulation_accumulator = 0.0
             self._presentation_publish_pending = False
             running = True
@@ -531,6 +535,14 @@ class AirtsApp:
                         screen = pygame.display.set_mode(target_size, self.DISPLAY_FLAGS)
                     self.resize_layout(target_size)
                 self._move_camera_from_keys(elapsed)
+                if self.simulation is not sampled_world:
+                    sampled_world = self.simulation
+                    profiler.reset_battlefield()
+                if self._tick_future is None:
+                    completed_tick = self.simulation.tick
+                battlefield_running = (
+                    self._tick_future is not None or self._simulation_can_advance()
+                )
                 simulation_started = perf_counter()
                 self._advance_simulation_frame(elapsed)
                 simulation_ms = (perf_counter() - simulation_started) * 1000.0
@@ -538,6 +550,7 @@ class AirtsApp:
                     simulation_ms = self._completed_tick_ms
                 render_started = perf_counter()
                 if opengl_renderer is not None:
+                    opengl_renderer.refresh_metrics(self)
                     if self._tick_future is not None:
                         opengl_renderer.render_cached(
                             origin=self.map_origin,
@@ -550,8 +563,12 @@ class AirtsApp:
                             (self.right_panel_rect.right, self.left_panel_rect.bottom),
                         )
                         self._published_world = True
+                    battlefield_frame = opengl_renderer.battlefield_frame
                 else:
                     self._draw(screen)
+                    completed_tick = self.simulation.tick
+                    drawn_tick = self._software_draw_tick
+                    battlefield_frame = (drawn_tick, 1.0) if drawn_tick is not None else None
                 render_ms = (perf_counter() - render_started) * 1000.0
                 present_started = perf_counter()
                 pygame.display.flip()
@@ -565,8 +582,9 @@ class AirtsApp:
                     render_ms=render_ms,
                     present_ms=present_ms,
                     simulation_ms=simulation_ms,
+                    battlefield_frame=battlefield_frame,
+                    simulation_tick=completed_tick if battlefield_running else None,
                 )
-                self.real_fps = self.presentation_metrics.one_percent_low_fps
                 frames += 1
         finally:
             try:
@@ -580,17 +598,20 @@ class AirtsApp:
             finally:
                 gc.set_threshold(*gc_thresholds)
 
+    def _simulation_can_advance(self) -> bool:
+        return not (
+            self.paused
+            or self.save_panel.open
+            or self.lobby is not None
+            or self.simulation.match_result is not None
+        )
+
     def _advance_simulation_frame(self, elapsed: float) -> None:
         """Present and poll input between fixed ticks, retaining all admitted time debt."""
         if self._tick_future is not None:
             self._simulation_accumulator += elapsed * self.game_speed
             return
-        if (
-            self.paused
-            or self.save_panel.open
-            or self.lobby is not None
-            or self.simulation.match_result is not None
-        ):
+        if not self._simulation_can_advance():
             self._simulation_accumulator = 0.0
             self._presentation_publish_pending = False
             self.render_alpha = 1.0
@@ -2119,6 +2140,15 @@ class AirtsApp:
             self._draw_interface(screen, gpu_contacts=True)
         finally:
             self._frame_selected_entities = None
+
+    def _draw_opengl_metrics(self, screen: pygame.Surface) -> tuple[pygame.Rect, ...]:
+        """Refresh the small status rows using only main-thread presentation state."""
+        if self.lobby is not None or self.save_panel.open:
+            return ()
+        status = automations.draw_battlefield_status(self, screen)
+        if self.settings_open and not self.developer_settings_open:
+            return status, menus.draw_performance_metrics(self, screen)
+        return (status,)
 
     def _draw_opengl_partial_overlay(
         self,

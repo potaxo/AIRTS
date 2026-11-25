@@ -199,7 +199,10 @@ def coordinate_shared_defend_stations(
             for automation in automations
             for key in automation.entity_ids
             if key in simulation.entities
-            and simulation.assignments.get(key) == automation.automation_id
+            and (
+                simulation.assignments.get(key) == automation.automation_id
+                or simulation.suspended_assignments.get(key) == automation.automation_id
+            )
         }
     )
     if not ids:
@@ -247,7 +250,10 @@ def coordinate_shared_defend_stations(
         parameters.deployment_slots = slots
         parameters.assembly_radius = assembly_radius
         for key, station in parameters.stations.items():
-            if previous.get(key) != station:
+            if (
+                previous.get(key) != station
+                and simulation.assignments.get(key) == automation.automation_id
+            ):
                 entity = simulation.entities[key]
                 entity.clear_recovery_request()
                 entity.defend_arrived = False

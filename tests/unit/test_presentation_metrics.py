@@ -52,6 +52,60 @@ def test_presentation_profiler_reports_stutter_sensitive_real_fps() -> None:
     assert metrics.one_percent_low_fps < metrics.submit_fps / 4.0
 
 
+def test_cached_frames_count_toward_submission_only_and_expose_an_ongoing_freeze() -> None:
+    profiler = PresentationProfiler()
+    for frame in range(129):
+        tick = frame // 32
+        metrics = profiler.record(
+            presented_at=frame / 128,
+            frame_ms=1000 / 128,
+            render_ms=1.0,
+            present_ms=0.0,
+            simulation_ms=0.0,
+            battlefield_frame=(tick, 1.0),
+            simulation_tick=tick,
+        )
+    assert metrics.submit_fps == pytest.approx(128.0)
+    assert metrics.battlefield_fps == pytest.approx(4.0)
+    assert metrics.simulation_tps == pytest.approx(4.0)
+
+    for frame in range(129, 385):
+        metrics = profiler.record(
+            presented_at=frame / 128,
+            frame_ms=1000 / 128,
+            render_ms=1.0,
+            present_ms=0.0,
+            simulation_ms=0.0,
+            battlefield_frame=(4, 1.0),
+            simulation_tick=4,
+        )
+    assert metrics.submit_fps == pytest.approx(128.0)
+    assert metrics.battlefield_fps == pytest.approx(0.5)
+    assert metrics.simulation_tps == 0.0
+
+
+def test_advancing_interpolation_counts_and_pause_clears_the_battlefield_window() -> None:
+    profiler = PresentationProfiler()
+    for frame in range(129):
+        tick, subframe = divmod(frame, 16)
+        metrics = profiler.record(
+            presented_at=frame / 128,
+            frame_ms=1000 / 128,
+            render_ms=1.0,
+            present_ms=0.0,
+            simulation_ms=0.0,
+            battlefield_frame=(tick, subframe / 16),
+            simulation_tick=tick,
+        )
+    assert metrics.battlefield_fps == pytest.approx(128.0)
+    assert metrics.simulation_tps == pytest.approx(8.0)
+
+    paused = profiler.record(
+        presented_at=1.01, frame_ms=10.0, render_ms=1.0, present_ms=0.0, simulation_ms=0.0
+    )
+    assert paused.battlefield_fps == paused.simulation_tps == 0.0
+
+
 def test_real_fps_acceptance_rule_remains_inverse_p99_frame_time() -> None:
     frame_times_ms = [5.0] * 190 + [30.0] * 10
 

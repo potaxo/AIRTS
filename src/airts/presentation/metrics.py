@@ -1,4 +1,4 @@
-"""Rolling frame-pacing measurements and the Real FPS acceptance metric."""
+"""Rolling battlefield and frame submission measurements."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ class PresentationMetrics:
     render_p95_ms: float = 0.0
     present_p95_ms: float = 0.0
     simulation_p95_ms: float = 0.0
+    battlefield_fps: float = 0.0
+    simulation_tps: float = 0.0
 
 
 class PresentationProfiler:
@@ -42,8 +44,20 @@ class PresentationProfiler:
         self._render_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
         self._present_ms: deque[float] = deque(maxlen=self.MAX_SAMPLE_COUNT)
         self._simulation_samples: deque[tuple[float, float]] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._simulation_ticks: deque[tuple[float, int]] = deque(maxlen=self.MAX_SAMPLE_COUNT)
+        self._battlefield_intervals: deque[tuple[float, float]] = deque(
+            maxlen=self.MAX_SAMPLE_COUNT
+        )
+        self._last_battlefield_frame: tuple[int, float] | None = None
+        self._last_battlefield_at = 0.0
         self._last_refresh = 0.0
         self.metrics = PresentationMetrics()
+
+    def reset_battlefield(self) -> None:
+        self._simulation_ticks.clear()
+        self._battlefield_intervals.clear()
+        self._last_battlefield_frame = None
+        self._last_refresh = float("-inf")
 
     def record(
         self,
@@ -53,6 +67,8 @@ class PresentationProfiler:
         render_ms: float,
         present_ms: float,
         simulation_ms: float,
+        battlefield_frame: tuple[int, float] | None = None,
+        simulation_tick: int | None = None,
     ) -> PresentationMetrics:
         self._presented_at.append(presented_at)
         self._frame_ms.append(frame_ms)
@@ -60,6 +76,19 @@ class PresentationProfiler:
         self._present_ms.append(present_ms)
         if simulation_ms > 0.0:
             self._simulation_samples.append((presented_at, simulation_ms))
+        if simulation_tick is None:
+            if self._simulation_ticks:
+                self.reset_battlefield()
+        else:
+            self._simulation_ticks.append((presented_at, simulation_tick))
+            previous = self._last_battlefield_frame
+            if battlefield_frame is not None and (previous is None or battlefield_frame > previous):
+                if previous is not None:
+                    self._battlefield_intervals.append(
+                        (presented_at, (presented_at - self._last_battlefield_at) * 1000.0)
+                    )
+                self._last_battlefield_frame = battlefield_frame
+                self._last_battlefield_at = presented_at
         while (
             len(self._presented_at) > 1
             and presented_at - self._presented_at[0] > self.SAMPLE_SECONDS
@@ -73,6 +102,16 @@ class PresentationProfiler:
             and presented_at - self._simulation_samples[0][0] > self.SAMPLE_SECONDS
         ):
             self._simulation_samples.popleft()
+        while (
+            len(self._simulation_ticks) > 1
+            and presented_at - self._simulation_ticks[0][0] > self.SAMPLE_SECONDS
+        ):
+            self._simulation_ticks.popleft()
+        while (
+            self._battlefield_intervals
+            and presented_at - self._battlefield_intervals[0][0] > self.SAMPLE_SECONDS
+        ):
+            self._battlefield_intervals.popleft()
         if presented_at - self._last_refresh < self.REFRESH_SECONDS:
             return self.metrics
         self._last_refresh = presented_at
@@ -80,6 +119,20 @@ class PresentationProfiler:
             self._presented_at[-1] - self._presented_at[0] if len(self._presented_at) > 1 else 0.0
         )
         submit_fps = (len(self._presented_at) - 1) / elapsed if elapsed > 0.0 else 0.0
+        battlefield_p99 = _percentile(
+            (gap for _, gap in self._battlefield_intervals), REAL_FPS_FRAME_TIME_PERCENTILE
+        )
+        if self._last_battlefield_frame is not None:
+            # During an ongoing freeze the next real interval is already at
+            # least this long, even if the renderer keeps submitting frames.
+            battlefield_p99 = max(
+                battlefield_p99, (presented_at - self._last_battlefield_at) * 1000.0
+            )
+        simulation_tps = 0.0
+        if self._simulation_ticks:
+            first_at, first_tick = self._simulation_ticks[0]
+            if presented_at > first_at and simulation_tick is not None:
+                simulation_tps = (simulation_tick - first_tick) / (presented_at - first_at)
         self.metrics = PresentationMetrics(
             submit_fps=submit_fps,
             one_percent_low_fps=real_fps_from_frame_times(self._frame_ms),
@@ -90,6 +143,8 @@ class PresentationProfiler:
                 deque(value for _, value in self._simulation_samples),
                 0.95,
             ),
+            battlefield_fps=1000.0 / battlefield_p99 if battlefield_p99 > 0.0 else 0.0,
+            simulation_tps=simulation_tps,
         )
         return self.metrics
 

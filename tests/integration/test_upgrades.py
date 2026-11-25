@@ -24,8 +24,6 @@ from airts.contracts.commands import (
     RepairBuildingCommand,
     SetDeveloperModeCommand,
     UpgradeEntityCommand,
-    command_from_dict,
-    command_to_dict,
 )
 from airts.contracts.events import EventType
 from airts.contracts.spatial import Point
@@ -477,18 +475,6 @@ def test_saves_reject_incoherent_upgrade_state(case: str) -> None:
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": world.game_map.to_dict(), "state": state}
         )
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        UpgradeEntityCommand("extractor"),
-        UpgradeEntityCommand("extractor", queued=True),
-        CancelUpgradeCommand("extractor", "enemy"),
-    ],
-)
-def test_upgrade_command_codec(command: UpgradeEntityCommand | CancelUpgradeCommand) -> None:
-    assert command_from_dict(command_to_dict(command)) == command
 
 
 def test_selection_buttons_start_cancel_disable_and_display_max_tier() -> None:

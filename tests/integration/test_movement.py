@@ -859,6 +859,41 @@ def test_contact_pressure_transmits_through_a_short_stationary_queue() -> None:
     assert settled["entities"] == simulation.snapshot()["entities"]
 
 
+def test_scout_can_push_a_friendly_queue_through_an_open_throat() -> None:
+    simulation = Simulation(
+        load_map_data(
+            {
+                "id": "friendly_queue",
+                "name": "Friendly queue",
+                "width": 32,
+                "height": 12,
+                "terrain": {
+                    "default": "grass",
+                    "rectangles": [[0, 0, 9, 5, "rock"], [0, 6, 9, 6, "rock"]],
+                },
+                "entities": [{"id": "a", "kind": "scout", "position": [2.5, 5.5]}]
+                + [
+                    {"id": f"b{i:02d}", "kind": "heavy_tank", "position": [4.5 + i * 0.94, 5.5]}
+                    for i in range(6)
+                ],
+            }
+        )
+    )
+    target = Point(27.5, 5.5)
+    assert simulation.execute(MoveCommand(("a",), target)).accepted
+    _advance_with_clearance(simulation, 240)
+
+    assert simulation.entities["a"].position.distance_to(target) <= 0.05
+    for key, entity in simulation.entities.items():
+        if key != "a":
+            assert entity.state is UnitState.IDLE and not entity.path
+    assert not any(
+        event.subject_id != "a"
+        and event.event_type in {EventType.MOVEMENT_STARTED, EventType.MOVEMENT_COMPLETED}
+        for event in simulation.events.events
+    )
+
+
 @pytest.mark.parametrize("offset", [0.0, 0.58], ids=["identical-centers", "slight-overlap"])
 def test_initial_overlap_recovers_deterministically_without_new_orders(offset: float) -> None:
     simulations = [_contact_queue(3), _contact_queue(3)]

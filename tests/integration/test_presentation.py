@@ -34,8 +34,9 @@ from airts.contracts.commands import (
 from airts.contracts.spatial import Point, rectangle_region
 from airts.navigation.collision.geometry import collision_radius
 from airts.presentation.app import AirtsApp
+from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.rendering import RendererBackend
-from airts.presentation.ui import automations, selection
+from airts.presentation.ui import automations, menus, selection
 from airts.simulation import Simulation
 from airts.systems.movement import position_clear
 from airts.world.entities import Projectile
@@ -1375,7 +1376,9 @@ def test_settings_menu_requests_a_higher_explicit_resolution() -> None:
 
 def test_info_panel_displays_stutter_sensitive_real_fps() -> None:
     app = AirtsApp(builder_factory_simulation())
-    app.real_fps = 41.6
+    app.presentation_metrics = PresentationMetrics(
+        battlefield_fps=4.4, simulation_tps=4.5, submit_fps=89.0, one_percent_low_fps=45.8
+    )
     pygame.font.init()
     app.ui.font = pygame.font.Font(None, 24)
     app.ui.small_font = pygame.font.Font(None, 19)
@@ -1383,9 +1386,12 @@ def test_info_panel_displays_stutter_sensitive_real_fps() -> None:
 
     with patch.object(app.ui, "small_text", wraps=app.ui.small_text) as small_text:
         automations.draw_panel(app, surface)
+        menus.draw_settings(app, surface)
 
     rendered = [call.args[1] for call in small_text.call_args_list]
-    assert any("Real FPS   42" in line for line in rendered)
+    assert "Real FPS    4 | Sim 4.5 TPS" in rendered
+    assert "Real FPS 4  Submit FPS 89" in rendered
+    assert "World 4.5 TPS (45% of 1x)" in rendered
     pygame.font.quit()
 
 

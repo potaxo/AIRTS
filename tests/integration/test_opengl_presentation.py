@@ -17,6 +17,7 @@ from airts.contracts.commands import MoveCommand
 from airts.contracts.spatial import Point
 from airts.presentation.app import AirtsApp
 from airts.presentation.gpu_shapes import SHAPE_FLOATS
+from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.opengl_renderer import (
     OpenGLFrameBuilder,
     OpenGLRenderer,
@@ -216,9 +217,11 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert simulation.execute(MoveCommand(eastbound, Point(70.5, 30.5))).accepted
     assert simulation.execute(MoveCommand(westbound, Point(9.5, 30.5))).accepted
 
+    app.render_alpha = 0.5
     with patch.object(app, "_draw_opengl_overlay"):
         frame = renderer.render(app, app.WINDOW_SIZE)
         renderer.render(app, app.WINDOW_SIZE)
+    assert renderer.battlefield_frame == (frame.tick, 1.0)
 
     terrain_draw, shape_draw, line_draw, overlay_draw = vertex_arrays[:4]
     terrain_draw.render.assert_called_with(
@@ -270,10 +273,20 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert programs[0]["terrain_origin"].value == app.map_origin
     assert programs[0]["terrain_tile_size"].value == app.tile_size
     assert renderer.info["renderer"] == "test renderer"
+    assert renderer.battlefield_frame == (frame.tick, 1.0)
 
     # An advancing world is never consulted by the worker-time draw path.
     # Every completed entity record and feedback buffer remains available.
     simulation.entities.clear()
+    app.presentation_metrics = PresentationMetrics(battlefield_fps=4.0, simulation_tps=4.5)
+    writes = texture.write.call_count
+    renderer.refresh_metrics(app)
+    renderer.refresh_metrics(app)
+    assert texture.write.call_count == writes + 1
+    assert texture.write.call_args.kwargs["viewport"][2:] == (
+        app.left_panel_rect.right - 24,
+        22,
+    )
     assert renderer._feedback is not None
     with (
         patch.object(renderer._builder, "build", side_effect=AssertionError("live world read")),
@@ -289,6 +302,7 @@ def test_opengl_renderer_batches_scene_primitives_and_releases_gpu_resources() -
     assert cached.entity_buffer is transformed.entity_buffer
     assert cached.unit_count == transformed.unit_count
     assert cached.building_count == transformed.building_count
+    assert renderer.battlefield_frame == (frame.tick, 1.0)
 
     renderer.release()
 
@@ -305,10 +319,10 @@ def test_fps_sampling_does_not_invalidate_the_full_native_overlay(
     """Clock noise must not upload a 4K RGBA surface when no visible state changed."""
 
     app = _native_four_k_app(Simulation(make_map(1)), ("unit_01",))
-    app.real_fps = 96.0
+    app.presentation_metrics = PresentationMetrics(battlefield_fps=96.0)
     initial_key = app._opengl_overlay_key()
 
-    app.real_fps = 104.0
+    app.presentation_metrics = PresentationMetrics(battlefield_fps=104.0)
 
     assert app._opengl_overlay_key() == initial_key
 
@@ -470,7 +484,7 @@ def test_large_enemy_selection_keeps_all_units_and_highlights_them(teams: bool) 
         ]
     app = AirtsApp(Simulation(load_map_data(data)))
     app.selected_entities = {f"enemy_{i}" for i in range(130)}
-    packed, units, buildings, selected = pack_entities(app)
+    packed, units, buildings, selected, _ = pack_entities(app)
     assert units == 131
     assert buildings == 0 and selected == 130
     values = array("f")
@@ -600,8 +614,10 @@ def test_gpu_interpolates_fixed_tick_motion_without_rebuilding_the_frame() -> No
     try:
         with patch.object(app, "_draw_opengl_overlay"):
             rendered = renderer.render(app, DISPLAY_SIZE)
+            assert renderer.battlefield_frame == (rendered.tick, 0.5)
             app.render_alpha = 0.9
             rerendered = renderer.render(app, DISPLAY_SIZE)
+            assert renderer.battlefield_frame == (rendered.tick, 0.9)
     finally:
         renderer.release()
 

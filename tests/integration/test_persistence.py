@@ -275,14 +275,15 @@ def test_developer_mode_save_retains_partial_second_and_replays(
     assert restored.ai_income_multiplier == 5
     assert restored.developer_income_ticks == 7
     assert restored.export_state() == simulation.export_state()
+    ordinary_income = EntityKind.COMMAND_CENTER.profile.income_per_second
     for instance in (simulation, restored):
         instance.advance(2)
         assert instance.resources["player"] == balance
         instance.advance()
         assert instance.resources["player"] == balance + 2000
         assert instance.execute(SetDeveloperModeCommand(False)).accepted
-        instance.advance(20)
-        assert instance.resources["player"] == balance + 2000
+        instance.advance(2 * instance.TICKS_PER_SECOND)
+        assert instance.resources["player"] == balance + 2000 + 2 * ordinary_income
     assert restored.export_state() == simulation.export_state()
     assert run_replay(capture_replay(simulation)).export_state() == simulation.export_state()
 
@@ -592,7 +593,7 @@ def test_current_save_requires_explicit_return_phase_fields(field: str) -> None:
     simulation = hold_contact_simulation()
     state = simulation.export_state()
     state["entities"]["holder"].pop(field)
-    with pytest.raises(PersistenceError, match="required in v11"):
+    with pytest.raises(PersistenceError, match=rf"entity\.{field} is required"):
         load_simulation_data(
             {"schema": SAVE_SCHEMA, "map": simulation.game_map.to_dict(), "state": state}
         )

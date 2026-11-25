@@ -9,6 +9,9 @@ import pygame
 from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
+from airts.simulation import Simulation
+
+_SETTINGS_HEIGHT = 230
 
 
 class MenusView(Protocol):
@@ -21,6 +24,7 @@ class MenusView(Protocol):
     developer_settings_open: bool
     show_ai_income: bool
     game_speed: float
+    paused: bool
 
     @property
     def ai_income_multiplier(self) -> int: ...
@@ -29,14 +33,49 @@ class MenusView(Protocol):
     def developer_mode(self) -> bool: ...
 
 
+def draw_performance_metrics(view: MenusView, screen: pygame.Surface) -> pygame.Rect:
+    x = view.command_bar_rect.x + 24
+    y = view.command_bar_rect.y - _SETTINGS_HEIGHT - 6 + 62
+    region = pygame.Rect(x, y, 248, 79)
+    screen.fill(theme.PANEL, region)
+    metrics = view.presentation_metrics
+    view.ui.small_text(
+        screen,
+        f"Frame p95 {metrics.frame_p95_ms:5.1f} ms  Present {metrics.present_p95_ms:5.1f} ms",
+        (x, y),
+        theme.MUTED,
+    )
+    view.ui.small_text(
+        screen,
+        f"Render {metrics.render_p95_ms:5.1f} ms  Sim {metrics.simulation_p95_ms:5.1f} ms",
+        (x, y + 20),
+        theme.MUTED,
+    )
+    real_fps = "--" if view.paused else f"{metrics.battlefield_fps:.0f}"
+    view.ui.small_text(
+        screen,
+        f"Real FPS {real_fps}  Submit FPS {metrics.submit_fps:.0f}",
+        (x, y + 40),
+        theme.SUCCESS,
+    )
+    tps = metrics.simulation_tps
+    speed = (
+        "Paused"
+        if view.paused
+        else f"World {tps:.1f} TPS ({tps / Simulation.TICKS_PER_SECOND:.0%} of 1x)"
+    )
+    view.ui.small_text(screen, speed, (x, y + 60), theme.MUTED)
+    return region
+
+
 def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
     if view.developer_settings_open:
         draw_developer_settings(view, screen)
         return
     x = view.command_bar_rect.x + 14
-    y = view.command_bar_rect.y - 216
+    y = view.command_bar_rect.y - _SETTINGS_HEIGHT - 6
     view._settings_buttons.clear()
-    theme.panel(screen, pygame.Rect(x, y, 268, 210))
+    theme.panel(screen, pygame.Rect(x, y, 268, _SETTINGS_HEIGHT))
     view.ui.small_text(
         screen,
         f"Resolution {view.window_size[0]} x {view.window_size[1]}",
@@ -48,26 +87,8 @@ def draw_settings(view: MenusView, screen: pygame.Surface) -> None:
     view.ui.button(screen, lower, "Lower")
     view.ui.button(screen, higher, "Higher")
     view._settings_buttons.extend(((lower, "resolution_lower"), (higher, "resolution_higher")))
-    metrics = view.presentation_metrics
-    view.ui.small_text(
-        screen,
-        f"Frame p95 {metrics.frame_p95_ms:5.1f} ms  Present {metrics.present_p95_ms:5.1f} ms",
-        (x + 10, y + 62),
-        theme.MUTED,
-    )
-    view.ui.small_text(
-        screen,
-        f"Render {metrics.render_p95_ms:5.1f} ms  Sim {metrics.simulation_p95_ms:5.1f} ms",
-        (x + 10, y + 82),
-        theme.MUTED,
-    )
-    view.ui.small_text(
-        screen,
-        f"Real FPS {metrics.one_percent_low_fps:4.0f}  Submit FPS {metrics.submit_fps:4.0f}",
-        (x + 10, y + 102),
-        theme.SUCCESS,
-    )
-    y += 122
+    draw_performance_metrics(view, screen)
+    y += 142
     for action, label in (
         ("developer_settings", "Developer settings >"),
         ("saves", "Save manager"),

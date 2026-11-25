@@ -7,6 +7,7 @@ import pytest
 from airts.contracts.commands import (
     AttackCommand,
     CancelAutomationCommand,
+    CancelUpgradeCommand,
     Command,
     CreateConstructionCommand,
     CreateDefendCommand,
@@ -35,6 +36,7 @@ from airts.contracts.commands import (
     SetProductionDefenseCommand,
     SetSelectionCommand,
     StopCommand,
+    UpgradeEntityCommand,
     command_from_dict,
     command_to_dict,
 )
@@ -49,6 +51,9 @@ from airts.world.units.catalog import EntityKind
         SetAIIncomeMultiplierCommand(5),
         SetDeveloperModeCommand(True),
         SetDeveloperModeCommand(False),
+        UpgradeEntityCommand("extractor"),
+        UpgradeEntityCommand("extractor", queued=True),
+        CancelUpgradeCommand("extractor", "enemy"),
         MoveCommand(("unit",), Point(3, 4)),
         SetFormationCommand(("unit",), True),
         SetFormationCommand(("unit",), False),

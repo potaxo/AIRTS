@@ -11,6 +11,7 @@ from tests.performance.frame_pacing import RealFpsProbe, assert_real_fps
 from airts.contracts.commands import CreateDefendCommand, MoveCommand
 from airts.contracts.spatial import Point, PolylineTarget
 from airts.presentation.app import AirtsApp
+from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.opengl_renderer import OpenGLRenderer
 from airts.simulation import Simulation
 from airts.world.map import load_map_data
@@ -175,7 +176,7 @@ def test_sustained_complex_battle_meets_80_real_fps_budget(
         interpolation_samples: set[float] = set()
         for frame_index in range(MEASURED_FRAMES):
             # A real Clock reading fluctuates. It must not force a full 4K UI upload every frame.
-            app.real_fps = 96.0 + frame_index % 9
+            app.presentation_metrics = PresentationMetrics(battlefield_fps=96.0 + frame_index % 9)
             if frame_index % 50 == 0:
                 inspected_index = (frame_index // 50) % UNITS_PER_OWNER
                 app.inspected_entity_id = f"enemy_{inspected_index:04d}"

@@ -360,9 +360,11 @@ def test_defend_distributes_units_across_exact_area_stations() -> None:
     simulation.advance(100)
 
     stations = automation.parameters.stations
-    assert {
-        entity_id: simulation.entities[entity_id].position for entity_id in stations
-    } == stations
+    assert all(
+        simulation.entities[entity_id].position.distance_to(station)
+        <= simulation.DEFEND_STATION_TOLERANCE
+        for entity_id, station in stations.items()
+    )
     assert (
         min(
             first.distance_to(second)

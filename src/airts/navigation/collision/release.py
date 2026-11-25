@@ -85,6 +85,67 @@ def _open_return_lane(
 
 
 @compile_collision
+def _push_passive_queue(
+    leader: int,
+    head: int,
+    links: IntArray,
+    positions: FloatArray,
+    targets: FloatArray,
+    radii: FloatArray,
+    speeds: FloatArray,
+    obstacles: BoolArray,
+    planes: FloatArray,
+    queue_planes: FloatArray,
+    seed: FloatArray,
+    pressure: BoolArray,
+    work: IntArray,
+) -> bool:
+    x, y = positions[leader]
+    dx, dy = targets[leader, 0] - x, targets[leader, 1] - y
+    distance = hypot(dx, dy)
+    if distance <= 1e-9:
+        return False
+    dx, dy = dx / distance, dy / distance
+    step = min(distance, speeds[leader])
+    ahead = False
+    left_wall = right_wall = False
+    count = 0
+    member = head
+    while member != -1:
+        work[2] += 1
+        mx, my = positions[member]
+        if abs((my - y) * dx - (mx - x) * dy) > radii[leader] * 2.0:
+            return False
+        if member != leader:
+            step = min(step, speeds[member] * 0.5)
+            ahead = ahead or (mx - x) * dx + (my - y) * dy > radii[leader]
+        local_count = _static_planes(mx, my, radii[member], speeds[member], obstacles, planes)
+        for index in range(local_count):
+            nx, ny, clearance = planes[index]
+            if clearance > -speeds[member]:
+                lateral = ny * dx - nx * dy
+                left_wall = left_wall or lateral > 0.5
+                right_wall = right_wall or lateral < -0.5
+            if clearance > -step - 1e-8:
+                queue_planes[count] = planes[index]
+                count += 1
+        member = links[member]
+    if not (ahead and left_wall and right_wall):
+        return False
+    vx, vy, feasible = _solve_step(dx * step, dy * step, step, queue_planes, count)
+    if not feasible or vx * dx + vy * dy <= 1e-8:
+        return False
+    # Equal displacement preserves internal clearance. The external-component
+    # check still limits this push before anyone moves.
+    member = head
+    while member != -1:
+        seed[member, 0], seed[member, 1] = vx, vy
+        pressure[member] = True
+        member = links[member]
+    return True
+
+
+@compile_collision
 def _release_contacts(
     positions: FloatArray,
     radii: FloatArray,
@@ -108,6 +169,8 @@ def _release_contacts(
     opening_leaders: BoolArray,
     opening_targets: FloatArray,
     strong: BoolArray,
+    pressure: BoolArray,
+    relay_pressure: bool,
 ) -> tuple[FloatArray, int]:
     """Construct a feasible *joint* seed for compressed contact components.
 
@@ -118,7 +181,7 @@ def _release_contacts(
     """
     size = len(positions)
     seed = np.zeros_like(positions)
-    if not bool(np.any(depths > 1e-8)) and not bool(demands.any()):
+    if not relay_pressure and not bool(np.any(depths > 1e-8)) and not bool(demands.any()):
         return seed, 0
     component_heads = np.full(size, -1, dtype=np.int64)
     component_links = np.full(size, -1, dtype=np.int64)
@@ -202,32 +265,51 @@ def _release_contacts(
     static_capacity = (ceil((maximum_step + maximum_radius) * 2) + 2) ** 2 + 4
     center_planes = np.empty((size * static_capacity, 3), dtype=np.float64)
     for root in range(size):
-        if parents[root] != root or (depths[root] <= 1e-8 and not demands[root]):
+        release_needed = depths[root] > 1e-8 or demands[root]
+        push_queue = relay_pressure and depths[root] <= 1e-8 and component_sizes[root] >= 3
+        if parents[root] != root or not (release_needed or push_queue):
             continue
-        work[1] += 1
-        cx = cy = fx = fy = 0.0
-        count = 0
-        member = component_heads[root]
-        while member != -1:
-            cx += positions[member, 0]
-            cy += positions[member, 1]
-            fx += identity_directions[member, 0]
-            fy += identity_directions[member, 1]
-            count += 1
-            member = component_links[member]
-        cx, cy, fx, fy = cx / count, cy / count, fx / count, fy / count
         center_x = center_y = 0.0
         openings = 0
-        strong_pressure = False
+        drivers = 0
+        driver = -1
         member = component_heads[root]
         while member != -1:
-            strong_pressure = strong_pressure or strong[member]
+            if strong[member]:
+                drivers += 1
+                driver = member
             if opening_leaders[member]:
                 center_x += positions[member, 0] * 2 - opening_targets[member, 0]
                 center_y += positions[member, 1] * 2 - opening_targets[member, 1]
                 openings += 1
             member = component_links[member]
-        if openings == 1 and not strong_pressure and depths[root] <= 1e-8:
+        if (
+            push_queue
+            and drivers == 1
+            and openings == 0
+            and pressure[driver]
+            and _push_passive_queue(
+                driver,
+                component_heads[root],
+                component_links,
+                positions,
+                opening_targets,
+                radii,
+                speeds,
+                obstacles,
+                planes,
+                center_planes,
+                seed,
+                pressure,
+                work,
+            )
+        ):
+            work[1] += 1
+            continue
+        if not release_needed:
+            continue
+        work[1] += 1
+        if openings == 1 and drivers == 0 and depths[root] <= 1e-8:
             member = component_heads[root]
             leader = -1
             while member != -1:
@@ -248,7 +330,17 @@ def _release_contacts(
                 work,
             ):
                 continue
-        if openings and not strong_pressure and depths[root] <= 1e-8:
+        cx = cy = fx = fy = 0.0
+        member = component_heads[root]
+        while member != -1:
+            cx += positions[member, 0]
+            cy += positions[member, 1]
+            fx += identity_directions[member, 0]
+            fy += identity_directions[member, 1]
+            member = component_links[member]
+        count = component_sizes[root]
+        cx, cy, fx, fy = cx / count, cy / count, fx / count, fy / count
+        if openings and drivers == 0 and depths[root] <= 1e-8:
             # The opening body must advance into its vacant destination. An
             # expansion about the centroid instead spends its entire passive
             # cap sending that outside body away from the destination. Moving

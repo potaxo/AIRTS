@@ -114,10 +114,15 @@ diagnostic, without automatic migration.
 | --- | --- |
 | Sandbox save v32 | Current write/read format |
 | Match save v26 | Current write/read format |
-| Sandbox replay v46 / match replay v52 | Current diagnostic formats and exact verification |
+| Sandbox replay v47 / match replay v53 | Current diagnostic formats and exact verification |
 | Other replay/save formats | Explicit rejection; old replays need their original implementation, with no automatic replay migration |
 
-Match v52 uses a wider interval for extra macro planning in large worlds. Its
+The current replay tags cover contact-driven pushing and defense regrouping during repair.
+Current saves still restore positions, routes, repair assignments and defense stations.
+Contact trajectories and subsequent events can change after load. Command recording and exact
+replay verification remain available for the current tags.
+
+Match v52 introduced a wider interval for extra macro planning in large worlds. Its
 command schedule can change construction and production timing after a match is loaded.
 Current save formats still restore their stored routes and production queues.
 

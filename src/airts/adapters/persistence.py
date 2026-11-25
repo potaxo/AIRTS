@@ -578,8 +578,9 @@ def _load_entities(
                     "production_deployment.defend_automation_id",
                 ),
             )
-        if "recovery_request_tick" not in entity or "recovery_released" not in entity:
-            raise PersistenceError("entity recovery request fields are required in v11")
+        for field in ("recovery_request_tick", "recovery_released"):
+            if field not in entity:
+                raise PersistenceError(f"entity.{field} is required")
         request_raw = entity["recovery_request_tick"]
         recovery_request_tick = (
             None

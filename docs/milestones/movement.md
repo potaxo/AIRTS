@@ -212,6 +212,8 @@ gameplay contracts or hardware-performance evidence for AIRTS.
   Same-owner defenses sharing a target
   retain unique stations across membership changes. Ordinary defenses may expand unsafe deployment
   slots without changing their gathering flag; those stations survive saving.
+  A defender temporarily assigned to emergency repair keeps a reserved station through regrouping.
+  Station changes apply to its defense route after repair; its current repair route continues.
 - Ordinary patrol/defense dispatch admits 16 routes per controller per tick; gathering defenses
   may use the global 32-route automation allowance. Every route consumes a global claim. Controllers
   rotate by tick; defense admits front ranks first. Combat visits all members even after exhaustion.
@@ -286,7 +288,7 @@ gameplay contracts or hardware-performance evidence for AIRTS.
 
 ## Contact, yielding and Hold anchors
 
-Idle/Stop units may yield passively without gaining an order or returning to their old position.
+Idle/Stop units can be pushed on contact without gaining an order or returning to their old position.
 Moving units keep their orders. All mobile bodies, including enemies and pathless units, participate.
 Buildings, impassable terrain and map edges are hard constraints. No body may tunnel, exchange
 identity, teleport, or exceed one total per-tick displacement cap. Passive yielding/recovery uses
@@ -299,8 +301,10 @@ share by its mass. Lighter bodies therefore take more correction in otherwise co
 Unequal-mass opposing travel also participates in correction prediction; equal-mass separated
 travel retains direct certification. If walls or a speed circle prevent the lighter body from taking
 its allocated correction, one bounded capacity pass redistributes the unfulfilled share. The extra
-pair evaluation contributes to contact counters. Mass applies to actual travel contact, while
-voluntary lane-opening and weak return remain geometric avoidance rather than impact impulses.
+pair evaluation contributes to contact counters. A direct hit separates aligned bodies with a
+local sideways push. A lighter mover deflects once per step when it hits a heavier resting body.
+Resting bodies take part in displacement prediction at contact. Lookahead is limited to opposing
+moving traffic, with candidate filtering by bucket and heading.
 Mass does not increase speed allowances, override walls or create collision damage.
 Compressed-component release and joint anchor return remain geometric
 safety/recovery solves, rather than impact impulses. [Mass contact tests](../../tests/integration/test_mass_contact.py)
@@ -321,6 +325,11 @@ Unchanged resting bodies need no displacement certificate; approaching bodies st
 against them and wake passive yielding.
 
 ### Coordinated release and return
+
+When one moving unit pushes into a passive queue constrained by walls on both sides, the solver
+can shift the queue in one push. It uses one common displacement capped by the slowest passive
+body and certified against terrain, map edges and external bodies. Internal spacing is preserved
+and displaced units keep their orders and hold anchors.
 
 Compressed contact components and legal components with sustained stalled travel or compatible
 return demand may receive a joint feasible release. Conflicting resting destinations stay waiting

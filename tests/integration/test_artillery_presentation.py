@@ -58,7 +58,7 @@ def test_artillery_arc_and_blast_use_both_backends_without_mutating_simulation(
             "airts.presentation.rendering.pygame.draw.circle", wraps=pygame.draw.circle
         ) as draw:
             app._software_renderer.draw_projectiles(app, surface)
-        packed, _, _, _ = builder._build_projectiles(app, (0, 0), 1)
+        packed, *_ = builder._build_projectiles(app, (0, 0), 1)
         values = array("f")
         values.frombytes(packed)
         shapes = [values[i : i + SHAPE_FLOATS] for i in range(0, len(values), SHAPE_FLOATS)]

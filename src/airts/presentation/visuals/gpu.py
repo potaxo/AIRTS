@@ -118,7 +118,7 @@ class EntityView(Protocol):
 
 def pack_entities(
     view: EntityView, *, entity_ids: tuple[str, ...] | None = None
-) -> tuple[bytes, int, int, int]:
+) -> tuple[bytes, int, int, int, bool]:
     """Upload state once, without CPU expansion into per-sprite/per-bar primitives."""
     values = bytearray()
     pack = _ENTITY_RECORD.pack
@@ -138,6 +138,7 @@ def pack_entities(
     else:
         view.facing.seed_births(simulation, entity_ids)
     units = buildings = selected_units = 0
+    interpolates = False
     for key, entity in items:
         kind = entity.kind
         style = (
@@ -158,6 +159,12 @@ def pack_entities(
                 + tail[28:]
             )
         pose = view.facing.pose(key)
+        interpolates = (
+            interpolates
+            or (center is not previous and center != previous)
+            or pose.previous_body != pose.body
+            or pose.previous_weapon != pose.weapon
+        )
         max_health = style.base_health if entity.upgrade.tier == 1 else entity.profile.max_health
         values.extend(
             pack(
@@ -177,7 +184,7 @@ def pack_entities(
         units += movable
         buildings += not movable
         selected_units += movable and is_selected
-    return bytes(values), units, buildings, selected_units
+    return bytes(values), units, buildings, selected_units, interpolates
 
 
 ENTITY_VERTEX_SHADER = """

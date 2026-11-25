@@ -108,6 +108,40 @@ def test_auto_repair_survives_save_and_returns_after_disabling(tmp_path: Path, k
     assert restored.assignments["unit_02"] == automation_id
 
 
+def test_defend_regroup_keeps_repairing_members_station(tmp_path: Path) -> None:
+    simulation = Simulation(runtime_map())
+    defender = "unit_02"
+    result = simulation.execute(
+        CreateDefendCommand(
+            ("unit_01", defender, "unit_03"), PointTarget(Point(20.5, 3.5)), auto_repair=True
+        )
+    )
+    assert result.accepted
+    defense_id = result.automation_id or ""
+    simulation.advance(180)
+    simulation.entities[defender].health = 10
+    simulation.advance(3)
+    repair_id = simulation.assignments[defender]
+    assert simulation.suspended_assignments[defender] == defense_id
+    repair_path = simulation.entities[defender].path.copy()
+    assert repair_path
+
+    assert simulation.execute(MoveCommand(("unit_01",), Point(3.5, 2.5))).accepted
+    assert simulation.entities[defender].path == repair_path
+    simulation.advance()
+    defense = simulation.automations[defense_id]
+    assert isinstance(defense.parameters, DefendParameters)
+    assert set(defense.parameters.stations) == {defender, "unit_03"}
+
+    path = tmp_path / "regroup-during-repair.json"
+    save_simulation(simulation, path)
+    restored = load_simulation(path)
+    restored.advance(200)
+    assert restored.automations[repair_id].status is AutomationStatus.COMPLETED
+    assert restored.assignments[defender] == defense_id
+    assert restored.entities[defender].defend_arrived
+
+
 @pytest.mark.parametrize("override", ["pause", "move"])
 def test_auto_repair_respects_pause_and_manual_override(override: str) -> None:
     simulation = Simulation(runtime_map())

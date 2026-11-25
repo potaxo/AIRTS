@@ -16,6 +16,7 @@ from airts.contracts.automations import (
     PatrolParameters,
     ProductionParameters,
 )
+from airts.presentation.metrics import PresentationMetrics
 from airts.presentation.ui import theme
 from airts.presentation.ui.drawing import UiPainter
 from airts.simulation import Simulation
@@ -52,7 +53,7 @@ class AutomationsView(Protocol):
     left_panel_rect: pygame.Rect
     notice: str
     paused: bool
-    real_fps: float
+    presentation_metrics: PresentationMetrics
     right_panel_rect: pygame.Rect
     simulation: Simulation
     show_ai_income: bool
@@ -104,6 +105,19 @@ def scroll_from_pointer(view: AutomationsView, pointer_y: int) -> None:
     view.automation_panel.scroll = round(fraction * maximum)
 
 
+def draw_battlefield_status(view: AutomationsView, screen: pygame.Surface) -> pygame.Rect:
+    region = pygame.Rect(16, 42, view.left_panel_rect.right - 24, 22)
+    screen.fill(theme.PANEL, region)
+    metrics = view.presentation_metrics
+    status = (
+        "Real FPS   -- | PAUSED"
+        if view.paused
+        else f"Real FPS {metrics.battlefield_fps:4.0f} | Sim {metrics.simulation_tps:.1f} TPS"
+    )
+    view.ui.small_text(screen, status, region.topleft, theme.MUTED)
+    return region
+
+
 def draw_panel(
     view: AutomationsView,
     screen: pygame.Surface,
@@ -125,12 +139,7 @@ def draw_panel(
     view.ui.button(screen, pause, "Resume" if view.paused else "Pause")
     view._command_buttons.append((pause, "pause_game"))
     y += 28
-    view.ui.small_text(
-        screen,
-        f"Real FPS {view.real_fps:4.0f} | {'PAUSED' if view.paused else 'RUNNING'}",
-        (x, y),
-        theme.MUTED,
-    )
+    draw_battlefield_status(view, screen)
     y += 25
     for line in view.ui.wrap(view.notice, 46):
         view.ui.small_text(screen, line, (x, y), theme.ACCENT)

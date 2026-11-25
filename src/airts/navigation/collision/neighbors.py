@@ -1,9 +1,12 @@
 """Collision neighbors algorithms; numeric inputs contain no world mutation."""
 
-from math import floor, hypot
+from math import floor
 
 from airts.navigation.collision._compile import compile_collision
-from airts.world._numeric import BoolArray, FloatArray, IntArray
+from airts.world._numeric import FloatArray, IntArray
+
+_FORWARD = 1
+_BACKWARD = 2
 
 
 @compile_collision
@@ -51,38 +54,25 @@ def _neighbors(
 
 
 @compile_collision
-def _steering_obstacles(
+def _opposing_traffic(
     key: int,
     x: float,
     y: float,
     dx: float,
     dy: float,
-    distance: float,
-    step: float,
     positions: FloatArray,
-    goals: FloatArray,
-    radii: FloatArray,
     headings: FloatArray,
-    active: BoolArray,
-    stationary: BoolArray,
+    directions: IntArray,
+    bucket_directions: IntArray,
     heads: IntArray,
     links: IntArray,
     columns: int,
     rows: int,
     bucket_size: float,
-    direction_axis: int,
-    has_opposing: bool,
-    has_stationary: bool,
-) -> tuple[bool, bool]:
-    seek_opposing = has_opposing and hypot(goals[key, 0] - x, goals[key, 1] - y) > 3.0
-    seek_idle = has_stationary and distance > step
-    if not seek_opposing and not seek_idle:
-        return False, False
-    radius = 4.0 if seek_opposing else 2.0
-    opposing = idle = False
+    opposing_direction: int,
+) -> bool:
+    radius = 4.0
     gx, gy = headings[key]
-    idle_min_x, idle_max_x = floor((x - 2.0) / bucket_size), floor((x + 2.0) / bucket_size)
-    idle_min_y, idle_max_y = floor((y - 2.0) / bucket_size), floor((y + 2.0) / bucket_size)
     for by in range(
         max(0, floor((y - radius) / bucket_size)),
         min(rows - 1, floor((y + radius) / bucket_size)) + 1,
@@ -91,33 +81,19 @@ def _steering_obstacles(
             max(0, floor((x - radius) / bucket_size)),
             min(columns - 1, floor((x + radius) / bucket_size)) + 1,
         ):
-            if (opposing or not seek_opposing) and not (
-                idle_min_x <= bx <= idle_max_x and idle_min_y <= by <= idle_max_y
-            ):
+            bucket = by * columns + bx
+            if not bucket_directions[bucket] & opposing_direction:
                 continue
-            other = heads[by * columns + bx]
+            other = heads[bucket]
             while other != -1:
-                ox, oy = positions[other, 0] - x, positions[other, 1] - y
-                squared = ox * ox + oy * oy
-                if seek_opposing and not opposing and active[other] and squared <= 16.0:
+                if directions[other] == opposing_direction:
+                    ox, oy = positions[other, 0] - x, positions[other, 1] - y
                     hx, hy = headings[other]
                     if (
-                        (headings[other, direction_axis] >= 0)
-                        != (headings[key, direction_axis] >= 0)
+                        ox * ox + oy * oy <= 16.0
                         and hx * gx + hy * gy < -0.5
-                        and hypot(
-                            goals[other, 0] - positions[other, 0],
-                            goals[other, 1] - positions[other, 1],
-                        )
-                        > 3.0
-                        and ox * dx + oy * dy > 0
+                        and ox * dx + oy * dy > 0.0
                     ):
-                        opposing = True
-                if seek_idle and not idle and stationary[other] and squared <= 4.0:
-                    along, across = (ox * dx + oy * dy) / distance, (ox * dy - oy * dx) / distance
-                    if 0 < along < 2.0 and abs(across) < radii[key] + radii[other]:
-                        idle = True
-                if (opposing or not seek_opposing) and (idle or not seek_idle):
-                    return opposing, idle
+                        return True
                 other = links[other]
-    return opposing, idle
+    return False
